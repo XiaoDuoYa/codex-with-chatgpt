@@ -139,6 +139,17 @@ commands (both are cheap / cached; never mention them unless an update exists):
   "检测到 Codex with ChatGPT 有新版本，我先更新一下（约 1 分钟），随后继续你的任务。"
   Then run the update workflow below, and CONTINUE the original task afterwards.
 
+## Fixed-domain tunnel (optional setup)
+
+If the machine was configured with `c2c tunnel named …` (a user-owned
+Cloudflare tunnel; `c2c tunnel status` shows the mode), the public URL never
+changes: restarts, updates and new sessions do NOT require touching the
+connector or re-pairing, and doctor should always report
+`chatgptRepair.needed: false`. If doctor on such a machine reports an address
+change, `tunnel.json` was lost or broken — restore it with the same
+`c2c tunnel named` values as before, then `c2c restart --tunnel`. Never fall
+back to `c2c tunnel quick` on your own; ask the user first.
+
 ## Workflow: update（"更新 Codex with ChatGPT"，or triggered by the daily check）
 
 Inside the checkout directory (see Locations):
@@ -358,9 +369,10 @@ the previous public address is gone. Doctor already started a new one.
 | Symptom | Action |
 | --- | --- |
 | Bridge not running | `c2c start` (doctor does this automatically) |
-| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `chatgptRepair.needed`, tell the user the message, then update THIS workspace's connector only (`connectorName`). |
+| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `chatgptRepair.needed`, tell the user the message, then update THIS workspace's connector only (`connectorName`). On a fixed-domain machine (see below) the URL never changes — suspect the bridge, not the address. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Port conflict | handled automatically; never surface to the user |
 | Every new chat “repairs” / cannot write the log or settings directory | `c2c sandbox-allow --json` (once). Do not ask the user. |
 | cloudflared missing | install it yourself (brew/winget), then retry |
+| Fixed-domain machine reports an address change | `tunnel.json` is lost or broken — restore it with `c2c tunnel named …` (same values as before), then `c2c restart --tunnel`. Never edit the connector for this. |
