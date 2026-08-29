@@ -270,9 +270,40 @@ export class AuthStore {
   }
 }
 
-export function filterScopes(requested: string | undefined): string[] {
-  if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
+export type ScopeValidationResult =
+  | { ok: true; scopes: Scope[] }
+  | { ok: false; error: "invalid_scope"; description: string };
+
+/**
+ * Validates requested scopes against SUPPORTED_SCOPES.
+ * Fail-closed: returns error if any requested scope is unknown/unsupported.
+ * If scope is omitted or empty, defaults to all supported scopes.
+ */
+export function validateAndFilterScopes(requested: string | undefined): ScopeValidationResult {
+  if (requested === undefined || requested.trim() === "") {
+    return { ok: true, scopes: [...SUPPORTED_SCOPES] };
+  }
   const asked = requested.split(/[\s+]+/).filter(Boolean);
-  const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  if (asked.length === 0) {
+    return { ok: true, scopes: [...SUPPORTED_SCOPES] };
+  }
+  const invalid: string[] = [];
+  const valid: Scope[] = [];
+  for (const s of asked) {
+    if ((SUPPORTED_SCOPES as readonly string[]).includes(s)) {
+      if (!valid.includes(s as Scope)) {
+        valid.push(s as Scope);
+      }
+    } else {
+      invalid.push(s);
+    }
+  }
+  if (invalid.length > 0) {
+    return {
+      ok: false,
+      error: "invalid_scope",
+      description: `Unsupported scope(s): ${invalid.join(" ")}`,
+    };
+  }
+  return { ok: true, scopes: valid };
 }
