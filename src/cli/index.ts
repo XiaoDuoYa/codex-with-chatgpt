@@ -10,9 +10,22 @@ import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { ensureMcpBridgeAndTunnel } from "../transport/mcp.js";
+import { detectTunnelBinaries } from "../tunnel/detect.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
+import {
+  CHATGPT_CREATE_CONNECTOR_URL,
+  CHATGPT_DEVELOPER_MODE_URL,
+  CHATGPT_PLUGINS_URL,
+  connectorAction,
+  connectorNameFor,
+  mcpUrlFromPublic,
+  readLastEndpoint,
+  reclaimUserMessage,
+  writeLastEndpoint,
+  type LastEndpoint,
+} from "../config/endpoint.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { registerTaskCommands } from "./task.js";
 
@@ -26,6 +39,31 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
+}
+
+function persistWorkspaceEndpoint(opts: {
+  workspaceId: string;
+  workspaceName: string;
+  port: number;
+  publicUrl: string | null;
+  mcpUrl: string;
+  previous?: LastEndpoint | null;
+}): string {
+  const previous = opts.previous ?? readLastEndpoint(opts.workspaceId);
+  const connectorName = connectorNameFor({
+    workspaceName: opts.workspaceName,
+    workspaceId: opts.workspaceId,
+    previousName: previous?.connectorName,
+    hadEndpointBefore: Boolean(previous),
+  });
+  writeLastEndpoint({
+    workspaceId: opts.workspaceId,
+    port: opts.port,
+    publicUrl: opts.publicUrl,
+    mcpUrl: opts.mcpUrl,
+    connectorName,
+  });
+  return connectorName;
 }
 
 function trySandboxAllow():
@@ -105,8 +143,17 @@ program
     const root = resolveWorkspace(opts.workspace);
     try {
       const { runtime, info, mcpUrl } = await ensureMcpBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const connectorName = mcpUrl
+        ? persistWorkspaceEndpoint({
+            workspaceId: info.workspaceId,
+            workspaceName: info.workspaceName,
+            port: runtime.port,
+            publicUrl: info.publicUrl,
+            mcpUrl,
+          })
+        : readLastEndpoint(info.workspaceId)?.connectorName;
       if (opts.json) {
-        say(JSON.stringify({ ok: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl }));
+        say(JSON.stringify({ ok: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl, connectorName }));
         return;
       }
       check(`当前项目已识别（${info.workspaceName}）`);
@@ -136,6 +183,20 @@ program
       }
       const sandbox = trySandboxAllow();
       const { runtime, info, mcpUrl } = await ensureMcpBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const connectorName = mcpUrl
+        ? persistWorkspaceEndpoint({
+            workspaceId: info.workspaceId,
+            workspaceName: info.workspaceName,
+            port: runtime.port,
+            publicUrl: info.publicUrl,
+            mcpUrl,
+          })
+        : connectorNameFor({
+            workspaceName: info.workspaceName,
+            workspaceId: info.workspaceId,
+            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
+            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
+          });
       const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
       if (opts.json) {
         say(
@@ -143,6 +204,7 @@ program
             ok: true,
             workspaceId: info.workspaceId,
             workspaceName: info.workspaceName,
+            connectorName,
             mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
             local: mcpUrl === null,
             pairingCode: pairingResult.code,
@@ -303,34 +365,143 @@ program
       }
     }
 
-    // Tunnel + remote reachability
+    // Tunnel + remote reachability. If this workspace once had a public URL,
+    // a full quit reclaims it — restore a tunnel and tell the Skill to update
+    // the existing ChatGPT connector (never treat that as "local mode").
+    const lastEndpoint = workspace ? readLastEndpoint(workspace.id) : null;
+    const connectorName = workspace
+      ? connectorNameFor({
+          workspaceName: workspace.name,
+          workspaceId: workspace.id,
+          previousName: lastEndpoint?.connectorName,
+          hadEndpointBefore: Boolean(lastEndpoint),
+        })
+      : "Codex with ChatGPT";
+    let chatgptRepair: {
+      needed: boolean;
+      reason?: string;
+      connectorAction: "none" | "create" | "update";
+      connectorName: string;
+      userMessage?: string;
+      mcpUrl: string | null;
+      previousMcpUrl: string | null;
+      pairingCode?: string;
+      pairingExpiresAt?: number;
+      pages: {
+        developerMode: string;
+        plugins: string;
+        createConnector: string;
+      };
+    } = {
+      needed: false,
+      connectorAction: "none",
+      connectorName,
+      mcpUrl: lastEndpoint?.mcpUrl ?? null,
+      previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+      pages: {
+        developerMode: CHATGPT_DEVELOPER_MODE_URL,
+        plugins: CHATGPT_PLUGINS_URL,
+        createConnector: CHATGPT_CREATE_CONNECTOR_URL,
+      },
+    };
+
     if (runtime) {
-      const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (info.tunnel.running && info.tunnel.url) {
+      let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      const expectedPublic = Boolean(lastEndpoint?.publicUrl);
+      let currentUrl = info.publicUrl ?? info.tunnel.url;
+      let healthy = false;
+      if (currentUrl) {
         try {
-          const response = await fetch(`${info.tunnel.url}/health`, { signal: AbortSignal.timeout(8000) });
-          report.tunnel = { ok: response.ok, detail: info.tunnel.url };
+          const response = await fetch(`${currentUrl}/health`, { signal: AbortSignal.timeout(8000) });
+          healthy = response.ok;
         } catch {
-          report.tunnel = { ok: false, detail: "公网地址无法访问" };
-          if (opts.fix) {
-            try {
-              const restarted = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
-              if (restarted.url) {
-                report.tunnel = { ok: true, detail: restarted.url };
-                results.push("已自动重启安全连接（地址可能已更新）");
-              }
-            } catch {
-              // leave as failed
+          healthy = false;
+        }
+      }
+
+      if ((!currentUrl || !healthy) && opts.fix && (expectedPublic || info.tunnel.running)) {
+        try {
+          const binaries = detectTunnelBinaries();
+          if (!binaries.cloudflared) {
+            report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
+          } else {
+            const started = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
+            if (started.url) {
+              currentUrl = started.url;
+              healthy = true;
+              info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+              results.push("已重新建立安全连接（地址已更换）");
             }
           }
+        } catch (error) {
+          report.tunnel = { ok: false, detail: (error as Error).message };
         }
-      } else {
-        report.tunnel = { ok: true, detail: "未启用（本地模式）" };
       }
+
+      if (currentUrl && healthy) {
+        report.tunnel = { ok: true, detail: currentUrl };
+        const nextMcp = mcpUrlFromPublic(currentUrl);
+        const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
+        const boundName = nextMcp
+          ? persistWorkspaceEndpoint({
+              workspaceId: info.workspaceId,
+              workspaceName: info.workspaceName,
+              port: runtime.port,
+              publicUrl: currentUrl,
+              mcpUrl: nextMcp,
+              previous: lastEndpoint,
+            })
+          : connectorName;
+        chatgptRepair = {
+          ...chatgptRepair,
+          needed: action === "update",
+          reason: action === "update" ? "address_reclaimed" : undefined,
+          connectorAction: action,
+          connectorName: boundName,
+          userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
+          mcpUrl: nextMcp,
+          previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+        };
+        if (action === "update") {
+          try {
+            const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+            chatgptRepair.pairingCode = pairing.code;
+            chatgptRepair.pairingExpiresAt = pairing.expiresAt;
+            results.push(`已生成新的配对码，需要更新「${boundName}」`);
+          } catch (error) {
+            report.oauth = { ok: false, detail: (error as Error).message };
+          }
+        }
+      } else if (expectedPublic) {
+        report.tunnel = report.tunnel ?? { ok: false, detail: "安全连接未恢复" };
+        chatgptRepair = {
+          ...chatgptRepair,
+          needed: true,
+          reason: "address_reclaimed",
+          connectorAction: "update",
+          connectorName,
+          userMessage: reclaimUserMessage(connectorName),
+          mcpUrl: null,
+        };
+      } else if (!currentUrl) {
+        report.tunnel = { ok: true, detail: "未启用（本地模式）" };
+      } else {
+        report.tunnel = { ok: false, detail: "公网地址无法访问" };
+      }
+    } else if (lastEndpoint?.publicUrl) {
+      report.tunnel = { ok: false, detail: "安全连接未运行" };
+      chatgptRepair = {
+        ...chatgptRepair,
+        needed: true,
+        reason: "address_reclaimed",
+        connectorAction: "update",
+        connectorName,
+        userMessage: reclaimUserMessage(connectorName),
+      };
     }
 
     if (opts.json) {
-      say(JSON.stringify({ report, repairs: results }));
+      say(JSON.stringify({ report, repairs: results, chatgptRepair }));
       return;
     }
     say(`${PRODUCT_NAME} Doctor`);
@@ -355,7 +526,13 @@ program
     }
     for (const repair of results) say(`· ${repair}`);
     say("");
-    say(allOk ? "Everything looks good." : "仍有问题未解决，可尝试 `c2c restart --tunnel`。");
+    if (chatgptRepair.needed && chatgptRepair.userMessage) {
+      say(chatgptRepair.userMessage);
+      if (chatgptRepair.mcpUrl) say(`新的连接地址：${chatgptRepair.mcpUrl}`);
+      if (chatgptRepair.pairingCode) say(`配对码：${chatgptRepair.pairingCode}`);
+      say("");
+    }
+    say(allOk && !chatgptRepair.needed ? "Everything looks good." : chatgptRepair.needed ? "本地已就绪，还需要在 ChatGPT 更新现有连接。" : "仍有问题未解决，可尝试 `c2c restart --tunnel`。");
     if (!allOk) process.exitCode = 1;
   });
 

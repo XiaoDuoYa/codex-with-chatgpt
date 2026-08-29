@@ -143,11 +143,10 @@ export function gitDiff(root: string, opts: GitDiffOptions = {}, relPath?: strin
   if (mode === "staged") base.push("--cached");
   if (mode === "head") base.push("HEAD");
   base.push("--");
-  if (relPath) {
-    base.push(relPath);
-  } else {
-    base.push(".", ...SENSITIVE_DIFF_EXCLUDES);
-  }
+  // Keep the sensitive-file exclusions even when the caller narrows the diff
+  // to a directory. Otherwise a request for e.g. `src` could include
+  // `src/.env` or another secret nested below that directory.
+  base.push(relPath || ".", ...SENSITIVE_DIFF_EXCLUDES);
 
   const result = runGit(root, base);
   if (!result.ok && /not a git repository/i.test(result.stderr)) {

@@ -103,6 +103,14 @@ describe("gitDiff pagination", () => {
     git(repo, "rm", "-f", "--cached", ".env");
   });
 
+  it("excludes sensitive files from directory-scoped diffs", () => {
+    write(repo, "private/.env", "SECRET=1\n");
+    git(repo, "add", "-f", "private/.env");
+    const diff = gitDiff(repo, { mode: "staged" }, "private");
+    expect(diff.diff).not.toContain("SECRET=1");
+    git(repo, "rm", "-f", "--cached", "private/.env");
+  });
+
   it("handles non-repos gracefully", () => {
     const diff = gitDiff(plain, { mode: "unstaged" });
     expect(diff.isRepo).toBe(false);
