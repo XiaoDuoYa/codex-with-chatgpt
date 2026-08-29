@@ -36,7 +36,14 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
 
   const logDir = ensureDir(path.join(getStateDir(), "logs"));
   const logFile = path.join(logDir, `bridge-${workspace.id}.out.log`);
-  const out = fs.openSync(logFile, "a");
+  const out = fs.openSync(logFile, "a", 0o600);
+  try {
+    // Existing files may have been created with a permissive umask. Keep the
+    // daemon's inherited stdout/stderr log owner-readable only.
+    fs.chmodSync(logFile, 0o600);
+  } catch {
+    // Windows / filesystems without chmod semantics
+  }
   const { cmd, args } = cliEntry();
   const child = spawn(
     cmd,
