@@ -45,7 +45,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       const child = spawn(
         bin,
         ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
-        { stdio: ["ignore", "pipe", "pipe"] }
+        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
       );
       this.child = child;
       this.url = null;
