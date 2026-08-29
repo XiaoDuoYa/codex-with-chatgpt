@@ -121,8 +121,14 @@ export class GitHubTransport implements C2CTransport {
       return { ok: false, kind: this.kind, code: validation.code, paths: validation.paths };
     }
 
-    repository.stagePaths(validation.paths);
-    const codeHeadCommit = repository.commit(`c2c: execute ${snapshot.taskId} iteration ${snapshot.iteration}`);
+    let codeHeadCommit = snapshot.codeHeadCommit;
+    if (validation.paths.length > 0) {
+      repository.stagePaths(validation.paths);
+      codeHeadCommit = repository.commit(`c2c: execute ${snapshot.taskId} iteration ${snapshot.iteration}`);
+    }
+    if (!codeHeadCommit) {
+      throw new Error("A code head commit is required before publishing task metadata.");
+    }
     const next: TaskSnapshot = {
       ...snapshot,
       codeHeadCommit,
