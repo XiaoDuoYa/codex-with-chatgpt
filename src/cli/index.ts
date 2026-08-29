@@ -3,15 +3,27 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { startBridge } from "../bridge/server.js";
-import { findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
+import { startBridge, type Bridge } from "../bridge/server.js";
+import {
+  findLiveBridge,
+  findLiveHost,
+  type RuntimeState,
+  type HostState,
+} from "../bridge/runtime.js";
+import {
+  acquireHostLock,
+  adminFetch,
+  ensureBridge,
+  hostRuntime,
+  stopBridge,
+  type AdminInfo,
+} from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
 import { Logger } from "../logger/index.js";
-import { getStateDir } from "../config/paths.js";
+import { DEFAULT_PORT, getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
@@ -86,25 +98,12 @@ interface PairingResponse {
   expiresAt: number;
 }
 
-interface AdminInfo {
-  workspaceId: string;
-  workspaceName: string;
-  workspaceRoot: string;
-  port: number;
-  publicUrl: string | null;
-  tunnel: { running: boolean; url: string | null; provider: string };
-  tokenCount: number;
-  pairingActive: boolean;
-  pid: number;
-  startedAt: string;
-}
-
 async function ensureBridgeAndTunnel(
   workspaceRoot: string,
   opts: { tunnel: boolean }
 ): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
   const { runtime } = await ensureBridge(workspaceRoot);
-  let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+  let info = await adminFetch<AdminInfo>(runtime, "GET", `/admin/info?workspace=${runtime.workspaceId}`);
   let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
   if (opts.tunnel && !info.publicUrl) {
     const binaries = detectTunnelBinaries();
@@ -115,7 +114,7 @@ async function ensureBridgeAndTunnel(
     }
     const result = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
     if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
-    info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+    info = await adminFetch<AdminInfo>(runtime, "GET", `/admin/info?workspace=${runtime.workspaceId}`);
     mcpUrl = `${result.url}/mcp`;
   }
   return { runtime, info, mcpUrl };
@@ -131,16 +130,53 @@ program
 
 program
   .command("serve", { hidden: true })
-  .description("Run the bridge in the foreground (internal)")
+  .description("Run the bridge host in the foreground (internal)")
   .requiredOption("--workspace <path>")
   .option("--port <port>", "preferred port")
   .action(async (opts: { workspace: string; port?: string }) => {
+    // One host per machine: parallel sessions register with the running host
+    // instead of starting competing bridges (which would split the tunnel).
+    let lock = acquireHostLock();
+    if (!lock) {
+      // The recorded holder is alive: it may simply still be starting up.
+      // Wait a bounded time for it to become reachable. Locks are fully
+      // fail-closed — an existing lock file is never removed automatically
+      // (a slow starter losing its lock would let two hosts race for the
+      // fixed public address), so this fails with remediation instead.
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (await findLiveHost()) return; // host is up; our CLI will register with it
+        lock = acquireHostLock();
+        if (lock) break;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+      if (!lock) {
+        if (await findLiveHost()) return; // joined late
+        say(
+          "Another bridge process holds the host lock but never became reachable. " +
+            "If no bridge is actually running, remove the stale lock file " +
+            "runtime/host.lock in the c2c state directory and retry."
+        );
+        process.exitCode = 1;
+        return;
+      }
+    }
     const logger = new Logger({ name: "bridge", console: true });
-    const bridge = await startBridge({
-      workspaceRoot: resolveWorkspace(opts.workspace),
-      port: opts.port ? parseInt(opts.port, 10) : undefined,
-      logger,
-    });
+    let bridge: Bridge;
+    try {
+      bridge = await startBridge({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        port: opts.port ? parseInt(opts.port, 10) : undefined,
+        logger,
+        // The lock must be released through EVERY shutdown path (signals,
+        // c2c stop, last workspace unregistered) — a stranded lock would
+        // block the next start under the fail-closed lock model.
+        onShutdown: () => lock.release(),
+      });
+    } catch (error) {
+      lock.release();
+      throw error;
+    }
     const shutdown = (): void => {
       void bridge.close().then(() => process.exit(0));
     };
@@ -215,7 +251,9 @@ program
             previousName: readLastEndpoint(info.workspaceId)?.connectorName,
             hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
           });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing", 60_000, {
+        workspaceId: info.workspaceId,
+      });
       if (opts.json) {
         say(
           JSON.stringify({
@@ -292,7 +330,7 @@ program
       else say("Bridge 未运行。使用 `c2c start` 启动。");
       return;
     }
-    const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+    const info = await adminFetch<AdminInfo>(runtime, "GET", `/admin/info?workspace=${runtime.workspaceId}`);
     if (opts.json) {
       say(JSON.stringify({ ok: true, running: true, ...info }));
       return;
@@ -307,7 +345,6 @@ program
   });
 
 // ---------------------------------------------------------------- doctor
-
 program
   .command("doctor")
   .description("Diagnose and auto-repair the connection")
@@ -355,7 +392,13 @@ program
     // Bridge
     let runtime: RuntimeState | null = null;
     if (workspace) {
-      runtime = await findLiveBridge(workspace.id);
+      // Prefer the host record: a stale per-workspace runtime file can point
+      // at the right port with an outdated admin token.
+      const hostState = await findLiveHost();
+      if (hostState && hostState.workspaces.includes(workspace.id)) {
+        runtime = hostRuntime(hostState, workspace);
+      }
+      if (!runtime) runtime = await findLiveBridge(workspace.id);
       if (!runtime && opts.fix) {
         try {
           runtime = (await ensureBridge(root)).runtime;
@@ -424,7 +467,7 @@ program
     };
 
     if (runtime) {
-      let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      let info = await adminFetch<AdminInfo>(runtime, "GET", `/admin/info?workspace=${workspace!.id}`);
       const expectedPublic = Boolean(lastEndpoint?.publicUrl);
       let currentUrl = info.publicUrl ?? info.tunnel.url;
       let healthy = false;
@@ -564,7 +607,9 @@ program
   .action(async (opts: { workspace?: string; json: boolean }) => {
     try {
       const { runtime } = await ensureBridge(resolveWorkspace(opts.workspace));
-      const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+      const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing", 60_000, {
+        workspaceId: runtime.workspaceId,
+      });
       if (opts.json) say(JSON.stringify({ ok: true, pairingCode: pairing.code, expiresAt: pairing.expiresAt }));
       else {
         say(`配对码：${pairing.code}`);
@@ -584,7 +629,7 @@ program
     const workspace = new Workspace(root);
     const runtime = await findLiveBridge(workspace.id);
     if (runtime) {
-      await adminFetch(runtime, "POST", "/admin/revoke-all");
+      await adminFetch(runtime, "POST", "/admin/revoke-all", 60_000, { workspaceId: workspace.id });
     } else {
       // bridge not running: revoke directly in the persisted store
       new AuthStore(workspace.id).revokeAll();
