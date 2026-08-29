@@ -24,7 +24,7 @@ const KNOWN_SECTIONS = new Set([
 
 export function parseC2CMessage(text: string): ParseResult {
   const normalized = text.replace(/\r\n?/g, "\n");
-  const lines = normalized.split("\n");
+  const lines = normalized.split("\n").map(normalizeProtocolFieldLine);
   const stateLine = lines.findIndex((line) => /^\s*state\s*:/i.test(line));
   const diagnostics: ProtocolDiagnostic[] = [];
 
@@ -108,6 +108,16 @@ export function parseC2CMessage(text: string): ParseResult {
   }
 
   return { ok: true, message: parsed.data, diagnostics };
+}
+
+function normalizeProtocolFieldLine(line: string): string {
+  const field = /^(\s*)([A-Za-z][A-Za-z0-9]*(?:\\_[A-Za-z0-9]+)*)(\s*:)(.*)$/.exec(line);
+  if (!field) return line;
+
+  const name = field[2].replace(/\\_/g, "_");
+  let value = field[4].replace(/\\\s*$/, "");
+  if (HEADER_NAMES.has(name.toUpperCase())) value = value.replace(/\\_/g, "_");
+  return `${field[1]}${name}${field[3]}${value}`;
 }
 
 function warning(code: string, message: string): ProtocolDiagnostic {

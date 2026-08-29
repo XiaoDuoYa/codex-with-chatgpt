@@ -111,4 +111,24 @@ NEEDS: Repository permission.`);
       NEEDS: "Repository permission.",
     });
   });
+
+  it("accepts Markdown-escaped header names and copied line continuations", () => {
+    const result = parseC2CMessage(`STATE: PLAN\\
+TASK\\_ID: c2c\\_160f6b5a\\
+ITERATION: 1
+
+ACTIONS:
+- Change src/index.js.
+
+TESTS:
+- Run npm test.
+
+SUCCESS\\_CRITERIA:
+- The endpoint passes.`);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.message).toMatchObject({ state: "PLAN", taskId: "c2c_160f6b5a", iteration: 1 });
+    expect(result.message.sections.SUCCESS_CRITERIA).toContain("endpoint passes");
+  });
 });
