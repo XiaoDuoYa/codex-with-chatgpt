@@ -1,0 +1,32 @@
+STATE: PLAN\
+TASK\_ID: c2c\_160f6b5a\
+ITERATION: 1
+
+ACTIONS:
+
+- Update `src/index.js` to add a minimal HTTP health endpoint using Node.js built-in `http`, avoiding new dependencies.
+- Implement `GET /health` returning HTTP `200`, JSON content type, and a stable body such as `{"status":"ok"}`.
+- Export the server factory/handler so the endpoint can be tested without spawning an external process, while preserving the existing `add` export.
+- When `src/index.js` is executed directly, start the HTTP server on `process.env.PORT` or a sensible default.
+- Extend the existing smoke test rather than introducing a new test framework; the repository currently runs tests with plain Node.js.
+- Keep the change narrowly scoped to the health endpoint and its automated verification.
+
+TESTS:
+
+- Run `npm test`.
+- Verify the existing `add(1, 2) === 3` smoke assertion still passes.
+- Start the HTTP server on an ephemeral port during the test.
+- Request `GET /health`.
+- Assert HTTP status is `200`.
+- Assert the response is JSON.
+- Assert the response body reports healthy status, expected as `{"status":"ok"}`.
+- Close the test server reliably after assertions.
+
+SUCCESS\_CRITERIA:
+
+- `GET /health` is implemented and returns HTTP `200`.
+- The endpoint returns valid JSON with a deterministic healthy-state payload.
+- Existing functionality remains intact.
+- No additional runtime dependency is required.
+- `npm test` exits successfully with both the existing smoke check and health-endpoint test passing.
+- Changes remain confined to the minimum files required for the endpoint and tests.
