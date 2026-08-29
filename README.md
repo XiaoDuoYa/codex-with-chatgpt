@@ -151,6 +151,19 @@ The only step that may need you: logging into ChatGPT (and nothing else).
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
 
+## One bridge per machine · 一台电脑一个 Bridge
+
+**EN** — All workspaces on a machine share a single bridge process. Open two,
+three, ten parallel coding sessions (across agent tools too):
+the first one starts the bridge, the others register their workspace with it
+automatically. Each ChatGPT connector still gets its own OAuth tokens bound
+to exactly one workspace, so a shared bridge never means shared access.
+
+**中文** — 一台电脑上的所有工作区共用一个 Bridge 进程。同时开两个、三个、
+十个并行的编码会话（跨工具也行），第一个会话启动 Bridge，
+其余会话自动把自己的工作区注册进去。每个 ChatGPT 连接器的令牌仍然只绑定
+自己那一个工作区——共享的是进程，不是权限。
+
 ## Security model (short version)
 
 - **Read-only by construction**: write/delete/shell/commit tools simply do not

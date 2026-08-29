@@ -65,9 +65,18 @@ there, so each new chat looks like a health-check failure.
 do not need elevation.
 
 ### Port already in use
-Handled automatically: an existing healthy bridge for the same workspace is
-reused; anything else makes the bridge pick a free port. Configuration follows
-automatically.
+Handled automatically: all c2c sessions on the machine share one bridge host,
+so a second session registers its workspace with the running host instead of
+starting a competing bridge. Only a foreign (non-c2c) program on the port
+makes the bridge pick a free port — stop that program, then `c2c restart --tunnel`.
+
+### Opening multiple sessions kept asking for re-pairing (older installs)
+With one bridge per workspace, two parallel sessions each ran their own
+`cloudflared` for the same fixed domain with different local ports, and
+requests landed on the wrong workspace at random (401 → re-pair loop). The
+shared host fixes this. Update, then `c2c restart -w <workspace>` once per
+workspace (or just run `c2c doctor`); existing connectors keep working —
+tokens are bound to the workspace, not the process.
 
 ### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
 Working as intended: `.env`, keys, credentials and anything matched by

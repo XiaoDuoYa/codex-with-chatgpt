@@ -2,9 +2,13 @@
 
 ## Trust boundaries
 
-1. **Workspace root** is the smallest authorization boundary. One bridge serves
-   exactly one workspace; every token is bound to `workspace_id`; a token for
-   project A returns 403 on project B's bridge.
+1. **Workspace root** is the smallest authorization boundary. All workspaces
+   of a user share one bridge host process, but every token is bound to a
+   single `workspace_id` and requests are dispatched by the token's owning
+   workspace store: a token for project A can never read project B (403), and
+   a record stored in A that claims B's identity is rejected outright.
+   Pairing codes resolve to exactly their own workspace; a wrong code burns no
+   attempts on unrelated workspaces (a host-level limiter punishes guesses).
 2. **Workspace content is untrusted.** README, comments, diffs may contain
    prompt injection. Every MCP tool description carries an explicit warning and
    tools never grant capabilities based on file content.
@@ -17,7 +21,7 @@
 | Threat | Mitigation |
 | --- | --- |
 | MCP URL leaks | URL alone is useless: every `/mcp` request requires a valid bearer token (401 without, 403 wrong workspace) |
-| Pairing code brute force | 8 chars from a 31-char CSPRNG alphabet (~40 bits), 5 attempts per session, per-IP rate limit (10/min), 5-minute TTL, one-time use, session destroyed on limit |
+| Pairing code brute force | 8 chars from a 31-char CSPRNG alphabet (~40 bits); a wrong code burns one of 5 attempts bound to the unguessable, 10-minute authorization request (IP-independent) plus a per-IP rate limit (10/min); codes are one-time use and expire in 5 minutes |
 | OAuth CSRF | `state` round-tripped verbatim; authorization requests are server-side records keyed by random ids |
 | Code interception | PKCE S256 mandatory (plain rejected); authorization codes are one-time, 5-minute TTL, bound to client + redirect URI |
 | Token theft | Opaque high-entropy tokens; stored only as SHA-256 hashes; access tokens live 1 h; refresh tokens rotate on every use (replay of the old one fails); revocation endpoint + `c2c unpair` |
@@ -25,8 +29,8 @@
 | Symlink escape | Canonicalization resolves symlinks before the containment check (file and directory symlinks both covered by tests) |
 | Sensitive files | Deny-by-default patterns (.env*, keys, SSH, cloud creds, keychains…) enforced at resolve time — reads, listings, and search all pass through the same gate; `git diff` adds pathspec excludes; `.env.example` allowed |
 | Oversized file / diff DoS | read_file caps lines and bytes per response; git_diff paginates by byte offset with hard caps; search caps matches and file sizes |
-| Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals only a salted workspace hash |
-| Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
+| Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals no workspace information at all — workspace membership is available only through the loopback-only, admin-token-authenticated API |
+| Admin API abuse | Loopback-only + random admin token (0600 runtime file, host records included) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404. The admin token is host-scoped by design: anyone who can read the user's state directory can register any local folder as a workspace. This is an accepted trade-off — the state directory already holds the host token and tunnel credentials, so splitting per-workspace capabilities would not raise the real bar |
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Prompt injection via repo | Tool descriptions state content is untrusted data; the bridge grants no additional authority regardless of content; ChatGPT has zero write/exec capability |
 
