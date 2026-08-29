@@ -10,7 +10,7 @@ import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
-import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
+import { defaultTunnelProvider, UnconfiguredTunnelProvider } from "../tunnel/config.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
@@ -108,7 +108,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
-  const tunnel: TunnelProvider = opts.tunnelProvider ?? new CloudflaredQuickTunnel(logger);
+  let tunnel: TunnelProvider = opts.tunnelProvider ?? defaultTunnelProvider(logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
   /** Random per-process identity; adopters use it to validate host records. */
   const instanceId = randomBytes(8).toString("hex");
@@ -301,16 +301,68 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     res.json({ code: session.code, expiresAt: session.expiresAt });
   });
 
+  // Start always instantiates from the CURRENT tunnel.json — never restarts
+  // a stored provider object that a failed reload left behind. When the
+  // configured provider cannot even be constructed (malformed tunnel.json),
+  // an UnconfiguredTunnelProvider is installed so /admin/info reports the
+  // truth and any start attempt fails with the configuration error.
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
-      .start(port)
-      .then((url) => {
-        publicBaseUrl = url;
+    void (async () => {
+      await tunnel.stop().catch(() => undefined);
+      publicBaseUrl = null;
+      let replacement: TunnelProvider;
+      try {
+        replacement = defaultTunnelProvider(logger);
+      } catch (error) {
+        tunnel = new UnconfiguredTunnelProvider(error as Error);
         persistRuntime();
-        res.json({ url });
-      })
+        throw error;
+      }
+      tunnel = replacement;
+      const url = await replacement.start(port);
+      publicBaseUrl = url;
+      persistRuntime();
+      return { url };
+    })()
+      .then((result) => res.json(result))
       .catch((error: Error) => {
         logger.error(`Tunnel start failed: ${error.message}`);
+        persistRuntime();
+        res.status(500).json({ error: "tunnel_failed", message: error.message });
+      });
+  });
+
+  // Replace the tunnel provider from the CURRENT tunnel.json so config changes
+  // apply to a running host without restarting it (or other workspaces).
+  // State stays truthful: the old public URL is cleared the moment the old
+  // tunnel stops, the configured replacement becomes authoritative BEFORE any
+  // start attempt, and a failed start leaves the replacement stopped rather
+  // than resurrecting the previous provider.
+  app.post("/admin/tunnel/reload", adminGuard, (_req, res) => {
+    const wasRunning = Boolean(publicBaseUrl);
+    void (async () => {
+      await tunnel.stop().catch(() => undefined);
+      publicBaseUrl = null;
+      let replacement: TunnelProvider;
+      try {
+        replacement = defaultTunnelProvider(logger);
+      } catch (error) {
+        tunnel = new UnconfiguredTunnelProvider(error as Error);
+        persistRuntime();
+        throw error;
+      }
+      tunnel = replacement;
+      persistRuntime();
+      if (!wasRunning) return { url: null as string | null };
+      const url = await replacement.start(port);
+      publicBaseUrl = url;
+      persistRuntime();
+      return { url };
+    })()
+      .then((result) => res.json(result))
+      .catch((error: Error) => {
+        logger.error(`Tunnel reload failed: ${error.message}`);
+        persistRuntime();
         res.status(500).json({ error: "tunnel_failed", message: error.message });
       });
   });
