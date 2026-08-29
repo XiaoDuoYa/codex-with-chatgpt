@@ -33,8 +33,22 @@
 - **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
 - **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
-- **Read-only by design**: no write/exec tools exist in V1 at all.
+- **Read-only MCP by design**: no write/exec tools exist in the MCP server.
 - **Workspace is the security boundary**: one bridge = one workspace = one token audience.
+
+## V0.2 runtime layers
+
+Protocol is the product core. It parses, validates, serializes, and transitions
+C2C messages without knowing how ChatGPT reads task data. Transport is the
+replaceable data channel. Codex Execution edits files and runs tests.
+
+- `McpTransport` is a compatibility facade over the existing bridge, tunnel,
+  OAuth, pairing, and execution-record behavior.
+- `GitHubTransport` publishes `.c2c` projections and explicit code paths to a
+  dedicated branch with normal, non-force pushes.
+- `.c2c/current.json` is the only machine truth. `.c2c/current.md` and
+  `.c2c/tasks/<taskId>.json` are deterministic, repairable projections.
+- FilePack is future V0.3 work. V0.2 has no FilePack subsystem or command.
 
 ## Components (src/)
 

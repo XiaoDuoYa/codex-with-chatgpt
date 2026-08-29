@@ -16,6 +16,34 @@ ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的
 Codex 手里。你的仓库永远不会被上传——ChatGPT 通过一条安全的、OAuth 保护的
 **只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
 
+## ChatGPT Plus 工作流
+
+<!-- PLUS FLOW START -->
+
+ChatGPT Plus 使用 GitHub 通道时不需要自定义连接器。项目只把小型任务状态和明确
+的代码提交发布到专用 `c2c/*` 分支，ChatGPT 通过普通 GitHub 访问读取该分支；
+Codex 始终是唯一执行层。
+
+```bash
+c2c task start "增加经过测试的健康检查接口" --transport github -w D:\path\to\project --json
+# 把生成的指令交给 ChatGPT，再把 PLAN 回复保存为 plan.txt：
+c2c task import -w D:\path\to\project --file plan.txt --json
+# Codex 实现并测试后：
+c2c task publish -w D:\path\to\project --changed-files "src/a.ts,tests/a.test.ts" \
+  --tests "全部通过" --test-command "corepack pnpm test" --json
+# 导入 ChatGPT 的 DONE，重新执行最终测试，然后：
+c2c task publish -w D:\path\to\project --finalize passed \
+  --tests "全部通过" --test-command "corepack pnpm test" --json
+```
+
+单次任务的 `--transport github` 不会修改 `.c2c.json`。`.c2c/current.json`
+是机器真源，`.c2c/current.md` 是可重建的展示文件。
+
+<!-- PLUS FLOW END -->
+
+已有自定义连接器权限的用户继续使用 MCP 工作流和 `c2c setup`；Bridge、隧道、
+OAuth 与配对行为保持不变。
+
 ## 一段话安装（纯小白专用）
 
 不懂 git、Node、终端？完全不需要懂。把下面这段话原样复制给你的编码
@@ -122,7 +150,7 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：76 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # 完整 Vitest 回归套件
 
 c2c setup           # 一条命令：Bridge + 隧道 + 配对码
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
@@ -155,8 +183,8 @@ docs/         架构 / 协议 / 安全 / 故障排查
 
 ## 状态与声明
 
-V1。已端到端验证：Bridge、OAuth + 配对、公网隧道、ChatGPT 连接器配置、
-零操作首次配置体验。
+V0.2 同时支持原有 MCP 连接器路径和 ChatGPT Plus GitHub 路径。
+FilePack 留待 V0.3，当前没有实现，也没有对应命令。
 
 **非官方社区项目，与 OpenAI 无关联，未获其背书。**
 

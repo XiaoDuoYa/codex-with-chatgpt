@@ -5,6 +5,27 @@ Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
 
 Never mix the two: control messages carry state, never content.
 
+## Runtime contract in V0.2
+
+The CLI performs real `parse → validate → serialize` processing. Headers are
+case-insensitive on import; serialization always emits protocol version 1 in a
+stable order. Task IDs use `c2c_` plus eight lowercase hexadecimal characters.
+
+`.c2c/current.json` is the only machine-readable task truth.
+`.c2c/current.md` is a deterministic display projection and is never parsed.
+If projections differ, `c2c task status` rebuilds them from JSON.
+
+ChatGPT's DONE is first stored as `pendingDecision` while the public task state
+remains EXECUTED. Only fresh passing final tests allow finalization to DONE; a
+failed final test clears the pending decision and preserves EXECUTED.
+
+BLOCKED records `blockedFrom` with the prior state, iteration, code, and reason.
+`c2c task resume` restores exactly that state. It never guesses missing context.
+
+For GitHub review, ChatGPT checks `iterationBaseCommit..codeHeadCommit` only for
+`declaredChangedFiles` and excludes `.c2c/**`. The metadata commit is therefore
+not mistaken for a code change.
+
 ## States
 
 ```
@@ -33,7 +54,7 @@ Keep messages < 1 KB. No diffs, no logs, no file bodies.
 ```
 [C2C]
 STATE: INIT
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 0
 
 GOAL:
@@ -49,7 +70,7 @@ Create an implementation plan for Codex.
 ```
 [C2C]
 STATE: PLAN
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 1
 
 GOAL:
@@ -80,7 +101,7 @@ Plans must be finite, concrete, executable. Not 40-step epics.
 ```
 [C2C]
 STATE: EXECUTED
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 1
 
 RESULT:
@@ -96,7 +117,7 @@ Please independently inspect the workspace and current git diff through MCP.
 ```
 
 Before sending EXECUTED, Codex records the iteration:
-`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests ... --exit-status ok`
+`c2c record --task c2c_f81a9c2d --iteration 1 --changed-files ... --tests ... --exit-status ok`
 so ChatGPT can read it via the `execution_summary` / `test_status` tools.
 
 ### DONE / BLOCKED (ChatGPT → Codex)
@@ -104,7 +125,7 @@ so ChatGPT can read it via the `execution_summary` / `test_status` tools.
 ```
 [C2C]
 STATE: DONE
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 3
 
 SUMMARY:
@@ -114,7 +135,7 @@ SUMMARY:
 ```
 [C2C]
 STATE: BLOCKED
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 3
 
 REASON:
@@ -135,7 +156,7 @@ re-reads code via MCP):
 ```
 [C2C]
 STATE: HANDOFF
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 4
 
 ORIGINAL_GOAL:

@@ -88,6 +88,10 @@ Inside the checkout directory (see Locations):
 
 ## Workflow: first-time setup（"使用 Codex with ChatGPT 完成首次配置"）
 
+Before setup, determine the requested transport. ChatGPT Plus users without a
+custom connector use the GitHub workflow below. Run this MCP setup workflow only
+when the user explicitly chooses MCP/custom connectors.
+
 1. Detect prerequisites yourself: `node --version` (>= 20), and check `cloudflared`.
    - If cloudflared is missing on macOS run `brew install cloudflared`; on Windows use
      `winget install Cloudflare.cloudflared`. Do this yourself; don't ask.
@@ -130,6 +134,39 @@ Ready.
 If a login wall appears (ChatGPT, Cloudflare): stop, tell the user the ONE thing
 to do ("请登录 ChatGPT，完成后告诉我'好了'"), then continue.
 
+## Workflow: ChatGPT Plus task via GitHub
+
+<!-- PLUS FLOW START -->
+
+Use this path when the user says they have ChatGPT Plus, cannot create a custom
+connector, or explicitly selects GitHub. Do not run `c2c setup` for this path.
+
+1. Verify the workspace is a Git repository with a user-approved GitHub remote
+   and a clean working tree. Never publish on main/master.
+2. Start without changing project defaults:
+   `c2c task start "<user goal>" --transport github -w <workspace> --json`.
+3. Open or reuse the user's ChatGPT conversation in the built-in browser. Send
+   only the returned instruction. ChatGPT reads `.c2c/current.md` and relevant
+   files from the dedicated branch, then returns structured PLAN text.
+4. Save the reply locally and run
+   `c2c task import -w <workspace> --file <plan file> --json`.
+5. Execute the validated PLAN with Codex tools. Run its tests. Publish only
+   explicit changed files with `c2c task publish -w <workspace>
+   --changed-files "file1,file2" --tests "<summary>" --test-command "<command>"
+   --review-focus "<focus>" --json`.
+6. Send the returned REVIEW instruction to the same ChatGPT conversation.
+   Import PLAN, DONE, or BLOCKED with `c2c task import`.
+7. DONE remains pending. Run fresh final tests; only after they pass run
+   `c2c task publish -w <workspace> --finalize passed --tests "<summary>"
+   --test-command "<command>" --json`.
+8. On BLOCKED, preserve its reason. Use `c2c task resume` only after the cause
+   is fixed. Never edit `.c2c/current.md` as machine state.
+
+<!-- PLUS FLOW END -->
+
+This flow uses no custom connector, ChatGPT private API, API key, cookie, or
+browser storage. FilePack is future V0.3 work and has no V0.2 command.
+
 ## Conversation management (one chat per workspace)
 
 The workspace has ONE long-lived C2C conversation in ChatGPT. Do not open a new
@@ -162,7 +199,7 @@ All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 K
 ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
 
 0. Ensure the bridge is healthy: `c2c doctor -w <workspace> --json` (auto-repairs).
-   Generate task id: `c2c_` + 4 random hex chars.
+   Generate task id: `c2c_` + 8 random hex chars.
 1. Open the saved C2C conversation (`c2c session --json`); only create a new chat
    if none is saved. On a NEW conversation first send the boot prompt from
    `docs/protocol.md` §Boot Prompt, then save the session URL.
@@ -171,7 +208,7 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
 ```
 [C2C]
 STATE: INIT
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 0
 
 GOAL:
@@ -190,13 +227,13 @@ Produce a C2C PLAN message.
 4. Execute the plan yourself with your own harness (your tools, your judgment;
    ChatGPT does not micro-manage tool calls).
 5. Record the execution so ChatGPT can read it via MCP:
-   `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+   `c2c record -w <ws> --task c2c_f81a9c2d --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
 6. Send EXECUTED (no diffs, no logs):
 
 ```
 [C2C]
 STATE: EXECUTED
-TASK_ID: c2c_f81a
+TASK_ID: c2c_f81a9c2d
 ITERATION: 1
 
 RESULT:

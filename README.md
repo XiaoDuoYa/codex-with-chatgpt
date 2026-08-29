@@ -28,6 +28,35 @@ workspace.
 
 Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](README.zh-CN.md)**
 
+## ChatGPT Plus workflow
+
+<!-- PLUS FLOW START -->
+
+ChatGPT Plus does not need a custom connector for the GitHub transport. The
+project publishes a small task snapshot and explicit code commits to a dedicated
+`c2c/*` branch; ChatGPT reads that branch through its normal GitHub access. Codex
+remains the only execution layer.
+
+```bash
+c2c task start "Add a tested health endpoint" --transport github -w /path/to/project --json
+# Copy the generated instruction to ChatGPT, then save its PLAN reply:
+c2c task import -w /path/to/project --file plan.txt --json
+# After Codex implements and tests the plan:
+c2c task publish -w /path/to/project --changed-files "src/a.ts,tests/a.test.ts" \
+  --tests "all passed" --test-command "corepack pnpm test" --json
+# Import ChatGPT's DONE reply, run fresh final tests, then:
+c2c task publish -w /path/to/project --finalize passed \
+  --tests "all passed" --test-command "corepack pnpm test" --json
+```
+
+The task-specific `--transport github` override does not modify `.c2c.json`.
+`.c2c/current.json` is machine state; `.c2c/current.md` is a rebuildable view.
+
+<!-- PLUS FLOW END -->
+
+Users who already have custom connector access can keep using the MCP workflow
+and `c2c setup`; its bridge, tunnel, OAuth, and pairing behavior is unchanged.
+
 ## One-paste install · 一段话安装
 
 **中文** — 不懂 git、Node、终端？完全不需要懂。把下面这段话原样复制给你的
@@ -174,7 +203,7 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 76 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # full Vitest regression suite
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
@@ -207,8 +236,8 @@ docs/         architecture / protocol / security / troubleshooting
 
 ## Status & disclaimer
 
-V1. Verified end-to-end: bridge, OAuth + pairing, public tunnel, ChatGPT
-connector setup, zero-touch first-run experience.
+V0.2 supports the original MCP connector path and the ChatGPT Plus GitHub path.
+FilePack is future work for V0.3 and is not implemented or exposed as a command.
 
 **Unofficial community project. Not affiliated with or endorsed by OpenAI.**
 

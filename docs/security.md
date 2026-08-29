@@ -44,12 +44,21 @@ State lives under the OS-convention app dir
 files 0600. Only SHA-256 hashes of tokens are persisted — a stolen state file
 does not yield usable bearer tokens.
 
-**V1 limitation**: client registrations and token hashes are file-based rather
+**MCP limitation**: client registrations and token hashes are file-based rather
 than OS-keychain-based. Raw tokens are never written anywhere. Keychain
 integration is a V2 item.
 
-## What ChatGPT can never do (V1)
+## What ChatGPT can never do through MCP
 
 Write files, delete files, run shell commands, commit, install packages —
 these tools do not exist on the server, so no prompt injection, scope bug, or
 UI confusion can enable them.
+
+## GitHub transport boundary (V0.2)
+
+GitHub mode stages only explicit declared paths. It refuses main/master,
+conflicts, unrelated dirty files, and non-delete sensitive paths. It never
+force-pushes, stashes, merges, deletes branches, reads cookies, or uses private
+ChatGPT APIs. `.c2c/**` contains task metadata only; source bodies and diffs are
+not copied into task snapshots. Sensitive-file deletion is allowed because it
+removes content rather than publishing it.

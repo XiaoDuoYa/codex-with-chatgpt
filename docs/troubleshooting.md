@@ -9,6 +9,27 @@ c2c doctor
 It checks Node, workspace, bridge, MCP, OAuth and tunnel — and repairs what it
 can (restarts the bridge, restarts the tunnel) without asking.
 
+For a ChatGPT Plus GitHub task, start with:
+
+```
+c2c task status -w <workspace> --json
+```
+
+This validates `.c2c/current.json` and rebuilds missing or stale projections.
+If publication failed, fix repository access and repeat the same `task publish`
+command; the saved publication key prevents duplicate code or state commits.
+
+### ChatGPT Plus has no Apps or custom connector entry
+
+Use the GitHub path instead:
+
+```
+c2c task start "your goal" --transport github -w <workspace> --json
+```
+
+Copy only the generated PLAN/REVIEW instruction and structured reply. Do not
+copy source files, diffs, cookies, or account tokens.
+
 ## Common situations
 
 ### "Bridge 未运行"
