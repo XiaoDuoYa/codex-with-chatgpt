@@ -7,6 +7,8 @@ import { startBridge, type Bridge } from "../bridge/server.js";
 import {
   findLiveBridge,
   findLiveHost,
+  probeBridge,
+  readRuntimeState,
   type RuntimeState,
   type HostState,
 } from "../bridge/runtime.js";
@@ -22,6 +24,12 @@ import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
+import {
+  clearTunnelConfig,
+  readNamedTunnelConfig,
+  readTunnelConfig,
+  writeTunnelConfig,
+} from "../tunnel/config.js";
 import { Logger } from "../logger/index.js";
 import { DEFAULT_PORT, getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
@@ -344,6 +352,144 @@ program
     say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
   });
 
+// ---------------------------------------------------------------- tunnel (fixed-address option)
+
+/**
+ * Ask an already-running bridge (this workspace) to swap its tunnel provider
+ * from the just-written tunnel.json. Config commands never start a bridge.
+ */
+async function reloadTunnelIfBridgeRunning(): Promise<string | null> {
+  const workspace = new Workspace(resolveWorkspace(undefined));
+  const runtime = readRuntimeState(workspace.id);
+  if (!runtime) return null;
+  if (!(await probeBridge(runtime.port))) return null;
+  const result = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/reload", 90_000);
+  return result.url ?? null;
+}
+
+const tunnel = program
+  .command("tunnel")
+  .description("Configure the secure public connection (fixed domain or rotating)");
+
+tunnel
+  .command("status")
+  .description("Show the current tunnel mode and state")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    const config = readTunnelConfig();
+    let running: { url: string | null; provider: string | null } = { url: null, provider: null };
+    const workspace = new Workspace(resolveWorkspace(undefined));
+    const runtime = readRuntimeState(workspace.id);
+    if (runtime && (await probeBridge(runtime.port))) {
+      try {
+        const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+        running = { url: info.publicUrl, provider: info.tunnel.provider };
+      } catch {
+        // record present but bridge not answering — config-only view
+      }
+    }
+    const mode = config.status === "ok" ? "named" : config.status === "malformed" ? "invalid" : "quick";
+    const data = {
+      mode,
+      publicUrl: config.status === "ok" ? config.config.publicUrl : running.url,
+      tunnelName: config.status === "ok" ? config.config.tunnelName ?? null : null,
+      tunnelId: config.status === "ok" ? config.config.tunnelId ?? null : null,
+      credentialsFile: config.status === "ok" ? config.config.credentialsFile : null,
+      running: running.url !== null,
+      provider: running.provider,
+    };
+    if (opts.json) {
+      say(JSON.stringify({ ok: true, ...data }));
+      return;
+    }
+    say(data.mode === "named" ? "模式：固定地址（named tunnel）" : data.mode === "invalid" ? "模式：配置无效（tunnel.json 无法解析）" : "模式：临时地址（每次启动更换）");
+    if (data.publicUrl) say(`地址：${data.publicUrl}`);
+    if (data.tunnelName) say(`隧道：${data.tunnelName}`);
+    say(`运行中：${data.running ? "是" : "否"}`);
+  });
+
+tunnel
+  .command("named")
+  .description("Use a user-owned Cloudflare named tunnel with a fixed public URL")
+  .requiredOption("--public-url <url>", "fixed public base URL, e.g. https://c2c.example.com")
+  .option("--tunnel-name <name>", "named tunnel name (e.g. my-laptop)")
+  .option("--tunnel-id <id>", "named tunnel UUID (alternative to --tunnel-name)")
+  .option("--credentials-file <path>", "tunnel credentials JSON (from `cloudflared tunnel create`)")
+  .option("--json", "machine-readable output", false)
+  .action(
+    async (opts: {
+      publicUrl: string;
+      tunnelName?: string;
+      tunnelId?: string;
+      credentialsFile?: string;
+      json: boolean;
+    }) => {
+      try {
+        let publicUrl: string;
+        try {
+          const parsed = new URL(opts.publicUrl);
+          if (parsed.protocol !== "https:" || (parsed.pathname && parsed.pathname !== "/")) {
+            throw new Error("bad protocol/path");
+          }
+          publicUrl = parsed.origin;
+        } catch {
+          throw new Error("--public-url must be an https base URL without a path, e.g. https://c2c.example.com");
+        }
+        if (!opts.tunnelName && !opts.tunnelId) {
+          throw new Error("Provide --tunnel-name <name> or --tunnel-id <uuid>");
+        }
+        const previous = readNamedTunnelConfig();
+        const credentialsFile = path.resolve(
+          opts.credentialsFile ?? previous?.credentialsFile ?? ""
+        );
+        if (!opts.credentialsFile && !previous) {
+          throw new Error(
+            "Provide --credentials-file <path> (the JSON created by `cloudflared tunnel create`)"
+          );
+        }
+        if (!fs.existsSync(credentialsFile)) {
+          throw new Error(`Tunnel credentials file not found: ${credentialsFile}`);
+        }
+        writeTunnelConfig({
+          mode: "cloudflare-named",
+          publicUrl,
+          tunnelName: opts.tunnelName?.trim() || undefined,
+          tunnelId: opts.tunnelId?.trim() || undefined,
+          credentialsFile,
+        });
+        const url = await reloadTunnelIfBridgeRunning();
+        if (opts.json) {
+          say(JSON.stringify({ ok: true, mode: "named", publicUrl: url ?? publicUrl, bridgeWasRunning: url !== null }));
+          return;
+        }
+        check(
+          url
+            ? `已启用固定地址（运行中的 Bridge 已切换）：${url}`
+            : `已保存固定地址配置：${publicUrl}（Bridge 下次启动时生效）`
+        );
+      } catch (error) {
+        handleCliError(error, opts.json);
+      }
+    }
+  );
+
+tunnel
+  .command("quick")
+  .description("Revert to Quick Tunnels (public URL rotates on every start)")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      clearTunnelConfig();
+      const url = await reloadTunnelIfBridgeRunning();
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, mode: "quick", publicUrl: url, bridgeWasRunning: url !== null }));
+        return;
+      }
+      check(url ? `已切换为临时地址模式：${url}` : "已切换为临时地址模式（Bridge 下次启动时生效）");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
 // ---------------------------------------------------------------- doctor
 program
   .command("doctor")
