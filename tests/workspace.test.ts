@@ -8,6 +8,20 @@ let root: string;
 let outside: string;
 let ws: Workspace;
 
+const canCreateSymlinks = (() => {
+  const probeRoot = makeTmpDir("symlink-probe");
+  const target = write(probeRoot, "target.txt", "probe\n");
+  try {
+    fs.symlinkSync(target, path.join(probeRoot, "link.txt"));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+    return false;
+  } finally {
+    cleanup(probeRoot);
+  }
+})();
+
 beforeAll(() => {
   root = makeTmpDir("ws");
   outside = makeTmpDir("outside");
@@ -22,9 +36,10 @@ beforeAll(() => {
   write(outside, "secret.txt", "outside data\n");
   write(root, ".c2cignore", "private-notes/\n");
   write(root, "private-notes/todo.md", "secret notes\n");
-  // symlink pointing outside the workspace
-  fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "link-out.txt"));
-  fs.symlinkSync(outside, path.join(root, "dir-out"));
+  if (canCreateSymlinks) {
+    fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "link-out.txt"));
+    fs.symlinkSync(outside, path.join(root, "dir-out"), "junction");
+  }
   ws = new Workspace(root);
 });
 
@@ -67,7 +82,7 @@ describe("path containment", () => {
     expect(() => ws.resolve("hello.txt\0.png")).toThrowError(WorkspaceError);
   });
 
-  it("rejects symlinked file escaping the workspace", () => {
+  it.skipIf(!canCreateSymlinks)("rejects symlinked file escaping the workspace", () => {
     try {
       ws.resolve("link-out.txt");
       expect.unreachable("should have thrown");
@@ -76,7 +91,7 @@ describe("path containment", () => {
     }
   });
 
-  it("rejects paths through a symlinked directory escaping the workspace", () => {
+  it.skipIf(!canCreateSymlinks)("rejects paths through a symlinked directory escaping the workspace", () => {
     try {
       ws.resolve("dir-out/secret.txt");
       expect.unreachable("should have thrown");

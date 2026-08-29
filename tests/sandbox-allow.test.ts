@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   ensureSandboxAllowlist,
   isStateDirAllowlisted,
+  listWritableRoots,
   pathsEquivalent,
   toTomlPath,
   upsertWritableRoot,
@@ -49,12 +50,12 @@ describe("sandbox allowlist", () => {
     expect(next).toContain("[features]");
     expect(next).toContain('trust_level = "trusted"');
     expect(next).toContain("[sandbox_workspace_write]");
-    expect(next).toContain('writable_roots = ["/Users/ada/Library/Application Support/codex-with-chatgpt"]');
+    expect(listWritableRoots(next)).toContain(toTomlPath("/Users/ada/Library/Application Support/codex-with-chatgpt"));
   });
 
   it("inserts writable_roots into an existing empty table", () => {
     const next = upsertWritableRoot("[sandbox_workspace_write]\n", "/tmp/c2c-state");
-    expect(next).toContain('writable_roots = ["/tmp/c2c-state"]');
+    expect(listWritableRoots(next)).toContain(toTomlPath("/tmp/c2c-state"));
   });
 
   it("adds to a single-line array and keeps other roots", () => {
@@ -62,8 +63,8 @@ describe("sandbox allowlist", () => {
       '[sandbox_workspace_write]\nwritable_roots = ["/already"]\n',
       "/Users/ada/Library/Application Support/codex-with-chatgpt"
     );
-    expect(next).toContain('"/already"');
-    expect(next).toContain('"/Users/ada/Library/Application Support/codex-with-chatgpt"');
+    expect(listWritableRoots(next)).toContain(toTomlPath("/already"));
+    expect(listWritableRoots(next)).toContain(toTomlPath("/Users/ada/Library/Application Support/codex-with-chatgpt"));
   });
 
   it("adds to a multiline Windows-style array", () => {
