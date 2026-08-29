@@ -14,6 +14,7 @@ import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
+import { registerTaskCommands } from "./task.js";
 
 const program = new Command();
 
@@ -67,6 +68,8 @@ program
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
   .version(VERSION, "-v, --version")
   .configureHelp({ sortSubcommands: true });
+
+registerTaskCommands(program);
 
 // ---------------------------------------------------------------- serve (internal)
 
