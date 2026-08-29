@@ -1,18 +1,29 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import path from "node:path";
 import { gitDiff, gitInfo, gitStatus } from "../src/workspace/git.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git } from "./helpers.js";
 
 let repo: string;
 let plain: string;
+let initialCommit: string;
 
 beforeAll(() => {
   repo = makeTmpDir("git-repo");
   makeGitRepo(repo);
+  initialCommit = gitInfo(repo).commit!;
   plain = makeTmpDir("not-a-repo");
   // The test-tmp dir lives inside this project's own git repo; stop git from
   // walking up so `plain` is genuinely outside any repository.
   process.env.GIT_CEILING_DIRECTORIES = path.dirname(plain);
+});
+
+afterEach(() => {
+  try {
+    git(repo, "reset", "--hard", initialCommit);
+    git(repo, "clean", "-fdx");
+  } catch {
+    // best effort
+  }
 });
 
 afterAll(() => {

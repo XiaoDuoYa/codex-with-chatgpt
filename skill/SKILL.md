@@ -234,6 +234,13 @@ chat per task or per Codex session.
   prompt + HANDOFF reconstructed from `c2c session get` and recent
   `execution_summary` records.
 
+## Execution Modes
+
+- **Web-Control Relay Mode (Zero-Copy Autonomous Loop, Recommended)**:
+  When the local execution relay is enabled (`c2c relay enable`), ChatGPT Web directly submits PLANs to the local configured executor (`agy` default, or `codex`) via the `execution_submit` MCP tool, monitors progress via `execution_status`, and reviews results via `git_diff` / `test_status` without manual copy-paste or browser relay.
+- **Local Orchestrator Mode (In-App Browser Relay)**:
+  If the execution relay is disabled, Codex coordinates through the in-app browser using the step-by-step protocol below.
+
 ## Workflow: coding task（"使用 Codex with ChatGPT 完成 XXX"）
 
 Protocol states: INIT → PLAN → EXECUTING → EXECUTED → REVIEW → (PLAN | DONE | BLOCKED).
@@ -275,10 +282,17 @@ Produce a C2C PLAN message.
    suggestions (which file, what to change, why). If the reply is a bare
    one-liner with no rationale or file-level guidance, ask once:
    "Please expand the plan with rationale and concrete per-file suggestions."
-4. Execute the plan yourself with your own harness (your tools, your judgment;
-   ChatGPT does not micro-manage tool calls).
-5. Record the execution so ChatGPT can read it via MCP:
-   `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+4. Execute the plan automatically via the configured executor (`agy` by default; switch via `c2c executor set codex`):
+   - Secure Plan File Transport (avoids shell escaping/argv limits):
+     1. Write the PLAN text verbatim to a temporary file inside the C2C state directory:
+        `<C2C state dir>/plans/<task_id>-<iteration>.md` (e.g., owner-only permissions).
+     2. Run `c2c exec -w <ws> --plan-file <temp_plan_path> --task <task_id> --iteration <iter>`.
+     3. Clean up the temporary plan file in `finally`.
+   - `c2c exec` invokes the selected executor (`agy` or `codex`) via streaming stdin, runs tests, and automatically records execution metadata with authoritative Git-based changed-file delta tracking.
+5. Verification & Record:
+   - `c2c exec` automatically writes the execution record to the local bridge.
+   - If execution succeeded (`exitStatus: ok`), proceed to Step 6.
+   - If execution was blocked (`exitStatus: blocked`) or failed, handle recovery or surface the decision.
 6. Send EXECUTED (no diffs, no logs):
 
 ```

@@ -30,10 +30,10 @@
 
 ## Principles
 
-- **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
-- **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
-- **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
-- **Read-only by design**: no write/exec tools exist in V1 at all.
+- **ChatGPT thinks. Local Agents work.** The bridge coordinates planning with execution.
+- **Computer Use / Web Relay = control plane**: tiny control messages or direct MCP task submission (`execution_submit`).
+- **MCP = data plane + bounded task control**: ChatGPT pulls files/diffs/search results itself and submits structured PLANs.
+- **Workspace data access remains read-only**: no arbitrary shell execution or raw file-write primitives exist. Optional execution relay exposes only bounded coding-agent task control (`agy` default, or `codex`).
 - **Workspace is the security boundary**: one bridge = one workspace = one token audience.
 
 ## Components (src/)
@@ -41,7 +41,9 @@
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | McpServer with 8 read-only tools; stateless Streamable HTTP transport (fresh server per request, JSON responses) |
+| `mcp/` | McpServer with 8 read-only data tools and 3 bounded execution-control tools (`execution_submit`, `execution_status`, `execution_cancel`); stateless Streamable HTTP transport |
+| `execution/` | ExecutionTaskManager for single-active-task lifecycle, AbortSignal process control, JSONL execution records, and local relay configuration (`relay.json`) |
+| `executor/` | Pluggable executor adapter abstraction (`agy` as default, `codex` supported), background process management, and Git-authoritative delta tracking |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |

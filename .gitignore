@@ -8,3 +8,4 @@ dist/
 .env.*
 !.env.example
 coverage/
+.gemini/

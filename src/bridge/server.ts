@@ -14,6 +14,7 @@ import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { ExecutionTaskManager } from "../execution/task-manager.js";
 
 export interface BridgeOptions {
   workspaceRoot: string;
@@ -26,6 +27,7 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  executionRunner?: import("../executor/types.js").ProcessRunner;
 }
 
 export interface Bridge {
@@ -36,6 +38,7 @@ export interface Bridge {
   authStore: AuthStore;
   pairing: PairingManager;
   tunnel: TunnelProvider;
+  executionManager: ExecutionTaskManager;
   getPublicBaseUrl(): string | null;
   localBaseUrl(): string;
   close(): Promise<void>;
@@ -76,6 +79,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   const tunnel = opts.tunnelProvider ?? new CloudflaredQuickTunnel(logger);
+  const executionManager = new ExecutionTaskManager(workspace.id, workspace.root, {
+    logger,
+    runner: opts.executionRunner,
+  });
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -111,7 +118,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createMcpHttpHandler(
+    () => createMcpServer({ workspace, logger, executionManager }),
+    logger
+  );
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
@@ -182,6 +192,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     });
   });
 
+  app.post("/admin/unpair", adminGuard, (_req, res) => {
+    authStore.revokeAll();
+    pairing.invalidateAll();
+    logger.info("Unpaired: revoked all tokens and active pairing sessions");
+    res.json({ unpaired: true });
+  });
+
   app.post("/admin/revoke-all", adminGuard, (_req, res) => {
     const count = authStore.revokeAll();
     pairing.invalidateAll();
@@ -196,7 +213,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     }, 100);
   });
 
-  const { server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT);
+  // ---- Bind loopback port ---------------------------------------------------
+
+  const preferredPort = opts.port ?? DEFAULT_PORT;
+  const { server, port } = await listen(app, host, preferredPort);
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
@@ -221,6 +241,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const shutdown = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    await executionManager.close().catch(() => undefined);
     await tunnel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
@@ -235,6 +256,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     authStore,
     pairing,
     tunnel,
+    executionManager,
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,

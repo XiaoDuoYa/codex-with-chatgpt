@@ -55,10 +55,13 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all eight read-only tools", async () => {
+  it("lists all eight read-only data tools and three execution-control tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "execution_cancel",
+      "execution_status",
+      "execution_submit",
       "execution_summary",
       "git_diff",
       "git_status",
@@ -68,8 +71,8 @@ describe("MCP tools over Streamable HTTP", () => {
       "test_status",
       "workspace_info",
     ]);
-    // no write tools in V1
-    for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
+    // no arbitrary write or shell tools exist
+    for (const forbidden of ["write_file", "delete_file", "execute_shell", "shell_exec", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
     }
   });

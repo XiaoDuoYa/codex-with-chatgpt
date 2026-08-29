@@ -9,6 +9,7 @@ import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { appendExecutionRecord } from "../execution/records.js";
+import { extractTestSummary } from "../execution/task-manager.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
@@ -26,6 +27,14 @@ import {
   type LastEndpoint,
 } from "../config/endpoint.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
+import {
+  detectAllExecutors,
+  executePlan,
+  getStoredExecutor,
+  resolveExecutorName,
+  setStoredExecutor,
+} from "../executor/index.js";
+import { isExecutionRelayEnabled, setExecutionRelayEnabled } from "../execution/relay-config.js";
 
 const program = new Command();
 
@@ -825,6 +834,256 @@ program
         notes: opts.notes,
       });
       check("已记录执行摘要");
+    }
+  );
+
+const executorCmd = program
+  .command("executor")
+  .description("Manage or view the local execution agent (agy | codex)")
+  .option("--json", "output in JSON format")
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const stored = getStoredExecutor();
+      const effective = resolveExecutorName();
+      const all = await detectAllExecutors();
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, stored, effective, executors: all }));
+      } else {
+        const isDefault = stored === null;
+        say(`Current executor: ${effective}${isDefault ? " (default)" : ""}`);
+        say("");
+        say("Available executors:");
+        for (const [name, info] of Object.entries(all)) {
+          const mark = info.available ? "✓" : "✗";
+          const pathStr = info.path ? ` (${info.path})` : "";
+          const verStr = info.version ? ` [${info.version}]` : "";
+          say(`  ${mark} ${name}${pathStr}${verStr}`);
+        }
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+executorCmd
+  .command("set <name>")
+  .description("Set the persistent default executor (agy | codex)")
+  .option("--json", "output in JSON format")
+  .action((name: string, opts: { json?: boolean }) => {
+    try {
+      const set = setStoredExecutor(name);
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, executor: set }));
+      } else {
+        check(`Executor switched to ${set}`);
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+executorCmd
+  .command("list")
+  .description("List all available executors and detection status")
+  .option("--json", "output in JSON format")
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const all = await detectAllExecutors();
+      const effective = resolveExecutorName();
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, effective, executors: all }));
+      } else {
+        for (const [name, info] of Object.entries(all)) {
+          const currentTag = name === effective ? " (current)" : "";
+          const mark = info.available ? "✓" : "✗";
+          const pathStr = info.path ? ` - ${info.path}` : " - not found in PATH";
+          say(`${mark} ${name}${currentTag}${pathStr}`);
+        }
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+const relayCmd = program
+  .command("relay")
+  .description("Manage or view the local execution relay status for ChatGPT Web")
+  .option("--json", "output in JSON format")
+  .action((opts: { json?: boolean }) => {
+    try {
+      const enabled = isExecutionRelayEnabled();
+      const executor = resolveExecutorName();
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, enabled, executor }));
+      } else {
+        say(`Execution relay: ${enabled ? "enabled" : "disabled"}`);
+        say(`Configured executor: ${executor}`);
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+relayCmd
+  .command("enable")
+  .description("Enable local execution relay (allow ChatGPT Web to submit plans)")
+  .option("--json", "output in JSON format")
+  .action((opts: { json?: boolean }) => {
+    try {
+      setExecutionRelayEnabled(true);
+      const executor = resolveExecutorName();
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, enabled: true, executor }));
+      } else {
+        check("ChatGPT execution relay enabled");
+        say(`Executor: ${executor}`);
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+relayCmd
+  .command("disable")
+  .description("Disable local execution relay")
+  .option("--json", "output in JSON format")
+  .action((opts: { json?: boolean }) => {
+    try {
+      setExecutionRelayEnabled(false);
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, enabled: false }));
+      } else {
+        check("ChatGPT execution relay disabled");
+      }
+    } catch (error) {
+      handleCliError(error, Boolean(opts.json));
+    }
+  });
+
+async function readAllStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", reject);
+  });
+}
+
+program
+  .command("exec")
+  .description("Execute a ChatGPT C2C PLAN with the configured executor (agy | codex)")
+  .option("-w, --workspace <path>")
+  .option("--executor <name>", "Override executor for this run (agy | codex)")
+  .option("--plan <text>", "Inline plan text")
+  .option("--plan-file <path>", "Path to a markdown plan file")
+  .option("--plan-stdin", "Read the plan text from stdin")
+  .option("--tests <summary>", "Test summary string to record")
+  .option("--task <id>", "C2C Task ID")
+  .option("--iteration <n>", "C2C Iteration number")
+  .option("--timeout <ms>", "Execution timeout in milliseconds")
+  .option("--json", "output in JSON format")
+  .action(
+    async (opts: {
+      workspace?: string;
+      executor?: string;
+      plan?: string;
+      planFile?: string;
+      planStdin?: boolean;
+      tests?: string;
+      task?: string;
+      iteration?: string;
+      timeout?: string;
+      json?: boolean;
+    }) => {
+      try {
+        const wsPath = resolveWorkspace(opts.workspace);
+        let planText = "";
+        if (opts.planStdin) {
+          planText = await readAllStdin();
+        } else if (opts.planFile) {
+          planText = fs.readFileSync(opts.planFile, "utf8");
+        } else if (opts.plan) {
+          if (fs.existsSync(opts.plan) && fs.statSync(opts.plan).isFile()) {
+            planText = fs.readFileSync(opts.plan, "utf8");
+          } else {
+            planText = opts.plan;
+          }
+        } else {
+          throw new Error("One of --plan <text>, --plan-file <file>, or --plan-stdin is required.");
+        }
+
+        if (!planText.trim()) {
+          throw new Error("Plan text cannot be empty.");
+        }
+
+        const execResult = await executePlan({
+          workspace: wsPath,
+          plan: planText,
+          executorName: opts.executor,
+          taskId: opts.task,
+          iteration: opts.iteration ? parseInt(opts.iteration, 10) : undefined,
+          timeoutMs: opts.timeout ? parseInt(opts.timeout, 10) : undefined,
+        });
+
+        const exitStatus =
+          execResult.result.blockedReason === "PERMISSION_DENIED"
+            ? "blocked"
+            : execResult.result.ok
+              ? "ok"
+              : "failed";
+
+        // Try to discover test results from stdout/response if not explicitly passed
+        let testResult = opts.tests ?? null;
+        if (!testResult && execResult.result.stdout) {
+          testResult = extractTestSummary(execResult.result.stdout);
+        }
+
+        if (opts.task && opts.iteration) {
+          const workspace = new Workspace(wsPath);
+          appendExecutionRecord(workspace.id, {
+            taskId: opts.task,
+            iteration: parseInt(opts.iteration, 10),
+            changedFiles: execResult.changedFiles,
+            tests: testResult,
+            exitStatus,
+            timestamp: new Date().toISOString(),
+            notes: `Executed via ${execResult.result.executor} in ${execResult.result.durationMs}ms`,
+          });
+        }
+
+        if (opts.json) {
+          say(JSON.stringify({ ok: execResult.result.ok, exitStatus, ...execResult }));
+        } else {
+          if (execResult.result.ok) {
+            check(
+              `Plan executed successfully via ${execResult.result.executor} (${execResult.result.durationMs}ms)`
+            );
+          } else if (exitStatus === "blocked") {
+            cross(
+              `Plan execution blocked via ${execResult.result.executor}: ${execResult.result.error || "permission denied"}`
+            );
+          } else {
+            cross(
+              `Plan execution failed via ${execResult.result.executor}: ${execResult.result.error || "non-zero exit"}`
+            );
+          }
+          if (execResult.changedFiles.length > 0) {
+            say(`Changed files (${execResult.changedFiles.length}):`);
+            for (const f of execResult.changedFiles) {
+              say(`  - ${f}`);
+            }
+          }
+        }
+
+        if (!execResult.result.ok) {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        handleCliError(error, Boolean(opts.json));
+      }
     }
   );
 
