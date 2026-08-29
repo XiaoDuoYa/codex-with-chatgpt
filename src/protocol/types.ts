@@ -64,5 +64,6 @@ export const TaskSnapshotSchema = z.object({
       reason: z.string(),
     })
     .nullable(),
+  publicationKey: z.string().nullable().optional(),
 });
 export type TaskSnapshot = z.infer<typeof TaskSnapshotSchema>;
