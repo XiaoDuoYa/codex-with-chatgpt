@@ -2,6 +2,9 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import type { ClientRegistration } from "./clients.js";
+
+export type { ClientRegistration };
 
 export const SUPPORTED_SCOPES = [
   "workspace.read",
@@ -12,13 +15,6 @@ export const SUPPORTED_SCOPES = [
 ] as const;
 
 export type Scope = (typeof SUPPORTED_SCOPES)[number];
-
-export interface ClientRegistration {
-  clientId: string;
-  clientName?: string;
-  redirectUris: string[];
-  createdAt: string;
-}
 
 export interface AuthorizationCodeRecord {
   code: string;
@@ -44,7 +40,8 @@ export interface TokenRecord {
 }
 
 interface PersistedAuthState {
-  clients: ClientRegistration[];
+  /** Legacy field: clients moved to the host-wide ClientRegistry (clients.json). */
+  clients?: ClientRegistration[];
   tokens: TokenRecord[];
 }
 
@@ -77,7 +74,6 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 export class AuthStore {
-  private clients = new Map<string, ClientRegistration>();
   private tokens = new Map<string, TokenRecord>();
   private authCodes = new Map<string, AuthorizationCodeRecord>();
   private readonly file: string;
@@ -95,7 +91,6 @@ export class AuthStore {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
     if (!data) return;
     const now = Date.now();
-    for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
     for (const token of data.tokens ?? []) {
       if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
     }
@@ -104,28 +99,9 @@ export class AuthStore {
   private save(): void {
     const now = Date.now();
     const state: PersistedAuthState = {
-      clients: [...this.clients.values()],
       tokens: [...this.tokens.values()].filter((t) => !t.revoked && t.expiresAt > now),
     };
     writeSecureJson(this.file, state);
-  }
-
-  // ---- Dynamic Client Registration -------------------------------------
-
-  registerClient(input: { clientName?: string; redirectUris: string[] }): ClientRegistration {
-    const client: ClientRegistration = {
-      clientId: `c2c_client_${randomBytes(12).toString("base64url")}`,
-      clientName: input.clientName,
-      redirectUris: input.redirectUris,
-      createdAt: new Date().toISOString(),
-    };
-    this.clients.set(client.clientId, client);
-    this.save();
-    return client;
-  }
-
-  getClient(clientId: string): ClientRegistration | undefined {
-    return this.clients.get(clientId);
   }
 
   // ---- Authorization codes ----------------------------------------------
@@ -216,6 +192,16 @@ export class AuthStore {
     if (record.revoked) return { ok: false, reason: "revoked" };
     if (Date.now() > record.expiresAt) return { ok: false, reason: "expired" };
     return { ok: true, record };
+  }
+
+  /**
+   * Read-only refresh-token lookup. The multi-workspace host uses it to route
+   * a refresh grant to the store that owns the token before rotating it.
+   */
+  findRefreshToken(refreshToken: string): TokenRecord | null {
+    const record = this.tokens.get(sha256hex(refreshToken));
+    if (!record || record.kind !== "refresh") return null;
+    return record;
   }
 
   /** Refresh-token rotation: old refresh token is revoked, a new pair is issued. */

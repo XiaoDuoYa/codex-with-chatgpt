@@ -1,17 +1,29 @@
 import { Router, type Request, type Response, urlencoded, json } from "express";
 import { randomBytes } from "node:crypto";
-import { AuthStore, SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual } from "./store.js";
-import { PairingManager } from "../pairing/manager.js";
+import { SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual, type AuthStore } from "./store.js";
+import type { ClientRegistry } from "./clients.js";
+import type { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME } from "../version.js";
 
-export interface OAuthDeps {
-  store: AuthStore;
-  pairing: PairingManager;
+/** One hosted workspace as seen by the OAuth routes. */
+export interface WorkspaceEntryView {
+  workspaceId: string;
   workspaceName: string;
+  pairing: PairingManager;
+  store: AuthStore;
+}
+
+export interface OAuthDeps {
+  clients: ClientRegistry;
+  /** Live workspace entries; workspaces can join the host at runtime. */
+  entries: () => WorkspaceEntryView[];
   getBaseUrl: (req: Request) => string;
   logger: Logger;
 }
+
+/** Wrong pairing codes allowed per authorization request (plus per-IP rate). */
+const MAX_ATTEMPTS_PER_REQUEST = 5;
 
 interface PendingAuthRequest {
   id: string;
@@ -21,6 +33,7 @@ interface PendingAuthRequest {
   state?: string;
   codeChallenge: string;
   resource?: string;
+  attemptsLeft: number;
   expiresAt: number;
 }
 
@@ -66,7 +79,7 @@ function protectedResourceMetadata(base: string): Record<string, unknown> {
 
 function pairingPage(opts: {
   requestId: string;
-  workspaceName: string;
+  workspaceName: string | null;
   scopes: string[];
   error?: string;
 }): string {
@@ -80,6 +93,9 @@ function pairingPage(opts: {
   const scopeList = opts.scopes
     .map((scope) => `<li>${scopeLabels[scope] ?? scope}</li>`)
     .join("");
+  const workspaceLine = opts.workspaceName
+    ? `ChatGPT is requesting access to workspace <strong>${opts.workspaceName}</strong> (read-only):`
+    : `ChatGPT is requesting read-only access to the workspace whose pairing code you enter:`;
   const errorHtml = opts.error
     ? `<p class="error" role="alert">${opts.error}</p>`
     : "";
@@ -115,7 +131,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${PRODUCT_NAME}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${opts.workspaceName}</strong> (read-only):</p>
+  <p class="sub">${workspaceLine}</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${opts.requestId}">
@@ -128,6 +144,36 @@ function pairingPage(opts: {
 </div>
 </body>
 </html>`;
+}
+
+/**
+ * Verify a pairing code against every hosted workspace WITHOUT letting a
+ * wrong code consume attempts or rate budget on unrelated workspaces:
+ * `match()` identifies the owning workspace non-mutatingly; only that
+ * workspace's manager then destructively verifies the code. Wrong codes are
+ * punished by this host-wide limiter instead.
+ */
+const FAIL_LIMIT = 10;
+const FAIL_WINDOW_MS = 60_000;
+const failHits = new Map<string, { count: number; resetAt: number }>();
+
+function hostFailAllowed(ip: string | undefined): boolean {
+  if (!ip) return true;
+  const now = Date.now();
+  const entry = failHits.get(ip);
+  if (!entry || now > entry.resetAt) return true;
+  return entry.count < FAIL_LIMIT;
+}
+
+function registerHostFail(ip: string | undefined): void {
+  if (!ip) return;
+  const now = Date.now();
+  const entry = failHits.get(ip);
+  if (!entry || now > entry.resetAt) {
+    failHits.set(ip, { count: 1, resetAt: now + FAIL_WINDOW_MS });
+    return;
+  }
+  entry.count++;
 }
 
 export function createOAuthRouter(deps: OAuthDeps): Router {
@@ -170,7 +216,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       });
       return;
     }
-    const client = deps.store.registerClient({
+    const client = deps.clients.registerClient({
       clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
       redirectUris: redirectUris as string[],
     });
@@ -190,7 +236,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   router.get("/oauth/authorize", (req, res) => {
     prunePending();
     const query = req.query as Record<string, string | undefined>;
-    const client = query.client_id ? deps.store.getClient(query.client_id) : undefined;
+    const client = query.client_id ? deps.clients.getClient(query.client_id) : undefined;
     if (!client) {
       res.status(400).send("Unknown client. Please reconnect from ChatGPT.");
       return;
@@ -216,6 +262,8 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
     const scopes = filterScopes(query.scope);
+    const entries = deps.entries();
+    const workspaceName = entries.length === 1 ? entries[0].workspaceName : null;
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
       clientId: client.clientId,
@@ -224,13 +272,14 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       state: query.state,
       codeChallenge: query.code_challenge,
       resource: query.resource,
+      attemptsLeft: MAX_ATTEMPTS_PER_REQUEST,
       expiresAt: Date.now() + 10 * 60_000,
     };
     pendingRequests.set(request.id, request);
     res
       .status(200)
       .type("html")
-      .send(pairingPage({ requestId: request.id, workspaceName: deps.workspaceName, scopes }));
+      .send(pairingPage({ requestId: request.id, workspaceName, scopes }));
   });
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
@@ -241,31 +290,62 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
-    if (!verdict.ok) {
-      const messages: Record<string, string> = {
-        invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
-        expired: "This pairing code has expired. Ask Codex to generate a new one.",
-        too_many_attempts: "Too many incorrect attempts. Ask Codex to generate a new pairing code.",
-        rate_limited: "Too many attempts. Please wait a minute and try again.",
-        no_active_session: "No active pairing session. Ask Codex to generate a pairing code.",
-      };
-      deps.logger.warn(`Pairing verification failed: ${verdict.reason}`);
+    const entries = deps.entries();
+    const sendPage = (status: number, error: string): void => {
       res
-        .status(verdict.reason === "invalid" ? 401 : 410)
+        .status(status)
         .type("html")
         .send(
           pairingPage({
             requestId: request.id,
-            workspaceName: deps.workspaceName,
+            workspaceName: entries.length === 1 ? entries[0].workspaceName : null,
             scopes: request.scopes,
-            error: messages[verdict.reason] ?? "Verification failed.",
+            error,
           })
         );
+    };
+
+    if (!entries.some((entry) => entry.pairing.hasActiveSession())) {
+      sendPage(410, "No active pairing session. Ask Codex to generate a pairing code.");
       return;
     }
+    if (!hostFailAllowed(req.ip)) {
+      sendPage(429, "Too many attempts. Please wait a minute and try again.");
+      return;
+    }
+    const normalizedCode = body.pairing_code ?? "";
+    const hit = entries.map((entry) => ({ entry, m: entry.pairing.match(normalizedCode) })).find((h) => h.m);
+    if (!hit) {
+      // Brute-force budget: per authorization request (IP-independent — the
+      // request id is unguessable and expires) plus the per-IP limiter above.
+      request.attemptsLeft--;
+      registerHostFail(req.ip);
+      if (request.attemptsLeft <= 0) {
+        pendingRequests.delete(request.id);
+        sendPage(410, "Too many incorrect attempts. Please reconnect from ChatGPT and ask Codex for a new pairing code.");
+        return;
+      }
+      deps.logger.warn("Pairing code matched no workspace (attempt recorded)");
+      sendPage(401, `Incorrect pairing code. ${request.attemptsLeft} attempts left.`);
+      return;
+    }
+    const verdict = hit.entry.pairing.verify(normalizedCode, req.ip);
+    if (!verdict.ok) {
+      const reason = verdict.reason;
+      const messages: Record<string, string> = {
+        expired: "This pairing code has expired. Ask Codex to generate a new one.",
+        too_many_attempts: "Too many incorrect attempts. Ask Codex to generate a new pairing code.",
+        rate_limited: "Too many attempts. Please wait a minute and try again.",
+        invalid: "Incorrect pairing code.",
+        no_active_session: "No active pairing session. Ask Codex to generate a pairing code.",
+      };
+      deps.logger.warn(`Pairing verification failed: ${reason}`);
+      sendPage(reason === "invalid" ? 401 : 410, messages[reason] ?? "Verification failed.");
+      return;
+    }
+    const entry = hit.entry;
     pendingRequests.delete(request.id);
-    const code = deps.store.createAuthorizationCode({
+    const code = entry.store.createAuthorizationCode({
       clientId: request.clientId,
       redirectUri: request.redirectUri,
       codeChallenge: request.codeChallenge,
@@ -273,7 +353,9 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       pairingSessionId: verdict.sessionId,
       resource: request.resource,
     });
-    deps.logger.info(`Pairing verified; issued authorization code for client ${request.clientId}`);
+    deps.logger.info(
+      `Pairing verified for workspace ${entry.workspaceName}; issued authorization code for client ${request.clientId}`
+    );
     const url = new URL(request.redirectUri);
     url.searchParams.set("code", code);
     if (request.state) url.searchParams.set("state", request.state);
@@ -292,8 +374,24 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_request" });
         return;
       }
-      const record = deps.store.consumeAuthorizationCode(code);
-      if (!record || record.clientId !== clientId) {
+      // The code lives in the store of the workspace it was issued for. The
+      // record's workspaceId must equal the owning store's workspace — that
+      // invariant is what routes the issued tokens to the right workspace.
+      let record: ReturnType<AuthStore["consumeAuthorizationCode"]> = null;
+      let owningEntry: WorkspaceEntryView | null = null;
+      for (const entry of deps.entries()) {
+        const candidate = entry.store.consumeAuthorizationCode(code);
+        if (!candidate) continue;
+        if (candidate.workspaceId !== entry.workspaceId) {
+          deps.logger.warn("Authorization code workspaceId does not match its owning store; rejecting");
+          res.status(400).json({ error: "invalid_grant" });
+          return;
+        }
+        record = candidate;
+        owningEntry = entry;
+        break;
+      }
+      if (!record || !owningEntry || record.clientId !== clientId) {
         res.status(400).json({ error: "invalid_grant" });
         return;
       }
@@ -306,8 +404,8 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
-      const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
-      deps.logger.info(`Issued access token for client ${clientId}`);
+      const tokens = owningEntry.store.issueTokens({ clientId, scopes: record.scopes });
+      deps.logger.info(`Issued access token for client ${clientId} (workspace ${record.workspaceId})`);
       res.json({
         access_token: tokens.accessToken,
         token_type: "Bearer",
@@ -324,7 +422,18 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_request" });
         return;
       }
-      const result = deps.store.refresh(refreshToken, clientId);
+      let owningStore: AuthStore | null = null;
+      for (const entry of deps.entries()) {
+        const record = entry.store.findRefreshToken(refreshToken);
+        if (!record) continue;
+        if (record.workspaceId !== entry.workspaceId) {
+          deps.logger.warn("Refresh token workspaceId does not match its owning store; ignoring");
+          continue;
+        }
+        owningStore = entry.store;
+        break;
+      }
+      const result = owningStore?.refresh(refreshToken, clientId) ?? { ok: false as const, reason: "invalid_grant" };
       if (!result.ok) {
         res.status(400).json({ error: result.reason });
         return;
@@ -346,7 +455,9 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
 
   router.post("/oauth/revoke", urlencoded({ extended: false }), (req, res) => {
     const body = req.body as { token?: string };
-    if (body.token) deps.store.revokeToken(body.token);
+    if (body.token) {
+      for (const entry of deps.entries()) entry.store.revokeToken(body.token);
+    }
     res.status(200).json({});
   });
 

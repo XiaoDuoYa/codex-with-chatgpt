@@ -31,14 +31,23 @@ describe("PairingManager", () => {
     expect(manager.verify(sloppy).ok).toBe(true);
   });
 
-  it("rejects wrong codes and limits attempts", () => {
-    const manager = new PairingManager("ws1", { maxAttempts: 3 });
-    manager.create();
-    expect(manager.verify("AAAA-AAAA")).toMatchObject({ ok: false, reason: "invalid", attemptsLeft: 2 });
-    expect(manager.verify("BBBB-BBBB")).toMatchObject({ ok: false, reason: "invalid", attemptsLeft: 1 });
-    expect(manager.verify("CCCC-CCCC")).toMatchObject({ ok: false, reason: "too_many_attempts" });
-    // session destroyed after brute-force limit
-    expect(manager.verify("DDDD-DDDD")).toMatchObject({ ok: false, reason: "no_active_session" });
+  it("wrong codes stay non-destructive; the real code still works", () => {
+    const manager = new PairingManager("ws1");
+    const { code } = manager.create();
+    expect(manager.verify("AAAA-AAAA")).toMatchObject({ ok: false, reason: "invalid" });
+    expect(manager.verify("BBBB-BBBB")).toMatchObject({ ok: false, reason: "invalid" });
+    // Wrong guesses no longer burn the session's attempts (the host applies
+    // its own rate limiter); the genuine code remains usable.
+    expect(manager.verify(code).ok).toBe(true);
+  });
+
+  it("match() identifies a code without consuming it", () => {
+    const manager = new PairingManager("ws1");
+    const { code } = manager.create();
+    expect(manager.match(code.toLowerCase().replace("-", ""))).toMatchObject({ sessionId: expect.any(String) });
+    expect(manager.match("AAAA-AAAA")).toBeNull();
+    // still usable after any number of match() calls
+    expect(manager.verify(code).ok).toBe(true);
   });
 
   it("expires codes after the TTL", () => {
@@ -50,7 +59,7 @@ describe("PairingManager", () => {
   });
 
   it("rate limits per IP", () => {
-    const manager = new PairingManager("ws1", { ipRateLimit: 3, maxAttempts: 100 });
+    const manager = new PairingManager("ws1", { ipRateLimit: 3 });
     manager.create();
     manager.verify("AAAA-AAAA", "1.2.3.4");
     manager.verify("AAAA-AAAA", "1.2.3.4");
