@@ -7,6 +7,7 @@ import { makeTmpDir, cleanup, write } from "./helpers.js";
 let root: string;
 let outside: string;
 let ws: Workspace;
+let symlinksReady: boolean;
 
 beforeAll(() => {
   root = makeTmpDir("ws");
@@ -22,9 +23,15 @@ beforeAll(() => {
   write(outside, "secret.txt", "outside data\n");
   write(root, ".c2cignore", "private-notes/\n");
   write(root, "private-notes/todo.md", "secret notes\n");
-  // symlink pointing outside the workspace
-  fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "link-out.txt"));
-  fs.symlinkSync(outside, path.join(root, "dir-out"));
+  // symlink pointing outside the workspace (needs symlink privileges, e.g.
+  // absent for unprivileged Windows runners — the escape tests then skip)
+  symlinksReady = true;
+  try {
+    fs.symlinkSync(path.join(outside, "secret.txt"), path.join(root, "link-out.txt"));
+    fs.symlinkSync(outside, path.join(root, "dir-out"));
+  } catch {
+    symlinksReady = false;
+  }
   ws = new Workspace(root);
 });
 
@@ -68,6 +75,7 @@ describe("path containment", () => {
   });
 
   it("rejects symlinked file escaping the workspace", () => {
+    if (!symlinksReady) return; // symlink privilege unavailable
     try {
       ws.resolve("link-out.txt");
       expect.unreachable("should have thrown");
@@ -77,6 +85,7 @@ describe("path containment", () => {
   });
 
   it("rejects paths through a symlinked directory escaping the workspace", () => {
+    if (!symlinksReady) return; // symlink privilege unavailable
     try {
       ws.resolve("dir-out/secret.txt");
       expect.unreachable("should have thrown");
