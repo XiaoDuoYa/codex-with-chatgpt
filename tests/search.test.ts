@@ -5,11 +5,14 @@ import { makeTmpDir, cleanup, write } from "./helpers.js";
 
 let root: string;
 let ws: Workspace;
+const globMarker = "C2C_GLOB_MARKER";
 
 beforeAll(() => {
   root = makeTmpDir("search-ws");
   write(root, "src/auth.ts", "export function login() { return 'needle-alpha'; }\n");
-  write(root, "src/deep/nested.ts", "// needle-alpha appears here too\n");
+  write(root, "src/deep/nested.ts", `// needle-alpha appears here too\n${globMarker}\n`);
+  write(root, "src/root.ts", `${globMarker}\n`);
+  write(root, "root.ts", `${globMarker}\n`);
   write(root, "README.md", "This project contains needle-alpha documentation.\n");
   write(root, ".env", "NEEDLE-ALPHA=secret\n");
   write(root, "node_modules/pkg/index.js", "needle-alpha in dependencies\n");
@@ -71,6 +74,13 @@ describe.each(engines())("search engine: %s", (engine) => {
     const paths = result.matches.map((match) => match.path);
     expect(paths).toContain("README.md");
     expect(paths.some((p) => p.endsWith(".ts"))).toBe(false);
+  });
+
+  it("matches root and nested files for recursive globs", async () => {
+    configure();
+    const result = await searchWorkspace(ws, { query: globMarker, glob: "**/*.ts" });
+    const paths = result.matches.map((match) => match.path).sort();
+    expect(paths).toEqual(["root.ts", "src/deep/nested.ts", "src/root.ts"]);
   });
 
   it("restricts search to a subdirectory", async () => {
