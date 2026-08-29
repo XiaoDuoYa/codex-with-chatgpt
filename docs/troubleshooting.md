@@ -78,6 +78,14 @@ shared host fixes this. Update, then `c2c restart -w <workspace>` once per
 workspace (or just run `c2c doctor`); existing connectors keep working —
 tokens are bound to the workspace, not the process.
 
+### Pinning a fixed public domain
+```
+c2c tunnel named --public-url https://c2c.example.com   --tunnel-name my-laptop --credentials-file ~/.cloudflared/my-laptop.json
+```
+`c2c tunnel status` shows the current mode; `c2c tunnel quick` reverts to
+rotating Quick Tunnel addresses. If a running bridge cannot be reached to
+apply the change, it takes effect at the next bridge start.
+
 ### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
 Working as intended: `.env`, keys, credentials and anything matched by
 `.c2cignore` are never readable through ChatGPT. `.env.example` is allowed.

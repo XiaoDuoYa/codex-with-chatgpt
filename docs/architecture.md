@@ -43,7 +43,8 @@ A single bridge process serves **all** workspaces of a user (and therefore all
 parallel agent sessions — any tool that runs `c2c`). The
 first session spawns the host; later sessions register their workspace with
 the running host through the loopback-only admin API instead of starting a
-competing process. This matters because the public address is machine-wide: two bridges would each run
+competing process. This matters because the public address is machine-wide
+(especially with a fixed-domain named tunnel): two bridges would each run
 their own `cloudflared` for the same hostname with different local upstream
 ports, and Cloudflare would round-robin requests onto the wrong workspace —
 surfacing as random 401s and endless re-pairing. With one host there is
@@ -77,7 +78,7 @@ exactly one tunnel and one upstream, so dispatch is always correct.
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591, host-wide `ClientRegistry`), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
-| `tunnel/` | `TunnelProvider` interface + Cloudflare Quick Tunnel |
+| `tunnel/` | `TunnelProvider` interface; Cloudflare Quick Tunnel and Named Tunnel (fixed domain) implementations; `tunnel.json` config shared by bridge and CLI |
 | `execution/` | JSONL execution records written by `c2c record`, read by `execution_summary` / `test_status` |
 | `process/` | Host spawn/adopt (lock + `host.json`), workspace registration, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |
@@ -101,4 +102,7 @@ access + refresh tokens.
 for it — they join the running host (`runtime/host.json` + lock). The
 ephemeral fallback exists only for conflicts with foreign programs.
 
-**Tunnel**: the host runs exactly one `cloudflared` Quick Tunnel whose URL rotates per start — `c2c doctor` restarts it and the Skill reconfigures the ChatGPT connector.
+**Tunnel**: the host runs exactly one `cloudflared`. With `tunnel.json`
+present (written by `c2c tunnel named`) it runs a named tunnel with a fixed
+public URL; otherwise a Quick Tunnel whose URL rotates per start — `c2c
+doctor` restarts it and the Skill reconfigures the ChatGPT connector.

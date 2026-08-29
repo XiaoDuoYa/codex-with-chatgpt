@@ -164,6 +164,17 @@ to exactly one workspace, so a shared bridge never means shared access.
 其余会话自动把自己的工作区注册进去。每个 ChatGPT 连接器的令牌仍然只绑定
 自己那一个工作区——共享的是进程，不是权限。
 
+By default the public address rotates (Quick Tunnel). To pin a **fixed
+domain**, run once:
+
+```bash
+c2c tunnel named   --public-url https://c2c.example.com   --tunnel-name my-laptop   --credentials-file ~/.cloudflared/my-laptop.json
+```
+
+默认模式是每次启动更换地址的 Quick Tunnel；`c2c tunnel named` 一次即可固定
+域名（`c2c tunnel status` 查看，`c2c tunnel quick` 切回）。固定域名 + 单一
+Bridge 意味着：重启、多会话、多项目都不再需要重新配对。
+
 ## Security model (short version)
 
 - **Read-only by construction**: write/delete/shell/commit tools simply do not

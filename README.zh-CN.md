@@ -109,6 +109,15 @@ Ready.
 自动把自己的工作区注册进去。每个 ChatGPT 连接器的令牌仍然只绑定自己那一个
 工作区——共享的是进程，不是权限。
 
+默认公网地址每次启动都会更换（Quick Tunnel）。想固定域名只需执行一次：
+
+```bash
+c2c tunnel named   --public-url https://c2c.example.com   --tunnel-name my-laptop   --credentials-file ~/.cloudflared/my-laptop.json
+```
+
+`c2c tunnel status` 查看当前模式，`c2c tunnel quick` 切回临时地址。
+固定域名 + 单一 Bridge 意味着：重启、多会话、多项目都不再需要重新配对。
+
 ## 安全模型（简版）
 
 - **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
