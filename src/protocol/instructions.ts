@@ -1,13 +1,5 @@
 import { TaskSnapshotSchema, type TaskSnapshot } from "./types.js";
-
-export interface TransportDescriptor {
-  kind: "mcp" | "github";
-  locator: Record<string, string>;
-  capabilities: {
-    directRead: boolean;
-    requiresManualRelay: boolean;
-  };
-}
+import type { TransportDescriptor } from "../transport/types.js";
 
 export function buildPlanInstruction(input: TaskSnapshot, transport: TransportDescriptor): string {
   const snapshot = TaskSnapshotSchema.parse(input);

@@ -9,7 +9,7 @@ import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { appendExecutionRecord } from "../execution/records.js";
-import { detectTunnelBinaries } from "../tunnel/detect.js";
+import { ensureMcpBridgeAndTunnel } from "../transport/mcp.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
@@ -62,28 +62,6 @@ interface AdminInfo {
   startedAt: string;
 }
 
-async function ensureBridgeAndTunnel(
-  workspaceRoot: string,
-  opts: { tunnel: boolean }
-): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
-  const { runtime } = await ensureBridge(workspaceRoot);
-  let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-  let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
-  if (opts.tunnel && !info.publicUrl) {
-    const binaries = detectTunnelBinaries();
-    if (!binaries.cloudflared) {
-      throw new Error(
-        "NEED_CLOUDFLARED: cloudflared is not installed. Install it first (macOS: brew install cloudflared)."
-      );
-    }
-    const result = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
-    if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
-    info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    mcpUrl = `${result.url}/mcp`;
-  }
-  return { runtime, info, mcpUrl };
-}
-
 program
   .name("c2c")
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
@@ -123,7 +101,7 @@ program
   .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     try {
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const { runtime, info, mcpUrl } = await ensureMcpBridgeAndTunnel(root, { tunnel: opts.tunnel });
       if (opts.json) {
         say(JSON.stringify({ ok: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl }));
         return;
@@ -154,7 +132,7 @@ program
         say("");
       }
       const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const { runtime, info, mcpUrl } = await ensureMcpBridgeAndTunnel(root, { tunnel: opts.tunnel });
       const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
       if (opts.json) {
         say(
@@ -207,7 +185,7 @@ program
     await stopBridge(root);
     await new Promise((resolve) => setTimeout(resolve, 500));
     try {
-      const { info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const { info, mcpUrl } = await ensureMcpBridgeAndTunnel(root, { tunnel: opts.tunnel });
       check(`Bridge 已重启（${info.workspaceName}）`);
       if (mcpUrl) check(`安全连接已建立`);
     } catch (error) {

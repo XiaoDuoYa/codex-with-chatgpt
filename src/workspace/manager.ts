@@ -58,6 +58,12 @@ export interface ListDirectoryResult {
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
+  transport?: "auto" | "mcp" | "github";
+  github?: {
+    remote?: string;
+    push?: boolean;
+    createBranch?: boolean;
+  };
 }
 
 const DEFAULT_MAX_LINES = 400;
