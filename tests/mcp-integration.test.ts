@@ -187,4 +187,63 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(allowed.isError ?? false).toBe(false);
     await limitedClient.close();
   });
+
+  it("git_diff over MCP excludes sensitive files like .npmrc and service-account*.json", async () => {
+    write(root, ".npmrc", "//registry.npmjs.org/:_authToken=supersecret-npm-token\n");
+    write(root, "service-account-test.json", '{"private_key": "supersecret-sa-key"}\n');
+    write(root, "src/visible.ts", "export const visible = 'safe-change';\n");
+
+    git(root, "add", "-f", ".npmrc", "service-account-test.json", "src/visible.ts");
+
+    const result = jsonOf<{ diff: string; isRepo: boolean }>(
+      await client.callTool({ name: "git_diff", arguments: { mode: "staged" } })
+    );
+
+    expect(result.isRepo).toBe(true);
+    expect(result.diff).toContain("safe-change");
+    expect(result.diff).not.toContain("supersecret-npm-token");
+    expect(result.diff).not.toContain("supersecret-sa-key");
+
+    git(root, "rm", "-f", "--cached", ".npmrc", "service-account-test.json", "src/visible.ts");
+  });
+
+  it("git_diff over MCP blocks sensitive-to-safe renames from leaking original content", async () => {
+    write(root, ".npmrc", "//registry.npmjs.org/:_authToken=mcp-secret-token-123\n");
+    git(root, "add", "-f", ".npmrc");
+    git(root, "commit", "-m", "add secret to rename");
+
+    git(root, "mv", ".npmrc", "public_harmless.txt");
+
+    const result = jsonOf<{ diff: string; isRepo: boolean }>(
+      await client.callTool({ name: "git_diff", arguments: { mode: "staged" } })
+    );
+
+    expect(result.isRepo).toBe(true);
+    expect(result.diff).not.toContain("mcp-secret-token-123");
+    expect(result.diff).not.toContain("public_harmless.txt");
+
+    git(root, "reset", "--hard", "HEAD");
+  });
+
+  it("git_diff over MCP with path='src' blocks cross-boundary rename leaks from root secrets", async () => {
+    write(root, ".npmrc", "//registry.npmjs.org/:_authToken=root-mcp-scoped-secret\n");
+    git(root, "add", "-f", ".npmrc");
+    git(root, "commit", "-m", "add root secret for scoped test");
+
+    // Rename root .npmrc to src/public.txt
+    git(root, "mv", ".npmrc", "src/public.txt");
+
+    const result = jsonOf<{ diff: string; isRepo: boolean }>(
+      await client.callTool({
+        name: "git_diff",
+        arguments: { mode: "staged", path: "src" },
+      })
+    );
+
+    expect(result.isRepo).toBe(true);
+    expect(result.diff).not.toContain("root-mcp-scoped-secret");
+    expect(result.diff).not.toContain("src/public.txt");
+
+    git(root, "reset", "--hard", "HEAD");
+  });
 });

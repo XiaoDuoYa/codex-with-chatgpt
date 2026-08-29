@@ -115,4 +115,163 @@ describe("gitDiff pagination", () => {
     const diff = gitDiff(plain, { mode: "unstaged" });
     expect(diff.isRepo).toBe(false);
   });
+
+  it("excludes all IgnoreRules sensitive patterns across unstaged, staged, and head modes", () => {
+    const sensitiveFiles = [
+      { path: ".env", content: "SECRET_KEY=leaked-env\n", sentinel: "leaked-env" },
+      { path: ".npmrc", content: "//registry.npmjs.org/:_authToken=leaked-npm\n", sentinel: "leaked-npm" },
+      { path: ".netrc", content: "machine github.com password leaked-netrc\n", sentinel: "leaked-netrc" },
+      { path: ".aws/credentials", content: "aws_secret_access_key=leaked-aws\n", sentinel: "leaked-aws" },
+      { path: "nested/.ssh/config", content: "IdentityFile leaked-ssh\n", sentinel: "leaked-ssh" },
+      { path: "credentials.json", content: '{"client_secret": "leaked-creds"}\n', sentinel: "leaked-creds" },
+      { path: "service-account-prod.json", content: '{"private_key": "leaked-sa"}\n', sentinel: "leaked-sa" },
+      { path: "secrets.json", content: '{"db_pass": "leaked-secrets"}\n', sentinel: "leaked-secrets" },
+      { path: "id_ed25519", content: "-----BEGIN OPENSSH PRIVATE KEY-----\nleaked-key\n", sentinel: "leaked-key" },
+    ];
+
+    // Also include a safe file to confirm normal diffs are returned alongside excluded secrets
+    write(repo, "src/safe.ts", "export const safe = 1;\n");
+    git(repo, "add", "src/safe.ts");
+    git(repo, "commit", "-m", "add safe file");
+
+    for (const item of sensitiveFiles) {
+      write(repo, item.path, item.content);
+      git(repo, "add", "-f", item.path);
+    }
+
+    // 1. Staged mode
+    const stagedDiff = gitDiff(repo, { mode: "staged" });
+    for (const item of sensitiveFiles) {
+      expect(stagedDiff.diff).not.toContain(item.sentinel);
+    }
+
+    // Commit them so we can test unstaged changes and HEAD diffs
+    git(repo, "commit", "-m", "tracked sensitive files");
+
+    // 2. Unstaged modifications to tracked sensitive files + normal file
+    for (const item of sensitiveFiles) {
+      write(repo, item.path, item.content + "# modified-unstaged\n");
+    }
+    write(repo, "src/safe.ts", "export const safe = 2; // modified-safe\n");
+
+    const unstagedDiff = gitDiff(repo, { mode: "unstaged" });
+    expect(unstagedDiff.diff).toContain("modified-safe");
+    for (const item of sensitiveFiles) {
+      expect(unstagedDiff.diff).not.toContain(item.sentinel);
+      expect(unstagedDiff.diff).not.toContain("modified-unstaged");
+    }
+
+    // 3. Head mode
+    const headDiff = gitDiff(repo, { mode: "head" });
+    expect(headDiff.diff).toContain("modified-safe");
+    for (const item of sensitiveFiles) {
+      expect(headDiff.diff).not.toContain(item.sentinel);
+    }
+
+    // Clean up
+    git(repo, "checkout", "--", "src/safe.ts", ...sensitiveFiles.map((s) => s.path));
+  });
+
+  it("allows .env.example while blocking .env", () => {
+    write(repo, ".env.example", "API_URL=https://example.com\n");
+    write(repo, ".env", "API_KEY=supersecret-123\n");
+    git(repo, "add", "-f", ".env.example", ".env");
+
+    const diff = gitDiff(repo, { mode: "staged" });
+    expect(diff.diff).toContain(".env.example");
+    expect(diff.diff).toContain("https://example.com");
+    expect(diff.diff).not.toContain("supersecret-123");
+
+    git(repo, "rm", "-f", "--cached", ".env.example", ".env");
+  });
+
+  it("respects custom rules in .c2cignore for git diff", () => {
+    write(repo, ".c2cignore", "private-notes/\ncustom-secret.txt\n");
+    write(repo, "private-notes/secret.md", "CONFIDENTIAL DATA\n");
+    write(repo, "custom-secret.txt", "TOP_SECRET_FLAG=1\n");
+    write(repo, "public.txt", "PUBLIC CONTENT\n");
+    git(repo, "add", "-f", ".c2cignore", "private-notes/secret.md", "custom-secret.txt", "public.txt");
+
+    const diff = gitDiff(repo, { mode: "staged" });
+    expect(diff.diff).toContain("public.txt");
+    expect(diff.diff).toContain("PUBLIC CONTENT");
+    expect(diff.diff).not.toContain("CONFIDENTIAL DATA");
+    expect(diff.diff).not.toContain("TOP_SECRET_FLAG");
+
+    git(repo, "rm", "-f", "--cached", ".c2cignore", "private-notes/secret.md", "custom-secret.txt", "public.txt");
+  });
+
+  it("handles rename provenance: sensitive->safe, safe->sensitive, safe->safe", () => {
+    // 1. Commit baseline files
+    write(repo, "old_safe.ts", "export const value = 'old-safe-data';\n");
+    write(repo, ".npmrc", "//registry.npmjs.org/:_authToken=npm-secret-token\n");
+    write(repo, "public_to_secret.txt", "harmless text\n");
+    git(repo, "add", "-f", "old_safe.ts", ".npmrc", "public_to_secret.txt");
+    git(repo, "commit", "-m", "init rename baseline");
+
+    // Case A: Safe -> Safe rename
+    git(repo, "mv", "old_safe.ts", "new_safe.ts");
+    // Case B: Sensitive -> Safe rename (Must be excluded!)
+    git(repo, "mv", ".npmrc", "renamed_public.txt");
+    // Case C: Safe -> Sensitive rename (Must be excluded!)
+    git(repo, "mv", "public_to_secret.txt", ".env.secret");
+
+    const stagedDiff = gitDiff(repo, { mode: "staged" });
+
+    // Safe->safe rename should appear
+    expect(stagedDiff.diff).toContain("old_safe.ts");
+    expect(stagedDiff.diff).toContain("new_safe.ts");
+
+    // Sensitive->safe must NOT leak
+    expect(stagedDiff.diff).not.toContain("npm-secret-token");
+    expect(stagedDiff.diff).not.toContain(".npmrc");
+    expect(stagedDiff.diff).not.toContain("renamed_public.txt");
+
+    // Safe->sensitive must NOT appear as sensitive patch
+    expect(stagedDiff.diff).not.toContain(".env.secret");
+
+    // Reset repo
+    git(repo, "reset", "--hard", "HEAD");
+  });
+
+  it("prevents cross-boundary scoped rename provenance leaks with path= scoping", () => {
+    // Baseline files
+    write(repo, ".npmrc", "//registry.npmjs.org/:_authToken=cross-scope-secret\n");
+    write(repo, "src/.npmrc", "//registry.npmjs.org/:_authToken=src-secret\n");
+    write(repo, "root_safe.ts", "export const rootSafe = 1;\n");
+    write(repo, "public.txt", "public content\n");
+    git(repo, "add", "-f", ".npmrc", "src/.npmrc", "root_safe.ts", "public.txt");
+    git(repo, "commit", "-m", "baseline for cross-scope rename");
+
+    // 1. Root .npmrc renamed to src/public.txt -> scoped git_diff(path="src")
+    git(repo, "mv", ".npmrc", "src/public.txt");
+
+    // 2. public.txt renamed to src/.env -> scoped git_diff(path="src")
+    git(repo, "mv", "public.txt", "src/.env");
+
+    // 3. Safe root_safe.ts renamed to src/new_safe.ts -> scoped git_diff(path="src")
+    git(repo, "mv", "root_safe.ts", "src/new_safe.ts");
+
+    // 4. src/.npmrc renamed to root_secret_leak.txt -> scoped git_diff(path="src")
+    git(repo, "mv", "src/.npmrc", "root_secret_leak.txt");
+
+    const srcDiff = gitDiff(repo, { mode: "staged" }, "src");
+
+    // Safe cross-scope rename is visible
+    expect(srcDiff.diff).toContain("root_safe.ts");
+    expect(srcDiff.diff).toContain("src/new_safe.ts");
+
+    // Sensitive->safe cross-scope rename MUST NOT leak
+    expect(srcDiff.diff).not.toContain("cross-scope-secret");
+    expect(srcDiff.diff).not.toContain("src/public.txt");
+
+    // Safe->sensitive cross-scope rename MUST NOT appear
+    expect(srcDiff.diff).not.toContain("src/.env");
+
+    // Sensitive deletion from src MUST NOT appear
+    expect(srcDiff.diff).not.toContain("src-secret");
+    expect(srcDiff.diff).not.toContain("root_secret_leak.txt");
+
+    git(repo, "reset", "--hard", "HEAD");
+  });
 });

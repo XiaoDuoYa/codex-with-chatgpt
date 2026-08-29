@@ -211,7 +211,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         }
         return ok(
           gitDiff(
-            workspace.root,
+            workspace,
             { mode: args.mode as DiffMode, offset: args.offset, maxBytes: args.max_bytes },
             relPath
           )

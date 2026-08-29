@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { IgnoreRules } from "./ignore.js";
 
 export interface GitCommandResult {
   ok: boolean;
@@ -125,31 +126,76 @@ export interface GitDiffResult {
   diff: string;
 }
 
-const SENSITIVE_DIFF_EXCLUDES = [
-  ":(exclude,glob)**/.env",
-  ":(exclude,glob)**/.env.*",
-  ":(exclude,glob)**/*.pem",
-  ":(exclude,glob)**/*.key",
-  ":(exclude,glob)**/id_rsa*",
-  ":(exclude,glob)**/id_ed25519*",
-];
+export interface WorkspaceLike {
+  root: string;
+  ignoreRules?: IgnoreRules;
+}
 
-export function gitDiff(root: string, opts: GitDiffOptions = {}, relPath?: string): GitDiffResult {
+export type GitTarget = string | WorkspaceLike;
+
+function getDiffModeArgs(mode: DiffMode): string[] {
+  if (mode === "staged") return ["--cached"];
+  if (mode === "head") return ["HEAD"];
+  return [];
+}
+
+function chunkSafePaths(paths: string[], maxCount = 50, maxBytes = 32 * 1024): string[][] {
+  const batches: string[][] = [];
+  let currentBatch: string[] = [];
+  let currentBytes = 0;
+
+  for (const p of paths) {
+    const pBytes = Buffer.byteLength(p, "utf8") + 12; // overhead for ":(literal)"
+    if (
+      currentBatch.length > 0 &&
+      (currentBatch.length >= maxCount || currentBytes + pBytes > maxBytes)
+    ) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentBytes = 0;
+    }
+    currentBatch.push(p);
+    currentBytes += pBytes;
+  }
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+  return batches;
+}
+
+function isPathInScope(filePath: string, scope?: string): boolean {
+  if (!scope || scope === ".") return true;
+  return filePath === scope || filePath.startsWith(scope + "/");
+}
+
+export function gitDiff(
+  target: GitTarget,
+  opts: GitDiffOptions = {},
+  relPath?: string
+): GitDiffResult {
+  const root = typeof target === "string" ? target : target.root;
+  const ignoreRules =
+    typeof target === "object" && target.ignoreRules
+      ? target.ignoreRules
+      : new IgnoreRules(root);
+
   const mode = opts.mode ?? "unstaged";
   const offset = Math.max(0, Math.floor(opts.offset ?? 0));
   const maxBytes = Math.min(256 * 1024, Math.max(1024, Math.floor(opts.maxBytes ?? 64 * 1024)));
+  const modeArgs = getDiffModeArgs(mode);
 
-  const base: string[] = ["diff", "--no-color"];
-  if (mode === "staged") base.push("--cached");
-  if (mode === "head") base.push("HEAD");
-  base.push("--");
-  // Keep the sensitive-file exclusions even when the caller narrows the diff
-  // to a directory. Otherwise a request for e.g. `src` could include
-  // `src/.env` or another secret nested below that directory.
-  base.push(relPath || ".", ...SENSITIVE_DIFF_EXCLUDES);
-
-  const result = runGit(root, base);
-  if (!result.ok && /not a git repository/i.test(result.stderr)) {
+  // 1. Full-workspace inventory using NUL separation and global rename detection
+  const listArgs = [
+    "diff",
+    "--name-status",
+    "-z",
+    "--find-renames=1%",
+    ...modeArgs,
+    "--",
+    ".",
+  ];
+  const listResult = runGit(root, listArgs);
+  if (!listResult.ok) {
     return {
       isRepo: false,
       mode,
@@ -161,7 +207,100 @@ export function gitDiff(root: string, opts: GitDiffOptions = {}, relPath?: strin
       diff: "",
     };
   }
-  const full = Buffer.from(result.stdout, "utf8");
+
+  const tokens = listResult.stdout.split("\0");
+  const safePaths: string[] = [];
+  for (let i = 0; i < tokens.length; ) {
+    const status = tokens[i++];
+    if (!status) break;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const oldPath = tokens[i++];
+      const newPath = tokens[i++];
+      if (oldPath && newPath) {
+        // Layer 1: Security - EITHER side sensitive -> completely unsafe
+        const isSafe = !ignoreRules.isSensitive(oldPath) && !ignoreRules.isSensitive(newPath);
+        // Layer 2: Scope - EITHER side in scope -> relevant
+        const isRelevant = isPathInScope(oldPath, relPath) || isPathInScope(newPath, relPath);
+        if (isSafe && isRelevant) {
+          safePaths.push(oldPath, newPath);
+        }
+      }
+    } else {
+      const filePath = tokens[i++];
+      if (filePath) {
+        const isSafe = !ignoreRules.isSensitive(filePath);
+        const isRelevant = isPathInScope(filePath, relPath);
+        if (isSafe && isRelevant) {
+          safePaths.push(filePath);
+        }
+      }
+    }
+  }
+
+  if (safePaths.length === 0) {
+    return {
+      isRepo: true,
+      mode,
+      totalBytes: 0,
+      offset: 0,
+      returnedBytes: 0,
+      hasMore: false,
+      nextOffset: null,
+      diff: "",
+    };
+  }
+
+  // 2. Fetch diffs for safe paths in bounded batches (path count + argv bytes)
+  const batches = chunkSafePaths(safePaths);
+  let combinedDiff = "";
+  let totalAggregateBytes = 0;
+  const MAX_AGGREGATE_DIFF_BYTES = 64 * 1024 * 1024;
+
+  for (const batch of batches) {
+    const pathspecs = batch.map((p) => `:(literal)${p}`);
+    const diffArgs = [
+      "diff",
+      "--no-color",
+      "--find-renames=1%",
+      ...modeArgs,
+      "--",
+      ...pathspecs,
+    ];
+    const diffResult = runGit(root, diffArgs);
+    if (!diffResult.ok) {
+      // Fail closed on any batch error: never return partial silent success
+      return {
+        isRepo: false,
+        mode,
+        totalBytes: 0,
+        offset: 0,
+        returnedBytes: 0,
+        hasMore: false,
+        nextOffset: null,
+        diff: "",
+      };
+    }
+    if (diffResult.stdout) {
+      const chunkBytes = Buffer.byteLength(diffResult.stdout, "utf8");
+      if (totalAggregateBytes + chunkBytes > MAX_AGGREGATE_DIFF_BYTES) {
+        // Fail closed on aggregate cap: do not fake a partial successful diff
+        return {
+          isRepo: false,
+          mode,
+          totalBytes: 0,
+          offset: 0,
+          returnedBytes: 0,
+          hasMore: false,
+          nextOffset: null,
+          diff: "",
+        };
+      }
+      combinedDiff += diffResult.stdout;
+      totalAggregateBytes += chunkBytes;
+    }
+  }
+
+  const full = Buffer.from(combinedDiff, "utf8");
   const slice = full.subarray(offset, offset + maxBytes);
   let text = slice.toString("utf8");
   let sliceLen = slice.length;
