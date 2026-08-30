@@ -111,7 +111,11 @@ export class PairingManager {
     return entry.count <= this.ipRateLimit;
   }
 
-  verify(codeInput: string, ip?: string): PairingVerifyResult {
+  verify(
+    codeInput: string,
+    ip?: string,
+    opts: { consumeFailure?: boolean } = {}
+  ): PairingVerifyResult {
     if (!this.checkIpRate(ip)) {
       return { ok: false, reason: "rate_limited" };
     }
@@ -137,6 +141,9 @@ export class PairingManager {
         session.used = true;
         this.sessions.delete(session.id);
         return { ok: true, sessionId: session.id };
+      }
+      if (opts.consumeFailure === false) {
+        return { ok: false, reason: "invalid" };
       }
       session.attemptsLeft--;
       if (session.attemptsLeft <= 0) {

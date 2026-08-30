@@ -23,7 +23,10 @@ interface PendingAuthRequest {
   codeChallenge: string;
   resource?: string;
   expiresAt: number;
+  attemptsLeft: number;
 }
+
+const PAIRING_ATTEMPTS_PER_REQUEST = 5;
 
 function isAllowedRedirectUri(uri: string): boolean {
   let parsed: URL;
@@ -231,6 +234,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       codeChallenge: query.code_challenge,
       resource: query.resource,
       expiresAt: Date.now() + 10 * 60_000,
+      attemptsLeft: PAIRING_ATTEMPTS_PER_REQUEST,
     };
     pendingRequests.set(request.id, request);
     setAuthSecurityHeaders(res);
@@ -249,10 +253,29 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
+    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip, { consumeFailure: false });
     if (!verdict.ok) {
+      if (verdict.reason === "invalid") {
+        request.attemptsLeft--;
+        if (request.attemptsLeft <= 0) {
+          pendingRequests.delete(request.id);
+          setAuthSecurityHeaders(res);
+          res
+            .status(410)
+            .type("html")
+            .send(
+              pairingPage({
+                requestId: request.id,
+                workspaceName: deps.workspaceName,
+                scopes: request.scopes,
+                error: "Too many incorrect attempts. Restart the connection from ChatGPT.",
+              })
+            );
+          return;
+        }
+      }
       const messages: Record<string, string> = {
-        invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
+        invalid: `Incorrect pairing code. ${request.attemptsLeft} attempts left.`,
         expired: "This pairing code has expired. Ask Codex to generate a new one.",
         too_many_attempts: "Too many incorrect attempts. Ask Codex to generate a new pairing code.",
         rate_limited: "Too many attempts. Please wait a minute and try again.",

@@ -152,6 +152,64 @@ describe("authorization + token flow", () => {
     expect(result.page).toContain("Incorrect pairing code");
   });
 
+  it("isolates failed pairing attempts to one authorization request", async () => {
+    const isolatedRoot = makeTmpDir("oauth-attempts");
+    const isolatedAuth = makeTmpDir("auth-attempts");
+    const isolatedBridge = await startBridge({
+      workspaceRoot: isolatedRoot,
+      port: 0,
+      persistRuntime: false,
+      authStoreFile: path.join(isolatedAuth, "store.json"),
+    });
+
+    try {
+      const isolatedBase = isolatedBridge.localBaseUrl();
+      const registration = await fetch(`${isolatedBase}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_name: "Attempts-Test", redirect_uris: [REDIRECT_URI] }),
+      });
+      const client = (await registration.json()) as { client_id: string };
+      const { challenge } = pkceVerifierAndChallenge();
+      const pairing = isolatedBridge.pairing.create();
+
+      const createRequest = async (): Promise<string> => {
+        const authorizeUrl = new URL(`${isolatedBase}/oauth/authorize`);
+        authorizeUrl.searchParams.set("client_id", client.client_id);
+        authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+        authorizeUrl.searchParams.set("response_type", "code");
+        authorizeUrl.searchParams.set("code_challenge", challenge);
+        authorizeUrl.searchParams.set("code_challenge_method", "S256");
+        const response = await fetch(authorizeUrl, { redirect: "manual" });
+        const html = await response.text();
+        const requestId = html.match(/name="request_id" value="([a-f0-9]+)"/)?.[1];
+        expect(requestId).toBeTruthy();
+        return requestId!;
+      };
+      const submit = (requestId: string, code: string): Promise<Response> =>
+        fetch(`${isolatedBase}/oauth/authorize`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ request_id: requestId, pairing_code: code }),
+          redirect: "manual",
+        });
+
+      const exhaustedRequest = await createRequest();
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const response = await submit(exhaustedRequest, "AAAA-AAAA");
+        expect(response.status).toBe(attempt < 5 ? 401 : 410);
+      }
+
+      const independentRequest = await createRequest();
+      const success = await submit(independentRequest, pairing.code);
+      expect(success.status).toBe(302);
+    } finally {
+      await isolatedBridge.close();
+      cleanup(isolatedRoot);
+      cleanup(isolatedAuth);
+    }
+  });
+
   it("escapes the workspace name in the pairing page", async () => {
     const xssWorkspaceRoot = makeTmpDir("oauth-html");
     write(xssWorkspaceRoot, ".c2c.json", JSON.stringify({ name: "<script>alert('xss')</script>" }));
