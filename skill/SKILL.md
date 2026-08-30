@@ -101,9 +101,17 @@ that close the tab, hide the window, or stall on the settings page.
 6. **Batch.** Fill a known form in one Playwright / `js` script when you can.
    After an action, one cheap DOM check. Do not screenshot-poll.
 
-7. **One conversation.** The first ChatGPT chat is the C2C conversation. Send
-   the boot prompt and the workspace_info check there. Save that URL. Do not
-   open a throwaway verify chat and later another C2C chat.
+7. **One conversation and Chat mode.** The first ChatGPT chat is the C2C
+   conversation. For every newly created C2C conversation, select `Chat`/
+   `聊天` in the `选择聊天界面` switcher before sending the boot prompt, and
+   verify that it is selected. Send the boot prompt and the workspace_info
+   check there, and confirm that the reply names the current workspace before
+   saving or replacing the binding. Do not open a throwaway verify chat and
+   later another C2C chat. A saved conversation's mode is not changed by
+   updating its saved URL; when a user requests a mode change, create a
+   replacement Chat conversation, validate it in that conversation, and only
+   then update the workspace binding. If validation fails, keep the old saved
+   URL.
 
 8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
    send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
@@ -222,23 +230,31 @@ chat per task or per Codex session.
 - **Find it**: `c2c session -w <ws> --json` → `{ session: { url, taskId, ... } }`.
   If a session exists, `goto` that URL on the same iab tab (foreground +
   markHandoff) and continue there.
-- **Save it**: right after creating a new C2C chat (boot prompt sent), read the
-  conversation URL from the iab address bar (visible UI state only)
-  and run `c2c session set -w <ws> --url <url> --title "C2C <workspace name>"`.
+- **Save it**: after creating a new C2C chat, sending the boot prompt and the
+  workspace_info check, and confirming that the reply names the current
+  workspace, read the conversation URL from the iab address bar (visible UI
+  state only) and run `c2c session set -w <ws> --url <url> --title "C2C <workspace name>"`.
 - **Update it**: after each EXECUTED/DONE, run
   `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>`.
-- **Switch it** ONLY when (a) the user explicitly asks for a new chat, or
-  (b) the current chat has become so long it visibly lags. When switching:
-  1. Same iab tab: `goto` `https://chatgpt.com/`, send the boot prompt.
+- **Switch it** ONLY when (a) the user explicitly asks for a new chat,
+  (b) the current chat has become so long it visibly lags, or (c) the user
+  explicitly asks to change to Chat/聊天 mode. When switching:
+  1. Same iab tab: `goto` `https://chatgpt.com/`, select `Chat`/`聊天` in the
+     mode switcher, verify it is selected, then send the boot prompt.
   2. Immediately send a HANDOFF message (template in `docs/protocol.md`) —
      a short brief of: original goal, iterations so far, what is already DONE,
      current state, known issues, and the next expected step. The new chat must
      be able to continue the task without re-asking anything; it re-reads code
      via MCP, so never paste files into the handoff.
-  3. `c2c session set` with the new URL (this overwrites the old one).
-- If the saved chat 404s or was deleted, treat it as a switch: new chat + boot
-  prompt + HANDOFF reconstructed from `c2c session get` and recent
-  `execution_summary` records.
+  3. In that same replacement chat, send the workspace_info check from the
+     setup flow and wait for a reply that matches the current workspace name.
+     Only after this validation, run `c2c session set` with the new URL (this
+     overwrites the old one). If validation fails or the workspace name does
+     not match, leave the old saved URL unchanged.
+- If the saved chat 404s or was deleted, treat it as a switch: new Chat chat +
+  boot prompt + HANDOFF reconstructed from `c2c session get` and recent
+  `execution_summary` records, followed by the same workspace_info validation
+  before updating the binding.
 
 ## Workflow: coding task（"使用 Codex with ChatGPT 完成 XXX"）
 
@@ -254,10 +270,12 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    Generate task id: `c2c_` + 4 random hex chars.
 1. Open the saved C2C conversation on the same iab tab (`c2c session --json`);
    only `goto` `https://chatgpt.com/` if none is saved. Foreground + markHandoff.
-   On a NEW conversation first send the boot prompt from
-   `docs/protocol.md` §Boot Prompt, then save the session URL. Do not use the
-   browser to re-read code MCP already provides. After sending a control
-   message, wait per **In-app browser** §8.
+   On a NEW conversation select `Chat`/`聊天` in the mode switcher and verify
+   it is selected, then send the boot prompt from `docs/protocol.md` §Boot
+   Prompt and the workspace_info check. Confirm the reply names the current
+   workspace before saving the session URL. Do not use the browser to re-read
+   code MCP already provides. After sending a control message, wait per
+   **In-app browser** §8.
 2. Send INIT with the user's goal:
 
 ```
