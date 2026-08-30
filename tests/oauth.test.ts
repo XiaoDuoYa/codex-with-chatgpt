@@ -273,6 +273,15 @@ describe("token enforcement on /mcp", () => {
     expect(response.headers.get("www-authenticate")).toContain("resource_metadata");
   });
 
+  it("authenticates before parsing an invalid MCP body", async () => {
+    const response = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{" + "x".repeat(100_000),
+    });
+    expect(response.status).toBe(401);
+  });
+
   it("401 with an invalid token", async () => {
     const response = await mcpCall("c2c_at_totally-invalid");
     expect(response.status).toBe(401);

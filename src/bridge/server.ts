@@ -128,8 +128,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
   app.all(
     "/mcp",
-    express.json({ limit: "8mb" }),
     bearerAuth({ store: authStore, workspaceId: workspace.id, getBaseUrl, logger }),
+    express.json({ limit: "8mb" }),
     (req: Request, res: Response) => {
       void mcpHandler(req, res);
     }
