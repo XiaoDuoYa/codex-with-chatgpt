@@ -223,6 +223,22 @@ describe("authorization + token flow", () => {
       );
       expect(staleRequest.status).toBe(400);
       expect(staleRequest.page).toContain("authorization request has expired");
+
+      const freshAuthorization = await beginAuthorization(
+        clientId,
+        challenge,
+        "fresh-request",
+        expiryBase
+      );
+      expect(freshAuthorization.status).toBe(200);
+      expect(freshAuthorization.requestId).toBeTruthy();
+      const freshResult = await submitAuthorization(
+        freshAuthorization.requestId!,
+        freshPairing.code,
+        expiryBase
+      );
+      expect(freshResult.status).toBe(302);
+      expect(freshResult.code).toBeTruthy();
     } finally {
       await expiryBridge.close();
       cleanup(expiryRoot);
