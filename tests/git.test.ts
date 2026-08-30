@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import { gitDiff, gitInfo, gitStatus } from "../src/workspace/git.js";
+import { Workspace } from "../src/workspace/manager.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git } from "./helpers.js";
 
 let repo: string;
@@ -55,6 +56,18 @@ describe("gitStatus", () => {
 
     git(repo, "reset", "staged.txt");
     git(repo, "checkout", "--", "hello.txt");
+  });
+
+  it("does not reveal sensitive filenames in status output", () => {
+    write(repo, ".env", "SECRET=hidden\n");
+    write(repo, "nested/.npmrc", "TOKEN=hidden\n");
+    write(repo, "visible.txt", "safe\n");
+
+    const status = gitStatus(new Workspace(repo));
+    const serialized = JSON.stringify(status);
+    expect(serialized).not.toContain(".env");
+    expect(serialized).not.toContain(".npmrc");
+    expect(status.untracked).toContain("visible.txt");
   });
 });
 
