@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, urlencoded, json } from "express";
 import { randomBytes } from "node:crypto";
 import { AuthStore, SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual } from "./store.js";
-import { PairingManager } from "../pairing/manager.js";
+import { PairingManager, type PairingVerifyResult } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME } from "../version.js";
 import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
@@ -16,6 +16,7 @@ export interface OAuthDeps {
 
 interface PendingAuthRequest {
   id: string;
+  pairingSessionId?: string;
   clientId: string;
   redirectUri: string;
   scopes: string[];
@@ -224,6 +225,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     const scopes = filterScopes(query.scope);
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
+      pairingSessionId: deps.pairing.getActiveSessionId(),
       clientId: client.clientId,
       redirectUri,
       scopes,
@@ -249,7 +251,9 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
+    const verdict: PairingVerifyResult = request.pairingSessionId
+      ? deps.pairing.verifyForSession(request.pairingSessionId, body.pairing_code ?? "", req.ip)
+      : { ok: false, reason: "no_active_session" };
     if (!verdict.ok) {
       const messages: Record<string, string> = {
         invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,

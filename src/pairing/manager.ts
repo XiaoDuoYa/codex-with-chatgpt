@@ -82,21 +82,28 @@ export class PairingManager {
     this.ipRateWindowMs = opts.ipRateWindowMs ?? 60_000;
   }
 
-  /** Create a new pairing session. Invalidates previous sessions (one active at a time). */
+  /** Create a new pairing session while preserving other unexpired sessions. */
   create(): { sessionId: string; code: string; expiresAt: number } {
-    this.sessions.clear();
+    this.pruneExpiredSessions();
     const raw = generateCode();
+    const createdAt = Date.now();
     const session: PairingSession = {
       id: randomBytes(16).toString("hex"),
       codeHash: hashCode(raw),
       workspaceId: this.workspaceId,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + this.ttlMs,
+      createdAt,
+      expiresAt: createdAt + this.ttlMs,
       attemptsLeft: this.maxAttempts,
       used: false,
     };
     this.sessions.set(session.id, session);
     return { sessionId: session.id, code: formatPairingCode(raw), expiresAt: session.expiresAt };
+  }
+
+  private pruneExpiredSessions(now = Date.now()): void {
+    for (const [id, session] of this.sessions) {
+      if (now > session.expiresAt) this.sessions.delete(id);
+    }
   }
 
   private checkIpRate(ip: string | undefined): boolean {
@@ -115,45 +122,69 @@ export class PairingManager {
     if (!this.checkIpRate(ip)) {
       return { ok: false, reason: "rate_limited" };
     }
+    const sessionId = this.getLatestSessionId();
+    return sessionId ? this.verifySession(sessionId, codeInput) : { ok: false, reason: "no_active_session" };
+  }
+
+  private getLatestSessionId(): string | undefined {
+    const sessions = [...this.sessions.values()];
+    for (let index = sessions.length - 1; index >= 0; index--) {
+      if (!sessions[index].used) return sessions[index].id;
+    }
+    return undefined;
+  }
+
+  getActiveSessionId(): string | undefined {
+    const now = Date.now();
+    this.pruneExpiredSessions(now);
+    const sessions = [...this.sessions.values()];
+    for (let index = sessions.length - 1; index >= 0; index--) {
+      const session = sessions[index];
+      if (!session.used && session.attemptsLeft > 0 && now <= session.expiresAt) return session.id;
+    }
+    return undefined;
+  }
+
+  verifyForSession(sessionId: string, codeInput: string, ip?: string): PairingVerifyResult {
+    if (!this.checkIpRate(ip)) {
+      return { ok: false, reason: "rate_limited" };
+    }
+    return this.verifySession(sessionId, codeInput);
+  }
+
+  private verifySession(sessionId: string, codeInput: string): PairingVerifyResult {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.used) return { ok: false, reason: "no_active_session" };
+
+    const now = Date.now();
+    if (now > session.expiresAt) {
+      this.sessions.delete(session.id);
+      return { ok: false, reason: "expired" };
+    }
+    if (session.attemptsLeft <= 0) {
+      this.sessions.delete(session.id);
+      return { ok: false, reason: "too_many_attempts" };
+    }
+
     const normalized = normalizePairingCode(codeInput);
     const inputHash = hashCode(normalized);
-    const now = Date.now();
-
-    const active = [...this.sessions.values()].filter((s) => !s.used);
-    if (active.length === 0) return { ok: false, reason: "no_active_session" };
-
-    for (const session of active) {
-      if (now > session.expiresAt) {
-        this.sessions.delete(session.id);
-        return { ok: false, reason: "expired" };
-      }
-      if (session.attemptsLeft <= 0) {
-        this.sessions.delete(session.id);
-        return { ok: false, reason: "too_many_attempts" };
-      }
-      const match = timingSafeEqual(inputHash, session.codeHash);
-      if (match) {
-        // one-time use: destroy immediately
-        session.used = true;
-        this.sessions.delete(session.id);
-        return { ok: true, sessionId: session.id };
-      }
-      session.attemptsLeft--;
-      if (session.attemptsLeft <= 0) {
-        this.sessions.delete(session.id);
-        return { ok: false, reason: "too_many_attempts" };
-      }
-      return { ok: false, reason: "invalid", attemptsLeft: session.attemptsLeft };
+    if (timingSafeEqual(inputHash, session.codeHash)) {
+      // one-time use: destroy immediately
+      session.used = true;
+      this.sessions.delete(session.id);
+      return { ok: true, sessionId: session.id };
     }
-    return { ok: false, reason: "no_active_session" };
+
+    session.attemptsLeft--;
+    if (session.attemptsLeft <= 0) {
+      this.sessions.delete(session.id);
+      return { ok: false, reason: "too_many_attempts" };
+    }
+    return { ok: false, reason: "invalid", attemptsLeft: session.attemptsLeft };
   }
 
   hasActiveSession(): boolean {
-    const now = Date.now();
-    for (const session of this.sessions.values()) {
-      if (!session.used && now <= session.expiresAt) return true;
-    }
-    return false;
+    return this.getActiveSessionId() !== undefined;
   }
 
   invalidateAll(): void {
