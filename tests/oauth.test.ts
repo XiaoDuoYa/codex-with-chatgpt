@@ -152,6 +152,67 @@ describe("authorization + token flow", () => {
     expect(result.page).toContain("Incorrect pairing code");
   });
 
+  it("escapes the workspace name in the pairing page", async () => {
+    const xssWorkspaceRoot = makeTmpDir("oauth-html");
+    write(xssWorkspaceRoot, ".c2c.json", JSON.stringify({ name: "<script>alert('xss')</script>" }));
+    const xssBridge = await startBridge({
+      workspaceRoot: xssWorkspaceRoot,
+      port: 0,
+      persistRuntime: false,
+      authStoreFile: path.join(makeTmpDir("auth-html"), "store.json"),
+    });
+
+    try {
+      const xssBase = xssBridge.localBaseUrl();
+      const registration = await fetch(`${xssBase}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_name: "HTML-Test", redirect_uris: [REDIRECT_URI] }),
+      });
+      expect(registration.status).toBe(201);
+      const client = (await registration.json()) as { client_id: string };
+      const { challenge } = pkceVerifierAndChallenge();
+
+      const authorizeUrl = new URL(`${xssBase}/oauth/authorize`);
+      authorizeUrl.searchParams.set("client_id", client.client_id);
+      authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("code_challenge", challenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+      const response = await fetch(authorizeUrl, { redirect: "manual" });
+      expect(response.status).toBe(200);
+      const html = await response.text();
+
+      expect(html).not.toContain("<script>alert('xss')</script>");
+      expect(html).toContain("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;");
+    } finally {
+      await xssBridge.close();
+      cleanup(xssWorkspaceRoot);
+    }
+  });
+
+  it("sets browser security headers on the pairing page", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    );
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-frame-options")).toBe("DENY");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
+  });
+
   it("rejects PKCE verifier mismatch", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();

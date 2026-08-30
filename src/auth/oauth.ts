@@ -4,6 +4,7 @@ import { AuthStore, SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual }
 import { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME } from "../version.js";
+import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
 
 export interface OAuthDeps {
   store: AuthStore;
@@ -78,17 +79,20 @@ function pairingPage(opts: {
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
-    .map((scope) => `<li>${scopeLabels[scope] ?? scope}</li>`)
+    .map((scope) => `<li>${escapeHtml(scopeLabels[scope] ?? scope)}</li>`)
     .join("");
   const errorHtml = opts.error
-    ? `<p class="error" role="alert">${opts.error}</p>`
+    ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>`
     : "";
+  const escapedProductName = escapeHtml(PRODUCT_NAME);
+  const escapedWorkspaceName = escapeHtml(opts.workspaceName);
+  const escapedRequestId = escapeHtml(opts.requestId);
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${PRODUCT_NAME}</title>
+<title>${escapedProductName}</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -114,11 +118,11 @@ function pairingPage(opts: {
 </head>
 <body>
 <div class="card">
-  <h1>${PRODUCT_NAME}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${opts.workspaceName}</strong> (read-only):</p>
+  <h1>${escapedProductName}</h1>
+  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> (read-only):</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
-    <input type="hidden" name="request_id" value="${opts.requestId}">
+    <input type="hidden" name="request_id" value="${escapedRequestId}">
     <input type="text" name="pairing_code" id="pairing_code" placeholder="XXXX-XXXX"
            autocomplete="one-time-code" autofocus maxlength="9" required>
     ${errorHtml}
@@ -192,11 +196,13 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     const query = req.query as Record<string, string | undefined>;
     const client = query.client_id ? deps.store.getClient(query.client_id) : undefined;
     if (!client) {
+      setAuthSecurityHeaders(res);
       res.status(400).send("Unknown client. Please reconnect from ChatGPT.");
       return;
     }
     const redirectUri = query.redirect_uri;
     if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
+      setAuthSecurityHeaders(res);
       res.status(400).send("Invalid redirect_uri.");
       return;
     }
@@ -227,6 +233,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       expiresAt: Date.now() + 10 * 60_000,
     };
     pendingRequests.set(request.id, request);
+    setAuthSecurityHeaders(res);
     res
       .status(200)
       .type("html")
@@ -238,6 +245,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     const body = req.body as { request_id?: string; pairing_code?: string };
     const request = body.request_id ? pendingRequests.get(body.request_id) : undefined;
     if (!request) {
+      setAuthSecurityHeaders(res);
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
@@ -251,6 +259,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         no_active_session: "No active pairing session. Ask Codex to generate a pairing code.",
       };
       deps.logger.warn(`Pairing verification failed: ${verdict.reason}`);
+      setAuthSecurityHeaders(res);
       res
         .status(verdict.reason === "invalid" ? 401 : 410)
         .type("html")
