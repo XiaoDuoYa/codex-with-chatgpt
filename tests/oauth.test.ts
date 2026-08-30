@@ -27,8 +27,8 @@ afterAll(async () => {
   cleanup(root);
 });
 
-async function registerClient(): Promise<string> {
-  const response = await fetch(`${base}/oauth/register`, {
+async function registerClient(baseUrl = base): Promise<string> {
+  const response = await fetch(`${baseUrl}/oauth/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ client_name: "ChatGPT-Test", redirect_uris: [REDIRECT_URI] }),
@@ -54,9 +54,10 @@ async function authorizeWithPairing(
 async function beginAuthorization(
   clientId: string,
   challenge: string,
-  state = "st-123"
+  state = "st-123",
+  baseUrl = base
 ): Promise<{ requestId: string | null; page: string; status: number }> {
-  const authorizeUrl = new URL(`${base}/oauth/authorize`);
+  const authorizeUrl = new URL(`${baseUrl}/oauth/authorize`);
   authorizeUrl.searchParams.set("client_id", clientId);
   authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
   authorizeUrl.searchParams.set("response_type", "code");
@@ -73,9 +74,10 @@ async function beginAuthorization(
 
 async function submitAuthorization(
   requestId: string,
-  pairingCode: string
+  pairingCode: string,
+  baseUrl = base
 ): Promise<{ code: string | null; location: string | null; page?: string; status?: number }> {
-  const postResponse = await fetch(`${base}/oauth/authorize`, {
+  const postResponse = await fetch(`${baseUrl}/oauth/authorize`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ request_id: requestId, pairing_code: pairingCode }),
@@ -187,6 +189,44 @@ describe("authorization + token flow", () => {
     expect(freshAuthorization.requestId).toBeTruthy();
     const freshResult = await submitAuthorization(freshAuthorization.requestId!, pairing.code);
     expect(freshResult.code).toBeTruthy();
+  });
+
+  it("expires an authorization request when its pairing session expires", async () => {
+    const expiryRoot = makeTmpDir("oauth-expiry");
+    write(expiryRoot, "hello.txt", "hello expiry\n");
+    const expiryBridge = await startBridge({
+      workspaceRoot: expiryRoot,
+      port: 0,
+      persistRuntime: false,
+      pairingTtlMs: 10,
+      authStoreFile: path.join(makeTmpDir("auth-expiry"), "store.json"),
+    });
+
+    try {
+      const expiryBase = expiryBridge.localBaseUrl();
+      const clientId = await registerClient(expiryBase);
+      const { challenge } = pkceVerifierAndChallenge();
+      const pairing = expiryBridge.pairing.create();
+      const authorization = await beginAuthorization(clientId, challenge, "expired-request", expiryBase);
+      expect(authorization.requestId).toBeTruthy();
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const expired = await submitAuthorization(authorization.requestId!, pairing.code, expiryBase);
+      expect(expired.status).toBe(410);
+      expect(expired.page).toContain("start a new connection");
+
+      const freshPairing = expiryBridge.pairing.create();
+      const staleRequest = await submitAuthorization(
+        authorization.requestId!,
+        freshPairing.code,
+        expiryBase
+      );
+      expect(staleRequest.status).toBe(400);
+      expect(staleRequest.page).toContain("authorization request has expired");
+    } finally {
+      await expiryBridge.close();
+      cleanup(expiryRoot);
+    }
   });
 
   it("binds concurrent authorization requests to their pairing sessions", async () => {

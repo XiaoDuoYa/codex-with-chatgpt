@@ -263,12 +263,17 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       req.ip
     );
     if (!verdict.ok) {
+      const terminalFailure =
+        verdict.reason === "expired" ||
+        verdict.reason === "too_many_attempts" ||
+        verdict.reason === "no_active_session";
+      if (terminalFailure) pendingRequests.delete(request.id);
       const messages: Record<string, string> = {
         invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
-        expired: "This pairing code has expired. Ask Codex to generate a new one.",
-        too_many_attempts: "Too many incorrect attempts. Ask Codex to generate a new pairing code.",
+        expired: "This pairing request has expired. Generate a new pairing code and start a new connection from ChatGPT.",
+        too_many_attempts: "This pairing request is no longer valid. Generate a new pairing code and start a new connection from ChatGPT.",
         rate_limited: "Too many attempts. Please wait a minute and try again.",
-        no_active_session: "No active pairing session. Ask Codex to generate a pairing code.",
+        no_active_session: "No active pairing session. Generate a new pairing code and start a new connection from ChatGPT.",
       };
       deps.logger.warn(`Pairing verification failed: ${verdict.reason}`);
       setAuthSecurityHeaders(res);
