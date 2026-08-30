@@ -60,11 +60,40 @@ describe("PairingManager", () => {
     expect(manager.verify("AAAA-AAAA", "5.6.7.8").reason).not.toBe("rate_limited");
   });
 
-  it("invalidates previous sessions when creating a new one", () => {
+  it("keeps previous sessions active and exposes the newest active session", () => {
     const manager = new PairingManager("ws1");
     const first = manager.create();
-    manager.create();
-    expect(manager.verify(first.code).ok).toBe(false);
+    const second = manager.create();
+
+    expect(manager.getActiveSessionId()).toBe(second.sessionId);
+    expect(manager.verifyForSession(first.sessionId, first.code)).toMatchObject({
+      ok: true,
+      sessionId: first.sessionId,
+    });
+    expect(manager.verifyForSession(second.sessionId, second.code)).toMatchObject({
+      ok: true,
+      sessionId: second.sessionId,
+    });
+  });
+
+  it("limits a code mismatch to the requested session", () => {
+    const manager = new PairingManager("ws1");
+    const first = manager.create();
+    const second = manager.create();
+
+    expect(manager.verifyForSession(second.sessionId, first.code)).toMatchObject({
+      ok: false,
+      reason: "invalid",
+      attemptsLeft: 4,
+    });
+    expect(manager.verifyForSession(first.sessionId, first.code)).toMatchObject({
+      ok: true,
+      sessionId: first.sessionId,
+    });
+    expect(manager.verifyForSession(second.sessionId, second.code)).toMatchObject({
+      ok: true,
+      sessionId: second.sessionId,
+    });
   });
 
   it("normalizes input", () => {

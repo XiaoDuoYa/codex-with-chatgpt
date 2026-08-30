@@ -44,6 +44,18 @@ async function authorizeWithPairing(
   pairingCode: string,
   state = "st-123"
 ): Promise<{ code: string | null; location: string | null; page?: string; status?: number }> {
+  const authorization = await beginAuthorization(clientId, challenge, state);
+  if (!authorization.requestId) {
+    return { code: null, location: null, page: authorization.page, status: authorization.status };
+  }
+  return submitAuthorization(authorization.requestId, pairingCode);
+}
+
+async function beginAuthorization(
+  clientId: string,
+  challenge: string,
+  state = "st-123"
+): Promise<{ requestId: string | null; page: string; status: number }> {
   const authorizeUrl = new URL(`${base}/oauth/authorize`);
   authorizeUrl.searchParams.set("client_id", clientId);
   authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
@@ -56,8 +68,13 @@ async function authorizeWithPairing(
   const pageResponse = await fetch(authorizeUrl, { redirect: "manual" });
   const html = await pageResponse.text();
   const requestId = html.match(/name="request_id" value="([a-f0-9]+)"/)?.[1];
-  if (!requestId) return { code: null, location: null, page: html, status: pageResponse.status };
+  return { requestId: requestId ?? null, page: html, status: pageResponse.status };
+}
 
+async function submitAuthorization(
+  requestId: string,
+  pairingCode: string
+): Promise<{ code: string | null; location: string | null; page?: string; status?: number }> {
   const postResponse = await fetch(`${base}/oauth/authorize`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -150,6 +167,28 @@ describe("authorization + token flow", () => {
     expect(result.code).toBeNull();
     expect(result.status).toBe(401);
     expect(result.page).toContain("Incorrect pairing code");
+  });
+
+  it("binds concurrent authorization requests to their pairing sessions", async () => {
+    const clientId = await registerClient();
+    const firstPkce = pkceVerifierAndChallenge();
+    const secondPkce = pkceVerifierAndChallenge();
+    const firstPairing = bridge.pairing.create();
+    const firstAuthorization = await beginAuthorization(clientId, firstPkce.challenge, "first-request");
+    const secondPairing = bridge.pairing.create();
+    const secondAuthorization = await beginAuthorization(clientId, secondPkce.challenge, "second-request");
+
+    expect(firstAuthorization.requestId).toBeTruthy();
+    expect(secondAuthorization.requestId).toBeTruthy();
+
+    const crossRequest = await submitAuthorization(secondAuthorization.requestId!, firstPairing.code);
+    expect(crossRequest.status).toBe(401);
+    expect(crossRequest.page).toContain("Incorrect pairing code");
+
+    const firstResult = await submitAuthorization(firstAuthorization.requestId!, firstPairing.code);
+    expect(firstResult.code).toBeTruthy();
+    const secondResult = await submitAuthorization(secondAuthorization.requestId!, secondPairing.code);
+    expect(secondResult.code).toBeTruthy();
   });
 
   it("escapes the workspace name in the pairing page", async () => {
