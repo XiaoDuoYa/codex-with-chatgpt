@@ -16,7 +16,7 @@ export interface OAuthDeps {
 
 interface PendingAuthRequest {
   id: string;
-  pairingSessionId?: string;
+  pairingSessionId: string;
   clientId: string;
   redirectUri: string;
   scopes: string[];
@@ -223,9 +223,15 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
     const scopes = filterScopes(query.scope);
+    const pairingSessionId = deps.pairing.getActiveSessionId();
+    if (!pairingSessionId) {
+      setAuthSecurityHeaders(res);
+      res.status(400).send("No active pairing session. Ask Codex to generate a pairing code, then reconnect from ChatGPT.");
+      return;
+    }
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
-      pairingSessionId: deps.pairing.getActiveSessionId(),
+      pairingSessionId,
       clientId: client.clientId,
       redirectUri,
       scopes,
@@ -251,9 +257,11 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict: PairingVerifyResult = request.pairingSessionId
-      ? deps.pairing.verifyForSession(request.pairingSessionId, body.pairing_code ?? "", req.ip)
-      : { ok: false, reason: "no_active_session" };
+    const verdict: PairingVerifyResult = deps.pairing.verifyForSession(
+      request.pairingSessionId,
+      body.pairing_code ?? "",
+      req.ip
+    );
     if (!verdict.ok) {
       const messages: Record<string, string> = {
         invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,

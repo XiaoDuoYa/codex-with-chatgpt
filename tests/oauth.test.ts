@@ -169,6 +169,26 @@ describe("authorization + token flow", () => {
     expect(result.page).toContain("Incorrect pairing code");
   });
 
+  it("does not create an authorization request without an active pairing session", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    bridge.pairing.invalidateAll();
+
+    const authorization = await beginAuthorization(clientId, challenge);
+    expect(authorization.status).toBe(400);
+    expect(authorization.requestId).toBeNull();
+    expect(authorization.page).toContain("No active pairing session");
+
+    const pairing = bridge.pairing.create();
+    expect(authorization.requestId).toBeNull();
+
+    const freshAuthorization = await beginAuthorization(clientId, challenge);
+    expect(freshAuthorization.status).toBe(200);
+    expect(freshAuthorization.requestId).toBeTruthy();
+    const freshResult = await submitAuthorization(freshAuthorization.requestId!, pairing.code);
+    expect(freshResult.code).toBeTruthy();
+  });
+
   it("binds concurrent authorization requests to their pairing sessions", async () => {
     const clientId = await registerClient();
     const firstPkce = pkceVerifierAndChallenge();
@@ -211,6 +231,7 @@ describe("authorization + token flow", () => {
       expect(registration.status).toBe(201);
       const client = (await registration.json()) as { client_id: string };
       const { challenge } = pkceVerifierAndChallenge();
+      xssBridge.pairing.create();
 
       const authorizeUrl = new URL(`${xssBase}/oauth/authorize`);
       authorizeUrl.searchParams.set("client_id", client.client_id);
@@ -234,6 +255,7 @@ describe("authorization + token flow", () => {
   it("sets browser security headers on the pairing page", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
+    bridge.pairing.create();
     const authorizeUrl = new URL(`${base}/oauth/authorize`);
     authorizeUrl.searchParams.set("client_id", clientId);
     authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
