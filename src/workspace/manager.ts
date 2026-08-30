@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import readline from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { IgnoreRules } from "./ignore.js";
-import { readJsonIfExists } from "../config/paths.js";
 
 export type WorkspaceErrorCode =
   | "INVALID_PATH"
@@ -85,8 +84,11 @@ export class Workspace {
     this.root = real;
     this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
     this.ignoreRules = new IgnoreRules(real);
-    this.projectConfig = readJsonIfExists<ProjectConfig>(path.join(real, ".c2c.json")) ?? {};
-    this.name = this.projectConfig.name ?? path.basename(real);
+    this.projectConfig = this.readWorkspaceJson<ProjectConfig>(".c2c.json", 64 * 1024) ?? {};
+    const configuredName = typeof this.projectConfig.name === "string"
+      ? this.projectConfig.name.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200)
+      : "";
+    this.name = configuredName || path.basename(real);
   }
 
   private contains(candidate: string): boolean {
@@ -112,6 +114,26 @@ export class Workspace {
         suffix.unshift(path.basename(current));
         current = parent;
       }
+    }
+  }
+
+  private readWorkspaceJson<T>(relativePath: string, maxBytes: number): T | null {
+    try {
+      const { abs } = this.resolve(relativePath);
+      const stat = fs.statSync(abs);
+      if (!stat.isFile() || stat.size > maxBytes) return null;
+      return JSON.parse(fs.readFileSync(abs, "utf8")) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private hasRegularWorkspaceFile(relativePath: string): boolean {
+    try {
+      const { abs } = this.resolve(relativePath);
+      return fs.statSync(abs).isFile();
+    } catch {
+      return false;
     }
   }
 
@@ -197,22 +219,80 @@ export class Workspace {
     let byteTruncated = false;
     let actualEnd = startLine - 1;
 
-    const stream = fs.createReadStream(abs, { encoding: "utf8" });
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-    for await (const line of rl) {
-      totalLines++;
-      if (totalLines >= startLine && totalLines <= endLimit && !byteTruncated) {
-        const cost = Buffer.byteLength(line, "utf8") + 1;
-        if (collectedBytes + cost > maxBytes && lines.length > 0) {
+    const stream = fs.createReadStream(abs);
+    const decoder = new StringDecoder("utf8");
+    let lineNumber = 1;
+    let currentLine = "";
+    let selectedLineStarted = false;
+    let sawData = false;
+    let endedWithNewline = false;
+
+    const selected = (): boolean => lineNumber >= startLine && lineNumber <= endLimit;
+    const beginSelectedLine = (): void => {
+      if (!selected() || selectedLineStarted || byteTruncated) return;
+      selectedLineStarted = true;
+      if (lines.length > 0) {
+        if (collectedBytes >= maxBytes) {
           byteTruncated = true;
-        } else {
-          lines.push(line);
-          collectedBytes += cost;
-          actualEnd = totalLines;
+          return;
+        }
+        collectedBytes++;
+      }
+    };
+    const appendSelected = (text: string): void => {
+      if (!selected() || byteTruncated) return;
+      beginSelectedLine();
+      if (byteTruncated || text.length === 0) return;
+      const remaining = maxBytes - collectedBytes;
+      const encoded = Buffer.from(text, "utf8");
+      if (encoded.length <= remaining) {
+        currentLine += text;
+        collectedBytes += encoded.length;
+        return;
+      }
+      let clipped = encoded.subarray(0, Math.max(0, remaining)).toString("utf8");
+      if (clipped.endsWith("\uFFFD")) clipped = clipped.slice(0, -1);
+      currentLine += clipped;
+      collectedBytes += Buffer.byteLength(clipped, "utf8");
+      byteTruncated = true;
+    };
+    const finishLine = (): void => {
+      if (selected()) {
+        beginSelectedLine();
+        if (selectedLineStarted) {
+          lines.push(currentLine);
+          actualEnd = lineNumber;
         }
       }
-    }
-    rl.close();
+      totalLines = lineNumber;
+      lineNumber++;
+      currentLine = "";
+      selectedLineStarted = false;
+    };
+    const consume = (text: string): void => {
+      if (text.length === 0) return;
+      sawData = true;
+      let offset = 0;
+      for (;;) {
+        const newline = text.indexOf("\n", offset);
+        if (newline === -1) {
+          appendSelected(text.slice(offset));
+          endedWithNewline = false;
+          break;
+        }
+        let segment = text.slice(offset, newline);
+        if (segment.endsWith("\r")) segment = segment.slice(0, -1);
+        appendSelected(segment);
+        finishLine();
+        endedWithNewline = true;
+        offset = newline + 1;
+        if (offset === text.length) break;
+      }
+    };
+
+    for await (const chunk of stream) consume(decoder.write(chunk as Buffer));
+    consume(decoder.end());
+    if (sawData && !endedWithNewline) finishLine();
 
     const remaining = Math.max(0, totalLines - actualEnd);
     return {
@@ -221,7 +301,7 @@ export class Workspace {
       totalLines,
       startLine: Math.min(startLine, Math.max(totalLines, 1)),
       endLine: actualEnd,
-      truncated: remaining > 0,
+      truncated: byteTruncated || remaining > 0,
       remainingLines: remaining,
       nextStartLine: remaining > 0 ? actualEnd + 1 : null,
       content: lines.join("\n"),
@@ -298,7 +378,7 @@ export class Workspace {
     packageManager: string | null;
     scripts: Record<string, string>;
   } {
-    const has = (f: string): boolean => fs.existsSync(path.join(this.root, f));
+    const has = (f: string): boolean => this.hasRegularWorkspaceFile(f);
     const languages = new Set<string>();
     const frameworks = new Set<string>();
     let projectType = "unknown";
@@ -308,11 +388,11 @@ export class Workspace {
     if (has("package.json")) {
       projectType = "node";
       languages.add("JavaScript");
-      const pkg = readJsonIfExists<{
+      const pkg = this.readWorkspaceJson<{
         scripts?: Record<string, string>;
         dependencies?: Record<string, string>;
         devDependencies?: Record<string, string>;
-      }>(path.join(this.root, "package.json"));
+      }>("package.json", 1024 * 1024);
       scripts = pkg?.scripts ?? {};
       const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
       const known: Record<string, string> = {

@@ -163,6 +163,14 @@ describe("read_file pagination", () => {
   it("reports FILE_NOT_FOUND for missing files", async () => {
     await expect(ws.readFile("nope.txt")).rejects.toMatchObject({ code: "FILE_NOT_FOUND" });
   });
+
+  it("bounds a single very long line without materializing it in the response", async () => {
+    write(root, "one-long-line.txt", "x".repeat(4 * 1024 * 1024));
+    const result = await ws.readFile("one-long-line.txt", { maxBytes: 4096 });
+    expect(Buffer.byteLength(result.content, "utf8")).toBeLessThanOrEqual(4096);
+    expect(result.totalLines).toBe(1);
+    expect(result.truncated).toBe(true);
+  });
 });
 
 describe("workspace identity", () => {
@@ -180,5 +188,22 @@ describe("workspace identity", () => {
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     cleanup(named);
+  });
+
+  it("does not inspect package.json through a symlink outside the workspace", () => {
+    if (!symlinksReady) return;
+    const project = makeTmpDir("project-link");
+    const external = makeTmpDir("project-external");
+    write(external, "package.json", JSON.stringify({ scripts: { leaked: "secret" }, dependencies: { react: "1" } }));
+    fs.symlinkSync(path.join(external, "package.json"), path.join(project, "package.json"));
+    const detected = new Workspace(project).detectProject();
+    expect(detected.scripts).toEqual({});
+    expect(detected.frameworks).not.toContain("React");
+    cleanup(project);
+    cleanup(external);
+  });
+
+  it("keeps C2C private state hidden from workspace reads", () => {
+    expect(() => ws.resolve(".c2c-local/runtime.json")).toThrow(/ACCESS_DENIED/);
   });
 });

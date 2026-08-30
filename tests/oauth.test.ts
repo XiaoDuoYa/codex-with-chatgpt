@@ -27,11 +27,11 @@ afterAll(async () => {
   cleanup(root);
 });
 
-async function registerClient(): Promise<string> {
+async function registerClient(clientName = "ChatGPT-Test"): Promise<string> {
   const response = await fetch(`${base}/oauth/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ client_name: "ChatGPT-Test", redirect_uris: [REDIRECT_URI] }),
+    body: JSON.stringify({ client_name: clientName, redirect_uris: [REDIRECT_URI] }),
   });
   expect(response.status).toBe(201);
   const body = (await response.json()) as { client_id: string };
@@ -192,6 +192,44 @@ describe("authorization + token flow", () => {
     });
     expect(response.status).toBe(400);
   });
+
+  it("rejects arbitrary https redirect uris that are not ChatGPT connectors", async () => {
+    const response = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["https://evil.example.com/callback"] }),
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("escapes client-controlled text and displays the actual redirect origin", async () => {
+    const clientId = await registerClient('<img src=x onerror="globalThis.pwned=1">');
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    const response = await fetch(authorizeUrl);
+    const html = await response.text();
+    expect(html).not.toContain('<img src=x onerror="globalThis.pwned=1">');
+    expect(html).toContain("&lt;img src=x onerror=&quot;globalThis.pwned=1&quot;&gt;");
+    expect(html).toContain("http://127.0.0.1:19999");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(response.headers.get("content-security-policy")).toContain(
+      "form-action 'self' http://127.0.0.1:19999"
+    );
+  });
+
+  it("caps redirect URI registrations", async () => {
+    const response = await fetch(`${base}/oauth/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: Array.from({ length: 5 }, (_, i) => `http://127.0.0.1:${19000 + i}/cb`) }),
+    });
+    expect(response.status).toBe(400);
+  });
 });
 
 describe("token enforcement on /mcp", () => {
@@ -210,6 +248,15 @@ describe("token enforcement on /mcp", () => {
     const response = await mcpCall();
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toContain("resource_metadata");
+  });
+
+  it("authenticates before parsing an invalid MCP body", async () => {
+    const response = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{" + "x".repeat(100_000),
+    });
+    expect(response.status).toBe(401);
   });
 
   it("401 with an invalid token", async () => {

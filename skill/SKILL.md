@@ -132,7 +132,7 @@ At the START of every workflow below (before anything else), run these two
 commands (both are cheap / cached; never mention them unless an update exists):
 
 1. `c2c update-check --json`
-2. `c2c sandbox-allow --json` — writes the C2C state directory into Codex's
+2. `c2c sandbox-allow --json` — writes the C2C non-secret operational state directory into Codex's
    sandbox `writable_roots` (macOS: `~/Library/Application Support/codex-with-chatgpt`;
    Windows: `%LOCALAPPDATA%\codex-with-chatgpt`; config file is
    `~/.codex/config.toml` on both, or `%USERPROFILE%\.codex\config.toml` on Windows).
@@ -165,7 +165,7 @@ Inside the checkout directory (see Locations):
      `winget install Cloudflare.cloudflared`. Do this yourself; don't ask.
 2. If the c2c repo has no `node_modules`, run `pnpm install && pnpm build` in it.
 3. Run: `c2c sandbox-allow --json` then `c2c setup -w <workspace> --json`.
-   `sandbox-allow` edits Codex `config.toml` only — it adds C2C's state directory
+   `sandbox-allow` edits Codex `config.toml` only — it adds C2C's non-secret operational state directory
    to `[sandbox_workspace_write].writable_roots` so later chats can write logs
    without elevation. If the write is denied, request approval and retry once.
    → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, ... }`.

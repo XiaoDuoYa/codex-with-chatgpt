@@ -179,7 +179,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
-        return ok(gitStatus(workspace.root));
+        return ok(gitStatus(workspace));
       } catch (error) {
         return mapError(error);
       }

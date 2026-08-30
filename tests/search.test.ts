@@ -90,4 +90,15 @@ describe.each(engines())("search engine: %s", (engine) => {
     expect(paths).toContain("src/auth.ts");
     expect(paths).not.toContain("README.md");
   });
+
+  if (engine === "node") {
+    it("terminates a catastrophic regular expression", async () => {
+      configure();
+      write(root, "regex-dos.txt", "a".repeat(200_000) + "!\n");
+      const started = Date.now();
+      const result = await searchWorkspace(ws, { query: "^(a+)+$", regex: true });
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(result.truncated).toBe(true);
+    });
+  }
 });

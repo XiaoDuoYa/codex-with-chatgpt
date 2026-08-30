@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
 import { findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
+import { workspaceStateFile } from "../workspace/local-state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -31,7 +32,7 @@ export interface EnsureBridgeResult {
  */
 export async function ensureBridge(workspaceRoot: string, opts: { port?: number } = {}): Promise<EnsureBridgeResult> {
   const workspace = new Workspace(workspaceRoot);
-  const live = await findLiveBridge(workspace.id);
+  const live = await findLiveBridge(workspace.root, workspace.id);
   if (live) return { runtime: live, spawned: false };
 
   const logDir = ensureDir(path.join(getStateDir(), "logs"));
@@ -52,6 +53,7 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
       detached: true,
       stdio: ["ignore", out, out],
       env: { ...process.env },
+      cwd: workspace.root,
     }
   );
   child.unref();
@@ -60,7 +62,7 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const runtime = await findLiveBridge(workspace.id);
+    const runtime = await findLiveBridge(workspace.root, workspace.id);
     if (runtime) return { runtime, spawned: true };
     if (child.exitCode !== null && child.exitCode !== 0) {
       throw new Error(`Bridge process exited with code ${child.exitCode}. See ${logFile}`);
@@ -78,9 +80,11 @@ export async function adminFetch<T = unknown>(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    const adminToken =
+      runtime.adminToken ?? fs.readFileSync(workspaceStateFile(runtime.workspaceRoot, "admin-token"), "utf8").trim();
     const response = await fetch(`http://127.0.0.1:${runtime.port}${route}`, {
       method,
-      headers: { Authorization: `Bearer ${runtime.adminToken}` },
+      headers: { Authorization: `Bearer ${adminToken}` },
       signal: controller.signal,
     });
     const body = (await response.json().catch(() => ({}))) as T & { message?: string };
@@ -95,10 +99,15 @@ export async function adminFetch<T = unknown>(
 
 export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
-  const runtime = readRuntimeState(workspace.id);
+  const runtime = readRuntimeState(workspace.root);
   if (!runtime) return false;
   const healthy = await probeBridge(runtime.port);
-  if (healthy && healthy.workspaceId === workspace.id) {
+  if (
+    healthy &&
+    (runtime.instanceId
+      ? healthy.instanceId === runtime.instanceId
+      : healthy.workspaceId === workspace.id)
+  ) {
     try {
       await adminFetch(runtime, "POST", "/admin/shutdown", 5000);
       return true;

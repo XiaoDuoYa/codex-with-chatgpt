@@ -23,6 +23,13 @@ export function redact(input: string): string {
   return out;
 }
 
+function oneLogLine(input: string): string {
+  return redact(input)
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "?");
+}
+
 export interface LoggerOptions {
   name?: string;
   level?: LogLevel;
@@ -50,10 +57,10 @@ export class Logger {
 
   private write(level: LogLevel, msg: string, extra?: unknown): void {
     if (LEVELS[level] < this.level) return;
-    const parts = [new Date().toISOString(), level.toUpperCase().padEnd(5), `[${this.name}]`, redact(msg)];
+    const parts = [new Date().toISOString(), level.toUpperCase().padEnd(5), `[${oneLogLine(this.name)}]`, oneLogLine(msg)];
     if (extra !== undefined) {
       try {
-        parts.push(redact(JSON.stringify(extra)));
+        parts.push(oneLogLine(JSON.stringify(extra)));
       } catch {
         parts.push("[unserializable]");
       }

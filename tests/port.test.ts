@@ -30,12 +30,13 @@ describe("port collision handling", () => {
     expect(bridgeB.port).not.toBe(preferred);
     expect(bridgeB.port).toBeGreaterThan(0);
 
-    // health identifies each bridge's workspace, so callers can detect reuse
+    // health identifies each bridge instance without leaking a stable workspace fingerprint
     const healthA = await probeBridge(bridgeA.port);
     const healthB = await probeBridge(bridgeB.port);
-    expect(healthA?.workspaceId).toBe(bridgeA.workspace.id);
-    expect(healthB?.workspaceId).toBe(bridgeB.workspace.id);
-    expect(healthA?.workspaceId).not.toBe(healthB?.workspaceId);
+    expect(healthA?.instanceId).toMatch(/^[a-f0-9]{32}$/);
+    expect(healthB?.instanceId).toMatch(/^[a-f0-9]{32}$/);
+    expect(healthA?.instanceId).not.toBe(healthB?.instanceId);
+    expect(healthA?.workspaceId).toBeUndefined();
 
     await bridgeA.close();
     await bridgeB.close();

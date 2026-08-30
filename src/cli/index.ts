@@ -26,6 +26,7 @@ import {
   type LastEndpoint,
 } from "../config/endpoint.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
+import { findTrustedExecutable } from "../process/executable.js";
 
 const program = new Command();
 
@@ -286,7 +287,7 @@ program
   .action(async (opts: { workspace?: string; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     const workspace = new Workspace(root);
-    const runtime = await findLiveBridge(workspace.id);
+    const runtime = await findLiveBridge(workspace.root, workspace.id);
     if (!runtime) {
       if (opts.json) say(JSON.stringify({ ok: false, running: false }));
       else say("Bridge 未运行。使用 `c2c start` 启动。");
@@ -355,7 +356,7 @@ program
     // Bridge
     let runtime: RuntimeState | null = null;
     if (workspace) {
-      runtime = await findLiveBridge(workspace.id);
+      runtime = await findLiveBridge(workspace.root, workspace.id);
       if (!runtime && opts.fix) {
         try {
           runtime = (await ensureBridge(root)).runtime;
@@ -582,12 +583,12 @@ program
   .action(async (opts: { workspace?: string }) => {
     const root = resolveWorkspace(opts.workspace);
     const workspace = new Workspace(root);
-    const runtime = await findLiveBridge(workspace.id);
+    const runtime = await findLiveBridge(workspace.root, workspace.id);
     if (runtime) {
       await adminFetch(runtime, "POST", "/admin/revoke-all");
     } else {
       // bridge not running: revoke directly in the persisted store
-      new AuthStore(workspace.id).revokeAll();
+      new AuthStore(workspace.id, { workspaceRoot: workspace.root }).revokeAll();
     }
     check("已断开 ChatGPT 对当前项目的访问（所有令牌已吊销）");
   });
@@ -661,7 +662,9 @@ program
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 function runGit(args: string[]): { ok: boolean; stdout: string } {
-  const result = spawnSync("git", args, {
+  const git = findTrustedExecutable("git", { forbiddenRoots: [repoRoot] });
+  if (!git) return { ok: false, stdout: "" };
+  const result = spawnSync(git, args, {
     cwd: repoRoot,
     encoding: "utf8",
     timeout: 8000,

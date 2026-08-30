@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { workspaceStateFile } from "../workspace/local-state.js";
 
 export const SUPPORTED_SCOPES = [
   "workspace.read",
@@ -55,6 +56,9 @@ export type VerifyTokenResult =
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
+const MAX_CLIENTS = 64;
+const MAX_TOKENS = 512;
+const MAX_AUTH_CODES = 128;
 
 function sha256hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -84,20 +88,64 @@ export class AuthStore {
 
   constructor(
     readonly workspaceId: string,
-    opts: { file?: string } = {}
+    opts: { file?: string; workspaceRoot?: string } = {}
   ) {
-    this.file =
-      opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspaceId}.json`);
+    if (opts.file) {
+      this.file = opts.file;
+    } else if (opts.workspaceRoot) {
+      this.file = workspaceStateFile(opts.workspaceRoot, "auth.json");
+      this.migrateLegacyState();
+    } else {
+      throw new Error("AuthStore requires workspaceRoot when no explicit test file is supplied");
+    }
     this.load();
+  }
+
+  private migrateLegacyState(): void {
+    if (fs.existsSync(this.file)) return;
+    const legacy = path.join(ensureDir(path.join(getStateDir(), "auth")), `${this.workspaceId}.json`);
+    if (!fs.existsSync(legacy)) return;
+    try {
+      const data = readJsonIfExists<PersistedAuthState>(legacy);
+      if (data) writeSecureJson(this.file, data);
+      fs.rmSync(legacy, { force: true });
+    } catch {
+      // A failed migration leaves the old state untouched for manual recovery.
+    }
   }
 
   private load(): void {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
     if (!data) return;
     const now = Date.now();
-    for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
-    for (const token of data.tokens ?? []) {
-      if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
+    const clients = Array.isArray(data.clients) ? data.clients : [];
+    const tokens = Array.isArray(data.tokens) ? data.tokens : [];
+    for (const client of clients.slice(-MAX_CLIENTS)) {
+      if (
+        client &&
+        typeof client.clientId === "string" &&
+        client.clientId.startsWith("c2c_client_") &&
+        Array.isArray(client.redirectUris) &&
+        client.redirectUris.length <= 4 &&
+        client.redirectUris.every((uri) => typeof uri === "string" && uri.length <= 2048)
+      ) {
+        this.clients.set(client.clientId, client);
+      }
+    }
+    for (const token of tokens.slice(-MAX_TOKENS)) {
+      if (
+        token &&
+        typeof token.hash === "string" &&
+        /^[a-f0-9]{64}$/.test(token.hash) &&
+        (token.kind === "access" || token.kind === "refresh") &&
+        token.workspaceId === this.workspaceId &&
+        Array.isArray(token.scopes) &&
+        !token.revoked &&
+        typeof token.expiresAt === "number" &&
+        token.expiresAt > now
+      ) {
+        this.tokens.set(token.hash, token);
+      }
     }
   }
 
@@ -113,6 +161,14 @@ export class AuthStore {
   // ---- Dynamic Client Registration -------------------------------------
 
   registerClient(input: { clientName?: string; redirectUris: string[] }): ClientRegistration {
+    if (this.clients.size >= MAX_CLIENTS) {
+      const referenced = new Set([...this.tokens.values()].map((token) => token.clientId));
+      const evictable = [...this.clients.values()]
+        .filter((client) => !referenced.has(client.clientId))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+      if (!evictable) throw new Error("OAuth client capacity reached");
+      this.clients.delete(evictable.clientId);
+    }
     const client: ClientRegistration = {
       clientId: `c2c_client_${randomBytes(12).toString("base64url")}`,
       clientName: input.clientName,
@@ -138,6 +194,15 @@ export class AuthStore {
     pairingSessionId: string;
     resource?: string;
   }): string {
+    const now = Date.now();
+    for (const [existingCode, record] of this.authCodes) {
+      if (record.expiresAt <= now) this.authCodes.delete(existingCode);
+    }
+    while (this.authCodes.size >= MAX_AUTH_CODES) {
+      const oldest = this.authCodes.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.authCodes.delete(oldest);
+    }
     const code = newToken("c2c_ac");
     this.authCodes.set(code, {
       code,
@@ -171,6 +236,12 @@ export class AuthStore {
     accessTtlMs?: number;
   }): { accessToken: string; refreshToken: string | null; expiresIn: number; scopes: string[] } {
     const now = Date.now();
+    for (const [hash, token] of this.tokens) {
+      if (token.revoked || token.expiresAt <= now) this.tokens.delete(hash);
+    }
+    if (this.tokens.size + (input.scopes.includes("offline_access") ? 2 : 1) > MAX_TOKENS) {
+      throw new Error("OAuth token capacity reached");
+    }
     const workspaceId = input.workspaceId ?? this.workspaceId;
     const accessTtl = input.accessTtlMs ?? ACCESS_TOKEN_TTL_MS;
 
@@ -260,8 +331,10 @@ export class AuthStore {
     return this.tokens.size;
   }
 
-  static deleteStateFile(workspaceId: string): void {
-    const file = path.join(getStateDir(), "auth", `${workspaceId}.json`);
+  static deleteStateFile(workspaceId: string, workspaceRoot?: string): void {
+    const file = workspaceRoot
+      ? workspaceStateFile(workspaceRoot, "auth.json")
+      : path.join(getStateDir(), "auth", `${workspaceId}.json`);
     try {
       fs.rmSync(file, { force: true });
     } catch {

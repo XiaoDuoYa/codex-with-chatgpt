@@ -1,49 +1,59 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { getStateDir, readJsonIfExists } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
+import {
+  removeWorkspaceStateFile,
+  workspaceStateFile,
+  writeWorkspaceStateJson,
+} from "../workspace/local-state.js";
 
 /**
  * Runtime state file: how the CLI/Skill finds a running bridge for a
- * workspace. Contains the admin token, so it is 0600 and lives in the user
- * state dir, never in the project.
+ * workspace. Credentials are deliberately kept out of this discoverable file.
  */
 export interface RuntimeState {
   service: string;
   version: string;
   workspaceId: string;
   workspaceRoot: string;
+  instanceId: string;
   pid: number;
   port: number;
-  adminToken: string;
+  /** Legacy compatibility only. New runtime files never persist this value. */
+  adminToken?: string;
   publicUrl: string | null;
   startedAt: string;
 }
 
-export function runtimeFile(workspaceId: string): string {
-  return path.join(ensureDir(path.join(getStateDir(), "runtime")), `${workspaceId}.json`);
+export function runtimeFile(workspaceRoot: string): string {
+  return workspaceStateFile(workspaceRoot, "runtime.json");
 }
 
 export function writeRuntimeState(state: RuntimeState): void {
-  writeSecureJson(runtimeFile(state.workspaceId), state);
-}
-
-export function readRuntimeState(workspaceId: string): RuntimeState | null {
-  return readJsonIfExists<RuntimeState>(runtimeFile(workspaceId));
-}
-
-export function clearRuntimeState(workspaceId: string): void {
+  const { adminToken: _legacySecret, ...safeState } = state;
+  writeWorkspaceStateJson(state.workspaceRoot, "runtime.json", safeState);
   try {
-    fs.rmSync(runtimeFile(workspaceId), { force: true });
+    fs.rmSync(path.join(getStateDir(), "runtime", `${state.workspaceId}.json`), { force: true });
   } catch {
-    // ignore
+    // best effort cleanup of the exact legacy runtime file
   }
+}
+
+export function readRuntimeState(workspaceRoot: string): RuntimeState | null {
+  return readJsonIfExists<RuntimeState>(runtimeFile(workspaceRoot));
+}
+
+export function clearRuntimeState(workspaceRoot: string): void {
+  removeWorkspaceStateFile(workspaceRoot, "runtime.json");
 }
 
 export interface HealthPayload {
   service: string;
   version: string;
-  workspaceId: string;
+  instanceId?: string;
+  /** Legacy bridge compatibility only. */
+  workspaceId?: string;
   status: string;
 }
 
@@ -66,11 +76,17 @@ export async function probeBridge(
   }
 }
 
-export async function findLiveBridge(workspaceId: string): Promise<RuntimeState | null> {
-  const state = readRuntimeState(workspaceId);
+export async function findLiveBridge(workspaceRoot: string, workspaceId: string): Promise<RuntimeState | null> {
+  const state = readRuntimeState(workspaceRoot);
   if (!state) return null;
+  if (state.workspaceId !== workspaceId || state.workspaceRoot !== workspaceRoot) return null;
   const health = await probeBridge(state.port);
-  if (health && health.workspaceId === workspaceId) return state;
+  if (
+    health &&
+    (state.instanceId
+      ? health.instanceId === state.instanceId
+      : health.workspaceId === workspaceId)
+  ) return state;
   return null;
 }
 

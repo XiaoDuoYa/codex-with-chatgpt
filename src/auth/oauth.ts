@@ -22,6 +22,27 @@ interface PendingAuthRequest {
   codeChallenge: string;
   resource?: string;
   expiresAt: number;
+  clientName: string;
+  redirectOrigin: string;
+  attemptsLeft: number;
+}
+
+const MAX_PENDING_REQUESTS = 128;
+const MAX_REDIRECT_URIS = 4;
+const MAX_REDIRECT_URI_LENGTH = 2048;
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char] ?? char);
+}
+
+function singleString(value: unknown, maxLength: number): string | undefined {
+  return typeof value === "string" && value.length <= maxLength ? value : undefined;
 }
 
 function isAllowedRedirectUri(uri: string): boolean {
@@ -31,7 +52,13 @@ function isAllowedRedirectUri(uri: string): boolean {
   } catch {
     return false;
   }
-  if (parsed.protocol === "https:") return true;
+  if (
+    parsed.protocol === "https:" &&
+    parsed.hostname === "chatgpt.com" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    /^\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(parsed.pathname)
+  ) return true;
   if (parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")) {
     return true;
   }
@@ -68,6 +95,8 @@ function pairingPage(opts: {
   requestId: string;
   workspaceName: string;
   scopes: string[];
+  clientName: string;
+  redirectOrigin: string;
   error?: string;
 }): string {
   const scopeLabels: Record<string, string> = {
@@ -78,10 +107,10 @@ function pairingPage(opts: {
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
-    .map((scope) => `<li>${scopeLabels[scope] ?? scope}</li>`)
+    .map((scope) => `<li>${escapeHtml(scopeLabels[scope] ?? scope)}</li>`)
     .join("");
   const errorHtml = opts.error
-    ? `<p class="error" role="alert">${opts.error}</p>`
+    ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>`
     : "";
   return `<!doctype html>
 <html lang="en">
@@ -115,10 +144,10 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${PRODUCT_NAME}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${opts.workspaceName}</strong> (read-only):</p>
+  <p class="sub"><strong>${escapeHtml(opts.clientName)}</strong> at ${escapeHtml(opts.redirectOrigin)} is requesting read-only access to workspace <strong>${escapeHtml(opts.workspaceName)}</strong>:</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
-    <input type="hidden" name="request_id" value="${opts.requestId}">
+    <input type="hidden" name="request_id" value="${escapeHtml(opts.requestId)}">
     <input type="text" name="pairing_code" id="pairing_code" placeholder="XXXX-XXXX"
            autocomplete="one-time-code" autofocus maxlength="9" required>
     ${errorHtml}
@@ -130,9 +159,42 @@ function pairingPage(opts: {
 </html>`;
 }
 
+function sendPairingPage(res: Response, opts: Parameters<typeof pairingPage>[0], status = 200): void {
+  res
+    .status(status)
+    .set(
+      "Content-Security-Policy",
+      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${opts.redirectOrigin}; base-uri 'none'; frame-ancestors 'none'`
+    )
+    .set("Referrer-Policy", "no-referrer")
+    .set("X-Content-Type-Options", "nosniff")
+    .type("html")
+    .send(pairingPage(opts));
+}
+
 export function createOAuthRouter(deps: OAuthDeps): Router {
   const router = Router();
   const pendingRequests = new Map<string, PendingAuthRequest>();
+  const routeHits = new Map<string, { count: number; resetAt: number }>();
+
+  const allowRequest = (req: Request, res: Response, bucket: string, limit: number): boolean => {
+    const forwarded = req.headers["cf-connecting-ip"];
+    const address = (Array.isArray(forwarded) ? forwarded[0] : forwarded) ?? req.ip ?? "unknown";
+    const key = `${bucket}:${address}`;
+    const now = Date.now();
+    const hit = routeHits.get(key);
+    if (!hit || now > hit.resetAt) {
+      routeHits.set(key, { count: 1, resetAt: now + 60_000 });
+    } else {
+      hit.count++;
+      if (hit.count > limit) {
+        res.status(429).json({ error: "rate_limited" });
+        return false;
+      }
+    }
+    while (routeHits.size > 1024) routeHits.delete(routeHits.keys().next().value as string);
+    return true;
+  };
 
   const prunePending = (): void => {
     const now = Date.now();
@@ -157,23 +219,42 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
 
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
-  router.post("/oauth/register", json(), (req, res) => {
-    const body = req.body as { client_name?: string; redirect_uris?: unknown };
+  router.post(
+    "/oauth/register",
+    (req, res, next) => { if (allowRequest(req, res, "register", 20)) next(); },
+    json({ limit: "16kb", strict: true }),
+    (req, res) => {
+    const body = (req.body && typeof req.body === "object" ? req.body : {}) as {
+      client_name?: string;
+      redirect_uris?: unknown;
+    };
     const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
     if (
       redirectUris.length === 0 ||
-      !redirectUris.every((uri) => typeof uri === "string" && isAllowedRedirectUri(uri))
+      redirectUris.length > MAX_REDIRECT_URIS ||
+      !redirectUris.every(
+        (uri) =>
+          typeof uri === "string" &&
+          uri.length <= MAX_REDIRECT_URI_LENGTH &&
+          isAllowedRedirectUri(uri)
+      )
     ) {
       res.status(400).json({
         error: "invalid_redirect_uri",
-        error_description: "redirect_uris must be https URLs (or http://localhost for development)",
+        error_description: "redirect_uris must be ChatGPT connector URLs (or localhost for development)",
       });
       return;
     }
-    const client = deps.store.registerClient({
-      clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
-      redirectUris: redirectUris as string[],
-    });
+    let client;
+    try {
+      client = deps.store.registerClient({
+        clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
+        redirectUris: redirectUris as string[],
+      });
+    } catch {
+      res.status(429).json({ error: "temporarily_unavailable" });
+      return;
+    }
     deps.logger.info(`Registered OAuth client ${client.clientId} (${client.clientName ?? "unnamed"})`);
     res.status(201).json({
       client_id: client.clientId,
@@ -183,20 +264,32 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
     });
-  });
+    }
+  );
 
   // ---- Authorization endpoint ----------------------------------------------
 
   router.get("/oauth/authorize", (req, res) => {
+    if (!allowRequest(req, res, "authorize", 60)) return;
     prunePending();
-    const query = req.query as Record<string, string | undefined>;
+    const raw = req.query as Record<string, unknown>;
+    const query = {
+      client_id: singleString(raw.client_id, 256),
+      redirect_uri: singleString(raw.redirect_uri, MAX_REDIRECT_URI_LENGTH),
+      response_type: singleString(raw.response_type, 32),
+      state: singleString(raw.state, 2048),
+      code_challenge: singleString(raw.code_challenge, 128),
+      code_challenge_method: singleString(raw.code_challenge_method, 16),
+      scope: singleString(raw.scope, 1024),
+      resource: singleString(raw.resource, MAX_REDIRECT_URI_LENGTH),
+    };
     const client = query.client_id ? deps.store.getClient(query.client_id) : undefined;
     if (!client) {
       res.status(400).send("Unknown client. Please reconnect from ChatGPT.");
       return;
     }
     const redirectUri = query.redirect_uri;
-    if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
+    if (!redirectUri || !isAllowedRedirectUri(redirectUri) || !client.redirectUris.includes(redirectUri)) {
       res.status(400).send("Invalid redirect_uri.");
       return;
     }
@@ -215,6 +308,19 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       fail("invalid_request", "PKCE with S256 is required");
       return;
     }
+    if (!/^[A-Za-z0-9_-]{43,128}$/.test(query.code_challenge)) {
+      fail("invalid_request", "Invalid PKCE challenge");
+      return;
+    }
+    const expectedResource = `${deps.getBaseUrl(req)}/mcp`;
+    if (query.resource && query.resource !== expectedResource) {
+      fail("invalid_target", "Invalid resource");
+      return;
+    }
+    if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+      res.status(429).send("Too many pending authorization requests. Please try again shortly.");
+      return;
+    }
     const scopes = filterScopes(query.scope);
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
@@ -225,15 +331,25 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       codeChallenge: query.code_challenge,
       resource: query.resource,
       expiresAt: Date.now() + 10 * 60_000,
+      clientName: client.clientName?.trim().slice(0, 200) || "ChatGPT connector",
+      redirectOrigin: new URL(redirectUri).origin,
+      attemptsLeft: 5,
     };
     pendingRequests.set(request.id, request);
-    res
-      .status(200)
-      .type("html")
-      .send(pairingPage({ requestId: request.id, workspaceName: deps.workspaceName, scopes }));
+    sendPairingPage(res, {
+      requestId: request.id,
+      workspaceName: deps.workspaceName,
+      scopes,
+      clientName: request.clientName,
+      redirectOrigin: request.redirectOrigin,
+    });
   });
 
-  router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
+  router.post(
+    "/oauth/authorize",
+    (req, res, next) => { if (allowRequest(req, res, "verify", 30)) next(); },
+    urlencoded({ extended: false, limit: "4kb" }),
+    (req, res) => {
     prunePending();
     const body = req.body as { request_id?: string; pairing_code?: string };
     const request = body.request_id ? pendingRequests.get(body.request_id) : undefined;
@@ -241,27 +357,39 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
+    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip, { consumeFailure: false });
     if (!verdict.ok) {
+      if (verdict.reason === "invalid") {
+        request.attemptsLeft--;
+        if (request.attemptsLeft <= 0) {
+          pendingRequests.delete(request.id);
+          sendPairingPage(res, {
+            requestId: request.id,
+            workspaceName: deps.workspaceName,
+            scopes: request.scopes,
+            clientName: request.clientName,
+            redirectOrigin: request.redirectOrigin,
+            error: "Too many incorrect attempts. Restart the connection from ChatGPT.",
+          }, 410);
+          return;
+        }
+      }
       const messages: Record<string, string> = {
-        invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
+        invalid: `Incorrect pairing code. ${request.attemptsLeft} attempts left.`,
         expired: "This pairing code has expired. Ask Codex to generate a new one.",
         too_many_attempts: "Too many incorrect attempts. Ask Codex to generate a new pairing code.",
         rate_limited: "Too many attempts. Please wait a minute and try again.",
         no_active_session: "No active pairing session. Ask Codex to generate a pairing code.",
       };
       deps.logger.warn(`Pairing verification failed: ${verdict.reason}`);
-      res
-        .status(verdict.reason === "invalid" ? 401 : 410)
-        .type("html")
-        .send(
-          pairingPage({
-            requestId: request.id,
-            workspaceName: deps.workspaceName,
-            scopes: request.scopes,
-            error: messages[verdict.reason] ?? "Verification failed.",
-          })
-        );
+      sendPairingPage(res, {
+        requestId: request.id,
+        workspaceName: deps.workspaceName,
+        scopes: request.scopes,
+        clientName: request.clientName,
+        redirectOrigin: request.redirectOrigin,
+        error: messages[verdict.reason] ?? "Verification failed.",
+      }, verdict.reason === "invalid" ? 401 : 410);
       return;
     }
     pendingRequests.delete(request.id);
@@ -278,12 +406,18 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     url.searchParams.set("code", code);
     if (request.state) url.searchParams.set("state", request.state);
     res.redirect(url.toString());
-  });
+    }
+  );
 
   // ---- Token endpoint --------------------------------------------------------
 
-  router.post("/oauth/token", urlencoded({ extended: false }), json(), (req, res) => {
-    const body = req.body as Record<string, string | undefined>;
+  router.post(
+    "/oauth/token",
+    (req, res, next) => { if (allowRequest(req, res, "token", 120)) next(); },
+    urlencoded({ extended: false, limit: "16kb" }),
+    json({ limit: "16kb" }),
+    (req, res) => {
+    const body = (req.body && typeof req.body === "object" ? req.body : {}) as Record<string, string | undefined>;
     const grantType = body.grant_type;
 
     if (grantType === "authorization_code") {
@@ -340,11 +474,12 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     }
 
     res.status(400).json({ error: "unsupported_grant_type" });
-  });
+    }
+  );
 
   // ---- Revocation (RFC 7009) ---------------------------------------------------
 
-  router.post("/oauth/revoke", urlencoded({ extended: false }), (req, res) => {
+  router.post("/oauth/revoke", urlencoded({ extended: false, limit: "16kb" }), (req, res) => {
     const body = req.body as { token?: string };
     if (body.token) deps.store.revokeToken(body.token);
     res.status(200).json({});

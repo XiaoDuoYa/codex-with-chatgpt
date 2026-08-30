@@ -13,7 +13,12 @@ import type { TunnelProvider } from "../tunnel/provider.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
-import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { writeRuntimeState, clearRuntimeState, findLiveBridge, type RuntimeState } from "./runtime.js";
+import {
+  acquireWorkspaceBridgeLock,
+  removeWorkspaceStateFile,
+  writeWorkspaceStateText,
+} from "../workspace/local-state.js";
 
 export interface BridgeOptions {
   workspaceRoot: string;
@@ -73,10 +78,18 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
-  const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
+  const authStore = new AuthStore(workspace.id, {
+    file: opts.authStoreFile,
+    workspaceRoot: workspace.root,
+  });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   const tunnel = opts.tunnelProvider ?? new CloudflaredQuickTunnel(logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
+  const instanceId = randomBytes(16).toString("hex");
+
+  if (opts.persistRuntime !== false && await findLiveBridge(workspace.root, workspace.id)) {
+    throw new Error("A C2C bridge is already active for this workspace");
+  }
 
   let publicBaseUrl: string | null = null;
 
@@ -94,7 +107,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   // ---- Health (public but minimal) ---------------------------------------
 
   app.get("/health", (_req, res) => {
-    res.json({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok" });
+    res.json({ service: SERVICE_NAME, version: VERSION, instanceId, status: "ok" });
   });
 
   // ---- OAuth + discovery ---------------------------------------------------
@@ -114,8 +127,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
   app.all(
     "/mcp",
-    express.json({ limit: "8mb" }),
     bearerAuth({ store: authStore, workspaceId: workspace.id, getBaseUrl, logger }),
+    express.json({ limit: "8mb" }),
     (req: Request, res: Response) => {
       void mcpHandler(req, res);
     }
@@ -196,7 +209,20 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     }, 100);
   });
 
-  const { server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT);
+  const releaseBridgeLock =
+    opts.persistRuntime === false ? () => undefined : acquireWorkspaceBridgeLock(workspace.root, instanceId);
+  let server: Server;
+  let port: number;
+  try {
+    if (opts.persistRuntime !== false) {
+      writeWorkspaceStateText(workspace.root, "admin-token", adminToken);
+    }
+    ({ server, port } = await listen(app, host, opts.port ?? DEFAULT_PORT));
+  } catch (error) {
+    if (opts.persistRuntime !== false) removeWorkspaceStateFile(workspace.root, "admin-token");
+    releaseBridgeLock();
+    throw error;
+  }
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
@@ -207,15 +233,22 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       version: VERSION,
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
+      instanceId,
       pid: process.pid,
       port,
-      adminToken,
       publicUrl: publicBaseUrl,
       startedAt,
     };
     writeRuntimeState(state);
   };
-  persistRuntime();
+  try {
+    persistRuntime();
+  } catch (error) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (opts.persistRuntime !== false) removeWorkspaceStateFile(workspace.root, "admin-token");
+    releaseBridgeLock();
+    throw error;
+  }
 
   let closed = false;
   const shutdown = async (): Promise<void> => {
@@ -223,7 +256,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     closed = true;
     await tunnel.stop().catch(() => undefined);
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
+    if (opts.persistRuntime !== false) {
+      clearRuntimeState(workspace.root);
+      removeWorkspaceStateFile(workspace.root, "admin-token");
+      releaseBridgeLock();
+    }
     logger.info("Bridge stopped");
   };
 

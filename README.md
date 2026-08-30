@@ -164,7 +164,7 @@ The only step that may need you: logging into ChatGPT (and nothing else).
   (PKCE S256, dynamic client registration, rotating refresh tokens). Without a
   token: 401. Wrong workspace: 403.
 - **The model never sees long-lived credentials**: the only secret that ever
-  touches a browser is a one-time pairing code (5-minute TTL, 5 attempts,
+  touches a browser is a one-time pairing code (5-minute TTL, 5 attempts per authorization request,
   rate-limited, destroyed on use).
 
 Full threat model: [docs/security.md](docs/security.md)
@@ -174,7 +174,7 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 76 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # path security, OAuth, pairing and MCP end-to-end tests
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)

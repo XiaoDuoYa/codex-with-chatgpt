@@ -40,6 +40,7 @@ export const SENSITIVE_PATTERNS: string[] = [
   "cookies.sqlite",
   "Cookies",
   ".c2c-secrets*",
+  ".c2c-local/",
 ];
 
 /** High-noise directories excluded from listing/search by default. */

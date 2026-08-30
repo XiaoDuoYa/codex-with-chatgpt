@@ -67,6 +67,15 @@ describe("PairingManager", () => {
     expect(manager.verify(first.code).ok).toBe(false);
   });
 
+  it("allows request-scoped failures without invalidating the global pairing session", () => {
+    const manager = new PairingManager("ws1", { maxAttempts: 3, ipRateLimit: 100 });
+    const pairing = manager.create();
+    for (let i = 0; i < 10; i++) {
+      expect(manager.verify("AAAA-AAAA", `10.0.0.${i}`, { consumeFailure: false }).reason).toBe("invalid");
+    }
+    expect(manager.verify(pairing.code).ok).toBe(true);
+  });
+
   it("normalizes input", () => {
     expect(normalizePairingCode(" ab2-cd3 e ")).toBe("AB2CD3E");
     expect(formatPairingCode("ABCDEFGH")).toBe("ABCD-EFGH");

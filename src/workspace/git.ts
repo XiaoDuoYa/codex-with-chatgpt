@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { IgnoreRules } from "./ignore.js";
+import { findTrustedExecutable } from "../process/executable.js";
 
 export interface GitCommandResult {
   ok: boolean;
@@ -9,7 +10,11 @@ export interface GitCommandResult {
 }
 
 export function runGit(root: string, args: string[]): GitCommandResult {
-  const result = spawnSync("git", args, {
+  const git = findTrustedExecutable("git", { forbiddenRoots: [root] });
+  if (!git) {
+    return { ok: false, stdout: "", stderr: "Trusted git executable not found", code: null };
+  }
+  const result = spawnSync(git, args, {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -60,7 +65,17 @@ export interface GitStatusResult {
   conflicted: string[];
 }
 
-export function gitStatus(root: string): GitStatusResult {
+export function gitStatus(target: GitTarget): GitStatusResult {
+  const root = typeof target === "string" ? target : target.root;
+  const ignoreRules =
+    typeof target === "object" && target.ignoreRules
+      ? target.ignoreRules
+      : new IgnoreRules(root);
+  const isSafe = (filePath: string): boolean =>
+    filePath
+      .split(" -> ")
+      .filter(Boolean)
+      .every((part) => !ignoreRules.isSensitive(part.replace(/^"|"$/g, "")));
   const empty: GitStatusResult = {
     isRepo: false,
     branch: null,
@@ -72,35 +87,48 @@ export function gitStatus(root: string): GitStatusResult {
     untracked: [],
     conflicted: [],
   };
-  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "--", "."]);
+  const result = runGit(root, ["status", "--porcelain=v2", "-z", "--branch", "--", "."]);
   if (!result.ok) return empty;
   const out: GitStatusResult = { ...empty, isRepo: true };
-  for (const line of result.stdout.split("\n")) {
-    if (line.startsWith("# branch.head ")) {
-      out.branch = line.slice("# branch.head ".length).trim();
-    } else if (line.startsWith("# branch.upstream ")) {
-      out.upstream = line.slice("# branch.upstream ".length).trim();
-    } else if (line.startsWith("# branch.ab ")) {
-      const m = line.match(/\+(\d+) -(\d+)/);
+  const records = result.stdout.split("\0");
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (record.startsWith("# branch.head ")) {
+      out.branch = record.slice("# branch.head ".length).trim();
+    } else if (record.startsWith("# branch.upstream ")) {
+      out.upstream = record.slice("# branch.upstream ".length).trim();
+    } else if (record.startsWith("# branch.ab ")) {
+      const m = record.match(/\+(\d+) -(\d+)/);
       if (m) {
         out.ahead = parseInt(m[1], 10);
         out.behind = parseInt(m[2], 10);
       }
-    } else if (line.startsWith("1 ") || line.startsWith("2 ")) {
-      const parts = line.split(" ");
-      const xy = parts[1];
-      const filePath = line.startsWith("2 ")
-        ? line.split("\t")[0]?.split(" ").slice(9).join(" ") + " -> " + (line.split("\t")[1] ?? "")
-        : parts.slice(8).join(" ");
+    } else if (record.startsWith("1 ")) {
+      const match = /^1 ([^ ]{2}) (?:[^ ]+ ){6}([\s\S]*)$/.exec(record);
+      if (!match) continue;
+      const [, xy, filePath] = match;
       const x = xy[0];
       const y = xy[1];
-      if (x !== ".") out.staged.push({ path: filePath, change: x });
-      if (y !== ".") out.unstaged.push({ path: filePath, change: y });
-    } else if (line.startsWith("? ")) {
-      out.untracked.push(line.slice(2));
-    } else if (line.startsWith("u ")) {
-      const parts = line.split(" ");
-      out.conflicted.push(parts.slice(10).join(" "));
+      if (isSafe(filePath)) {
+        if (x !== ".") out.staged.push({ path: filePath, change: x });
+        if (y !== ".") out.unstaged.push({ path: filePath, change: y });
+      }
+    } else if (record.startsWith("2 ")) {
+      const match = /^2 ([^ ]{2}) (?:[^ ]+ ){7}([\s\S]*)$/.exec(record);
+      const oldPath = records[++index] ?? "";
+      if (!match) continue;
+      const [, xy, newPath] = match;
+      const filePath = `${oldPath} -> ${newPath}`;
+      if (isSafe(oldPath) && isSafe(newPath)) {
+        if (xy[0] !== ".") out.staged.push({ path: filePath, change: xy[0] });
+        if (xy[1] !== ".") out.unstaged.push({ path: filePath, change: xy[1] });
+      }
+    } else if (record.startsWith("? ")) {
+      const filePath = record.slice(2);
+      if (isSafe(filePath)) out.untracked.push(filePath);
+    } else if (record.startsWith("u ")) {
+      const match = /^u [^ ]{2} (?:[^ ]+ ){8}([\s\S]*)$/.exec(record);
+      if (match && isSafe(match[1])) out.conflicted.push(match[1]);
     }
   }
   return out;

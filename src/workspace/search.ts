@@ -2,7 +2,9 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { Worker } from "node:worker_threads";
 import { Workspace } from "./manager.js";
+import { findTrustedExecutable } from "../process/executable.js";
 
 export interface SearchOptions {
   query: string;
@@ -26,7 +28,6 @@ export interface SearchResult {
 }
 
 const RG_CANDIDATES = [
-  "rg",
   "/opt/homebrew/bin/rg",
   "/usr/local/bin/rg",
   "/usr/bin/rg",
@@ -34,33 +35,72 @@ const RG_CANDIDATES = [
   "/Applications/Visual Studio Code.app/Contents/Resources/app/node_modules/@vscode/ripgrep/bin/rg",
 ];
 
-let cachedRg: string | null | undefined;
+const cachedRg = new Map<string, string | null>();
 
-export function findRipgrep(): string | null {
+export function findRipgrep(workspaceRoot?: string): string | null {
   if (process.env.C2C_DISABLE_RG === "1") return null;
-  if (cachedRg !== undefined) return cachedRg;
-  if (process.env.C2C_RG_PATH) {
-    cachedRg = process.env.C2C_RG_PATH;
-    return cachedRg;
-  }
-  for (const candidate of RG_CANDIDATES) {
+  const cacheKey = workspaceRoot ? path.resolve(workspaceRoot) : path.resolve(process.cwd());
+  if (cachedRg.has(cacheKey)) return cachedRg.get(cacheKey) ?? null;
+  const candidate = findTrustedExecutable("rg", {
+    override: process.env.C2C_RG_PATH,
+    additionalCandidates: RG_CANDIDATES,
+    forbiddenRoots: workspaceRoot ? [workspaceRoot] : [process.cwd()],
+  });
+  if (candidate) {
     try {
       const result = spawnSync(candidate, ["--version"], { stdio: "ignore", timeout: 3000 });
       if (result.status === 0) {
-        cachedRg = candidate;
+        cachedRg.set(cacheKey, candidate);
         return candidate;
       }
     } catch {
-      // try next candidate
+      // use the bounded Node fallback
     }
   }
-  cachedRg = null;
+  cachedRg.set(cacheKey, null);
   return null;
 }
 
 /** For tests. */
 export function resetRipgrepCache(): void {
-  cachedRg = undefined;
+  cachedRg.clear();
+}
+
+const REGEX_WORKER_SOURCE = `
+  const { parentPort, workerData } = require("node:worker_threads");
+  try {
+    const expression = new RegExp(workerData.pattern, "i");
+    const hits = [];
+    for (let index = 0; index < workerData.lines.length; index++) {
+      if (expression.test(workerData.lines[index])) hits.push(index);
+    }
+    parentPort.postMessage({ hits });
+  } catch (error) {
+    parentPort.postMessage({ error: error instanceof Error ? error.message : "Invalid regular expression" });
+  }
+`;
+
+async function boundedRegexMatches(pattern: string, lines: string[]): Promise<number[] | null> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(REGEX_WORKER_SOURCE, {
+      eval: true,
+      workerData: { pattern, lines },
+    });
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      resolve(null);
+    }, 500);
+    worker.once("message", (message: { hits?: number[]; error?: string }) => {
+      clearTimeout(timer);
+      void worker.terminate();
+      if (message.error) reject(new Error(message.error));
+      else resolve(message.hits ?? []);
+    });
+    worker.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 async function searchWithRipgrep(
@@ -117,7 +157,6 @@ async function searchWithNode(
   opts: SearchOptions,
   limit: number
 ): Promise<SearchResult> {
-  const matcher = opts.regex ? new RegExp(opts.query, "i") : null;
   const needle = opts.query.toLowerCase();
   const globRegex = opts.glob ? globToRegex(opts.glob) : null;
   const matches: SearchMatch[] = [];
@@ -155,9 +194,18 @@ async function searchWithNode(
         }
         if (content.includes("\0")) continue;
         const lines = content.split("\n");
+        let regexHits: Set<number> | null = null;
+        if (opts.regex) {
+          const hitIndexes = await boundedRegexMatches(opts.query, lines);
+          if (hitIndexes === null) {
+            truncated = true;
+            return;
+          }
+          regexHits = new Set(hitIndexes);
+        }
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          const hit = matcher ? matcher.test(line) : line.toLowerCase().includes(needle);
+          const hit = regexHits ? regexHits.has(i) : line.toLowerCase().includes(needle);
           if (hit) {
             matches.push({ path: childRel, line: i + 1, text: line.trimEnd().slice(0, 500) });
             if (matches.length >= limit) {
@@ -191,9 +239,13 @@ export async function searchWorkspace(ws: Workspace, opts: SearchOptions): Promi
   if (!opts.query || opts.query.length < 2) {
     return { matches: [], matchCount: 0, truncated: false, engine: "node" };
   }
+  if (opts.query.length > (opts.regex ? 256 : 4096)) {
+    throw new Error("Search query is too long");
+  }
+  if (opts.regex) new RegExp(opts.query, "i");
   const limit = Math.min(200, Math.max(1, Math.floor(opts.limit ?? 50)));
   const { abs } = ws.resolve(opts.path ?? ".");
-  const rg = findRipgrep();
+  const rg = findRipgrep(ws.root);
   if (rg) {
     try {
       return await searchWithRipgrep(ws, rg, abs, opts, limit);
