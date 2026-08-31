@@ -4,7 +4,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
-import { latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
+import { findExecutionRecord, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -227,8 +227,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Test status",
       description:
-        `Summary of the most recent test run reported by the Codex harness. This does NOT run ` +
-        `tests; it reads the latest execution record. ${UNTRUSTED_NOTE}`,
+        `Summary of the most recent test run reported by the Codex harness: test results, exit status, and error summary. This does NOT run ` +
+        `tests; it reads the latest execution record. Call execution_diagnostics if tests failed. ${UNTRUSTED_NOTE}`,
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -245,7 +245,41 @@ export function createMcpServer(ctx: McpContext): McpServer {
         iteration: latest.iteration,
         tests: latest.tests,
         exitStatus: latest.exitStatus,
+        errorSummary: latest.errorSummary ?? null,
+        hasDiagnostics: Boolean(latest.diagnostics),
         timestamp: latest.timestamp,
+      });
+    }
+  );
+
+  server.registerTool(
+    "execution_diagnostics",
+    {
+      title: "Execution diagnostics",
+      description:
+        `Detailed failure diagnostics, compiler errors, and stack traces from the most recent Codex execution. Call this during REVIEW when tests or execution failed to inspect the exact failure reason without asking the user or Codex to paste logs. ${UNTRUSTED_NOTE}`,
+      inputSchema: {
+        task_id: z.string().optional().describe("Optional task ID filter"),
+        iteration: z.number().int().optional().describe("Optional iteration number filter"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.read");
+      if (denied) return denied;
+      const record = findExecutionRecord(workspace.id, { taskId: args.task_id, iteration: args.iteration });
+      if (!record) {
+        return ok({ available: false, message: "No matching execution record found." });
+      }
+      return ok({
+        available: true,
+        taskId: record.taskId,
+        iteration: record.iteration,
+        exitStatus: record.exitStatus,
+        errorSummary: record.errorSummary ?? null,
+        diagnostics: record.diagnostics ?? "No diagnostic output recorded for this iteration.",
+        completedSubtasks: record.completedSubtasks ?? [],
+        timestamp: record.timestamp,
       });
     }
   );

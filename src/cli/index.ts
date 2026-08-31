@@ -897,6 +897,9 @@ program
   .option("--changed-files <filesOrCount>", "comma-separated files or a count", "0")
   .option("--tests <summary>", "e.g. '27 passed'")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
+  .option("--error-summary <text>", "short summary of why execution or tests failed")
+  .option("--diagnostics <textOrFile>", "failure stack traces, compiler output, or error log file path")
+  .option("--completed-subtasks <list>", "comma-separated list of completed subtasks")
   .option("--notes <text>")
   .action(
     (opts: {
@@ -906,18 +909,37 @@ program
       changedFiles: string;
       tests?: string;
       exitStatus: string;
+      errorSummary?: string;
+      diagnostics?: string;
+      completedSubtasks?: string;
       notes?: string;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const changed = /^\d+$/.test(opts.changedFiles)
         ? parseInt(opts.changedFiles, 10)
         : opts.changedFiles.split(",").map((file) => file.trim()).filter(Boolean);
+
+      let diagnosticsText: string | undefined = opts.diagnostics;
+      if (diagnosticsText && fs.existsSync(diagnosticsText)) {
+        try {
+          diagnosticsText = fs.readFileSync(diagnosticsText, "utf8");
+        } catch {
+          // keep as string
+        }
+      }
+      const completedSubtasks = opts.completedSubtasks
+        ? opts.completedSubtasks.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+
       appendExecutionRecord(workspace.id, {
         taskId: opts.task,
         iteration: parseInt(opts.iteration, 10),
         changedFiles: changed,
         tests: opts.tests ?? null,
         exitStatus: opts.exitStatus,
+        errorSummary: opts.errorSummary ?? null,
+        diagnostics: diagnosticsText ?? null,
+        completedSubtasks,
         timestamp: new Date().toISOString(),
         notes: opts.notes,
       });

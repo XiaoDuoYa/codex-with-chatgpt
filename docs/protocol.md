@@ -92,12 +92,13 @@ CHANGED_FILES:
 TESTS:
 27 passed
 
-Please independently inspect the workspace and current git diff through MCP.
-```
-
 Before sending EXECUTED, Codex records the iteration:
-`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests ... --exit-status ok`
-so ChatGPT can read it via the `execution_summary` / `test_status` tools.
+`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests "27 passed" --exit-status ok`
+or if tests/execution failed:
+`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests "1 failed" --exit-status failed --error-summary "AssertionError at test.ts:25" --diagnostics "error output..."`
+so ChatGPT can read it via `execution_summary`, `test_status`, and `execution_diagnostics` tools.
+
+When reviewing failed iterations, ChatGPT calls `execution_diagnostics` to inspect the exact failure stack traces instead of asking Codex or the user to paste logs.
 
 ### DONE / BLOCKED (ChatGPT → Codex)
 

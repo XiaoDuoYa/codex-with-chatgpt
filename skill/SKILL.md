@@ -491,6 +491,7 @@ Produce a C2C PLAN message.
    ChatGPT does not micro-manage tool calls).
 5. Record the execution so ChatGPT can read it via MCP:
    `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+   (If tests or execution failed, pass `--error-summary "..."` and `--diagnostics "..."` so ChatGPT can inspect error stacks without asking for logs).
 6. Send EXECUTED (no diffs, no logs):
 
 ```
@@ -511,7 +512,7 @@ TESTS:
 Please independently inspect the workspace and current git diff through MCP.
 ```
 
-7. ChatGPT reviews via MCP (git_diff, read_file, test_status) and replies
+7. ChatGPT reviews via MCP (`git_diff`, `read_file`, `test_status`, and `execution_diagnostics` when failed) and replies
    DONE / PLAN (next iteration) / BLOCKED.
 8. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
    the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"

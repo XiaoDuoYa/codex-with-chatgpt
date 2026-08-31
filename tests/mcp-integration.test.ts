@@ -55,10 +55,11 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all eight read-only tools", async () => {
+  it("lists all read-only tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "execution_diagnostics",
       "execution_summary",
       "git_diff",
       "git_status",
@@ -171,6 +172,41 @@ describe("MCP tools over Streamable HTTP", () => {
     );
     expect(status.available).toBe(true);
     expect(status.tests).toBe("27 passed");
+  });
+
+  it("execution_diagnostics returns error stack and failure diagnostics", async () => {
+    appendExecutionRecord(bridge.workspace.id, {
+      taskId: "c2c_test2",
+      iteration: 2,
+      changedFiles: ["src/app.ts"],
+      tests: "1 failed",
+      exitStatus: "failed",
+      errorSummary: "AssertionError: expected 42 to be 43",
+      diagnostics: "AssertionError: expected 42 to be 43\n  at test/app.test.ts:25:12\n  Token c2c_at_secrettoken should be redacted",
+      completedSubtasks: ["Setup DB"],
+      timestamp: new Date().toISOString(),
+    });
+
+    const status = jsonOf<{ exitStatus: string; errorSummary: string; hasDiagnostics: boolean }>(
+      await client.callTool({ name: "test_status", arguments: {} })
+    );
+    expect(status.exitStatus).toBe("failed");
+    expect(status.errorSummary).toBe("AssertionError: expected 42 to be 43");
+    expect(status.hasDiagnostics).toBe(true);
+
+    const diag = jsonOf<{
+      available: boolean;
+      exitStatus: string;
+      errorSummary: string;
+      diagnostics: string;
+      completedSubtasks: string[];
+    }>(await client.callTool({ name: "execution_diagnostics", arguments: { task_id: "c2c_test2" } }));
+
+    expect(diag.available).toBe(true);
+    expect(diag.exitStatus).toBe("failed");
+    expect(diag.diagnostics).toContain("AssertionError: expected 42 to be 43");
+    expect(diag.diagnostics).toContain("[REDACTED]"); // sensitive tokens redacted
+    expect(diag.completedSubtasks).toContain("Setup DB");
   });
 
   it("enforces scopes per tool", async () => {
