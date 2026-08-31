@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { startBridge } from "../src/bridge/server.js";
-import { probeBridge } from "../src/bridge/runtime.js";
+import { probeBridgeState } from "../src/bridge/runtime.js";
 import { makeTmpDir, cleanup, write, isolateStateDir } from "./helpers.js";
 
 describe("port collision handling", () => {
@@ -31,11 +31,14 @@ describe("port collision handling", () => {
     expect(bridgeB.port).toBeGreaterThan(0);
 
     // health identifies each bridge's workspace, so callers can detect reuse
-    const healthA = await probeBridge(bridgeA.port);
-    const healthB = await probeBridge(bridgeB.port);
-    expect(healthA?.workspaceId).toBe(bridgeA.workspace.id);
-    expect(healthB?.workspaceId).toBe(bridgeB.workspace.id);
-    expect(healthA?.workspaceId).not.toBe(healthB?.workspaceId);
+    const healthA = await probeBridgeState(bridgeA.port);
+    const healthB = await probeBridgeState(bridgeB.port);
+    expect(healthA.state).toBe("healthy");
+    expect(healthB.state).toBe("healthy");
+    if (healthA.state !== "healthy" || healthB.state !== "healthy") throw new Error("expected healthy probes");
+    expect(healthA.health.workspaceId).toBe(bridgeA.workspace.id);
+    expect(healthB.health.workspaceId).toBe(bridgeB.workspace.id);
+    expect(healthA.health.workspaceId).not.toBe(healthB.health.workspaceId);
 
     await bridgeA.close();
     await bridgeB.close();
