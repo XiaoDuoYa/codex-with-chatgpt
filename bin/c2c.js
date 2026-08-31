@@ -8,7 +8,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(here, "..", "dist", "cli", "index.js");
 
 if (existsSync(dist)) {
-  await import(pathToFileURL(dist).href);
+  const { runCli } = await import(pathToFileURL(dist).href);
+  await runCli();
 } else {
   // dev fallback: run TypeScript sources through the tsx ESM loader
   const entry = path.join(here, "..", "src", "cli", "index.ts");
