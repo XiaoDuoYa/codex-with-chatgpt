@@ -51,6 +51,7 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     {
       detached: true,
       stdio: ["ignore", out, out],
+      windowsHide: true,
       env: { ...process.env },
     }
   );

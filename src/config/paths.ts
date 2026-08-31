@@ -31,14 +31,26 @@ export function stateSubdir(name: string): string {
   return ensureDir(path.join(getStateDir(), name));
 }
 
-/** Write a JSON file with owner-only permissions. */
+/** Write a JSON file atomically with owner-only permissions. */
 export function writeSecureJson(file: string, data: unknown): void {
-  ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const dir = ensureDir(path.dirname(file));
+  const tmpFile = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), { mode: 0o600 });
   try {
-    fs.chmodSync(file, 0o600);
+    fs.chmodSync(tmpFile, 0o600);
   } catch {
     // best effort on platforms without chmod semantics
+  }
+  try {
+    fs.renameSync(tmpFile, file);
+  } catch {
+    // Fallback if rename across boundaries fails
+    fs.copyFileSync(tmpFile, file);
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      // ignore
+    }
   }
 }
 

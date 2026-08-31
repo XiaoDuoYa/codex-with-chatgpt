@@ -32,6 +32,11 @@ const RG_CANDIDATES = [
   "/usr/bin/rg",
   "/Applications/Cursor.app/Contents/Resources/app/node_modules/@vscode/ripgrep/bin/rg",
   "/Applications/Visual Studio Code.app/Contents/Resources/app/node_modules/@vscode/ripgrep/bin/rg",
+  path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Microsoft VS Code", "resources", "app", "node_modules", "@vscode", "ripgrep", "bin", "win32-x64", "rg.exe"),
+  path.join(process.env.LOCALAPPDATA ?? "", "Programs", "cursor", "resources", "app", "node_modules", "@vscode", "ripgrep", "bin", "win32-x64", "rg.exe"),
+  path.join(process.env.LOCALAPPDATA ?? "", "Microsoft", "WinGet", "Links", "rg.exe"),
+  path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", "scoop", "shims", "rg.exe"),
+  "C:\\ProgramData\\chocolatey\\bin\\rg.exe",
 ];
 
 let cachedRg: string | null | undefined;

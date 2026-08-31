@@ -9,6 +9,9 @@ const COMMON_DIRS = [
   path.join(process.env.HOME ?? "", ".local", "bin"),
   "C:\\Program Files\\cloudflared",
   "C:\\Program Files (x86)\\cloudflared",
+  path.join(process.env.LOCALAPPDATA ?? "", "Microsoft", "WinGet", "Links"),
+  path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", "scoop", "shims"),
+  "C:\\ProgramData\\chocolatey\\bin",
 ];
 
 /** Locate a binary on PATH or in common install locations. */

@@ -352,6 +352,42 @@ export class Workspace {
       languages.add("Swift");
       if (projectType === "unknown") projectType = "swift";
     }
+    if (has("pom.xml") || has("build.gradle") || has("build.gradle.kts") || has("settings.gradle")) {
+      languages.add("Java");
+      if (has("build.gradle.kts") || has("src/main/kotlin")) languages.add("Kotlin");
+      if (projectType === "unknown") projectType = "jvm";
+      if (has("pom.xml")) packageManager = packageManager ?? "maven";
+      else if (has("gradlew") || has("build.gradle") || has("build.gradle.kts")) packageManager = packageManager ?? "gradle";
+    }
+    if (has("CMakeLists.txt") || has("Makefile") || has("meson.build")) {
+      languages.add("C/C++");
+      if (projectType === "unknown") projectType = "c/cpp";
+    }
+    if (has("pubspec.yaml")) {
+      languages.add("Dart");
+      frameworks.add("Flutter");
+      if (projectType === "unknown") projectType = "flutter";
+      packageManager = packageManager ?? "flutter";
+    }
+    if (has("composer.json")) {
+      languages.add("PHP");
+      if (projectType === "unknown") projectType = "php";
+      packageManager = packageManager ?? "composer";
+    }
+    if (has("Gemfile")) {
+      languages.add("Ruby");
+      if (projectType === "unknown") projectType = "ruby";
+      packageManager = packageManager ?? "bundler";
+    }
+    try {
+      if (has("global.json") || fs.readdirSync(this.root).some((f) => f.endsWith(".csproj") || f.endsWith(".sln"))) {
+        languages.add("C#");
+        if (projectType === "unknown") projectType = "dotnet";
+        packageManager = packageManager ?? "dotnet";
+      }
+    } catch {
+      // ignore
+    }
     return {
       projectType,
       languages: [...languages],

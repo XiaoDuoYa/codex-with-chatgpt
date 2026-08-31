@@ -117,6 +117,10 @@ describe("sensitive files", () => {
   it("denies keys and certificates", () => {
     expectDenied("certs/server.pem");
     expectDenied("keys/id_rsa");
+    expectDenied("AuthKey_TEST.p8");
+    expectDenied("terraform.tfstate");
+    expectDenied(".kube/config");
+    expectDenied(".docker/config.json");
   });
 
   it("denies .ssh directories anywhere", () => {
@@ -187,5 +191,33 @@ describe("workspace identity", () => {
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     cleanup(named);
+  });
+
+  it("detects polyglot projects (Java/Kotlin, C++, Flutter, .NET)", () => {
+    const javaDir = makeTmpDir("java-ws");
+    write(javaDir, "pom.xml", "<project></project>");
+    write(javaDir, "src/main/kotlin/App.kt", "fun main() {}");
+    const javaWs = new Workspace(javaDir);
+    const javaDetect = javaWs.detectProject();
+    expect(javaDetect.projectType).toBe("jvm");
+    expect(javaDetect.languages).toContain("Java");
+    expect(javaDetect.languages).toContain("Kotlin");
+    expect(javaDetect.packageManager).toBe("maven");
+    cleanup(javaDir);
+
+    const cppDir = makeTmpDir("cpp-ws");
+    write(cppDir, "CMakeLists.txt", "cmake_minimum_required(VERSION 3.10)");
+    const cppWs = new Workspace(cppDir);
+    expect(cppWs.detectProject().projectType).toBe("c/cpp");
+    cleanup(cppDir);
+
+    const flutterDir = makeTmpDir("flutter-ws");
+    write(flutterDir, "pubspec.yaml", "name: demo_app");
+    const flutterWs = new Workspace(flutterDir);
+    const flutterDetect = flutterWs.detectProject();
+    expect(flutterDetect.projectType).toBe("flutter");
+    expect(flutterDetect.languages).toContain("Dart");
+    expect(flutterDetect.frameworks).toContain("Flutter");
+    cleanup(flutterDir);
   });
 });
