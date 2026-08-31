@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
-import { findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
+import { findBridgeObservation, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -31,8 +31,11 @@ export interface EnsureBridgeResult {
  */
 export async function ensureBridge(workspaceRoot: string, opts: { port?: number } = {}): Promise<EnsureBridgeResult> {
   const workspace = new Workspace(workspaceRoot);
-  const live = await findLiveBridge(workspace.id);
-  if (live) return { runtime: live, spawned: false };
+  const observation = await findBridgeObservation(workspace.id);
+  if (observation.state === "healthy") return { runtime: observation.runtime, spawned: false };
+  if (observation.state === "unknown") {
+    throw new Error(`Bridge state is unknown (${observation.reason}); refusing to start another bridge.`);
+  }
 
   const logDir = ensureDir(path.join(getStateDir(), "logs"));
   const logFile = path.join(logDir, `bridge-${workspace.id}.out.log`);
@@ -60,8 +63,8 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const runtime = await findLiveBridge(workspace.id);
-    if (runtime) return { runtime, spawned: true };
+    const readiness = await findBridgeObservation(workspace.id);
+    if (readiness.state === "healthy") return { runtime: readiness.runtime, spawned: true };
     if (child.exitCode !== null && child.exitCode !== 0) {
       throw new Error(`Bridge process exited with code ${child.exitCode}. See ${logFile}`);
     }
@@ -95,19 +98,20 @@ export async function adminFetch<T = unknown>(
 
 export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
-  const runtime = readRuntimeState(workspace.id);
-  if (!runtime) return false;
-  const healthy = await probeBridge(runtime.port);
-  if (healthy && healthy.workspaceId === workspace.id) {
-    try {
-      await adminFetch(runtime, "POST", "/admin/shutdown", 5000);
-      return true;
-    } catch {
-      // fall through to kill
-    }
+  const observation = await findBridgeObservation(workspace.id);
+  if (observation.state === "stopped") return false;
+  if (observation.state === "unknown") {
+    throw new Error(`Bridge state is unknown (${observation.reason}); refusing to stop a bridge.`);
+  }
+
+  try {
+    await adminFetch(observation.runtime, "POST", "/admin/shutdown", 5000);
+    return true;
+  } catch {
+    // fall through to kill only after a positively healthy observation
   }
   try {
-    process.kill(runtime.pid, "SIGTERM");
+    process.kill(observation.runtime.pid, "SIGTERM");
     return true;
   } catch {
     return false;
