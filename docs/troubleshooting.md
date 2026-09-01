@@ -68,6 +68,8 @@ macOS: `brew install cloudflared`
 Windows: `winget install Cloudflare.cloudflared`
 Linux: see Cloudflare's package instructions.
 The Skill installs this automatically during setup.
+If cloudflared is installed in a custom location that is not on `PATH`, set
+`C2C_CLOUDFLARED_PATH` to the executable's absolute path before running `c2c`.
 
 ### Every new Codex chat “repairs” the connection / cannot write logs
 The C2C state directory lives outside the project (macOS:

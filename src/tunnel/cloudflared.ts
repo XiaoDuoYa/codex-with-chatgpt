@@ -2,15 +2,63 @@ import { spawn, type ChildProcess } from "node:child_process";
 import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
+import { SERVICE_NAME } from "../version.js";
 import { findBinary } from "./detect.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
-const QUICK_TUNNEL_URL_RE = /https:\/\/[a-z0-9][a-z0-9-]*\.trycloudflare\.com/i;
+const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
+const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
+const HEALTH_CHECK_INTERVAL_MS = 250;
+const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+
+function isBridgeHealth(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const health = payload as Record<string, unknown>;
+  return health.service === SERVICE_NAME && health.status === "ok";
+}
+
+async function bridgeHealth(
+  fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>,
+  publicUrl: string
+): Promise<{ ready: boolean; detail: string }> {
+  const response = await fetchImpl(new URL("/health", publicUrl).toString(), {
+    redirect: "error",
+    signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+  });
+  if (!response) return { ready: false, detail: "Health check did not run" };
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    return { ready: false, detail: `Health check returned HTTP ${response.status}` };
+  }
+  return {
+    ready: isBridgeHealth(await response.json().catch(() => null)),
+    detail: `Health check did not identify ${SERVICE_NAME}`,
+  };
+}
 
 /** Extract a Quick Tunnel public URL from a cloudflared log line. */
 export function parseQuickTunnelUrl(line: string): string | null {
-  const match = line.match(QUICK_TUNNEL_URL_RE);
-  return match ? match[0] : null;
+  for (const match of line.matchAll(QUICK_TUNNEL_URL_RE)) {
+    try {
+      const url = new URL(match[0]);
+      if (url.protocol !== "https:" || !QUICK_TUNNEL_HOST_RE.test(url.hostname)) continue;
+      if (url.hostname.toLowerCase() === "api.trycloudflare.com") continue;
+      return url.origin;
+    } catch {
+      // Ignore malformed URLs embedded in log output.
+    }
+  }
+  return null;
+}
+
+export interface CloudflaredQuickTunnelOptions {
+  startTimeoutMs?: number;
+  spawnImpl?: (
+    command: string,
+    args: string[],
+    options: { stdio: ["ignore", "pipe", "pipe"] }
+  ) => ChildProcess;
+  fetchImpl?: (input: string | URL, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -23,11 +71,21 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private child: ChildProcess | null = null;
   private url: string | null = null;
   private lastError: string | null = null;
+  private readonly startTimeoutMs: number;
+  private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
+  private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
+  private starting: Promise<string> | null = null;
+  private cancelStart: (() => void) | null = null;
 
   constructor(
     private readonly logger: Logger = nullLogger,
-    private readonly binaryOverride?: string
-  ) {}
+    private readonly binaryOverride?: string,
+    options: CloudflaredQuickTunnelOptions = {}
+  ) {
+    this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
+    this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
+  }
 
   private binary(): string | null {
     return this.binaryOverride ?? findBinary("cloudflared");
@@ -35,41 +93,144 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
 
   async start(localPort: number): Promise<string> {
     if (this.child && this.url) return this.url;
+    if (this.starting) return this.starting;
+    const starting = this.startProcess(localPort);
+    this.starting = starting;
+    try {
+      return await starting;
+    } finally {
+      if (this.starting === starting) this.starting = null;
+    }
+  }
+
+  private startProcess(localPort: number): Promise<string> {
     const bin = this.binary();
     if (!bin) {
-      throw new Error(
-        "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
+      return Promise.reject(
+        new Error(
+          "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
+        )
       );
     }
+
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(
-        bin,
-        ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
-        { stdio: ["ignore", "pipe", "pipe"] }
-      );
+      let child: ChildProcess;
+      try {
+        child = this.spawnImpl(
+          bin,
+          ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
+          { stdio: ["ignore", "pipe", "pipe"] }
+        );
+      } catch (error) {
+        reject(error);
+        return;
+      }
       this.child = child;
       this.url = null;
       this.lastError = null;
+      let settled = false;
+      let candidateUrl: string | null = null;
+      let cancel: (() => void) | null = null;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
 
-      const timeout = setTimeout(() => {
-        if (!this.url) {
-          this.logger.error("Quick tunnel did not produce a URL within 45s");
+      const closeReaders = (): void => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      };
+
+      const isAlive = (): boolean => this.child === child;
+
+      const stopChild = (): void => {
+        try {
           child.kill("SIGTERM");
-          reject(new Error("Tunnel start timed out"));
+        } catch {
+          // The process may have exited between the state check and kill().
         }
-      }, 45_000);
+      };
+
+      const finish = (callback: () => void, closeOutput = true): void => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        if (closeOutput) closeReaders();
+        if (cancel && this.cancelStart === cancel) this.cancelStart = null;
+        callback();
+      };
+
+      const fail = (error: unknown): void => {
+        finish(() => {
+          stopChild();
+          if (this.child === child) {
+            this.child = null;
+            this.url = null;
+          }
+          reject(error instanceof Error ? error : new Error(String(error)));
+        });
+      };
+
+      cancel = () => fail(new Error("Tunnel start stopped"));
+      this.cancelStart = cancel;
+
+      const ready = (url: string): void => {
+        if (!isAlive()) {
+          fail(new Error("cloudflared exited before the public health endpoint became ready"));
+          return;
+        }
+        finish(
+          () => {
+            this.url = url;
+            this.lastError = null;
+            this.logger.info(`Quick tunnel established: ${url}`);
+            resolve(url);
+          },
+          false
+        );
+      };
+
+      const waitForHealth = async (): Promise<void> => {
+        const publicUrl = candidateUrl;
+        if (!publicUrl) return;
+        while (!settled) {
+          if (!isAlive()) {
+            fail(new Error("cloudflared exited before the public health endpoint became ready"));
+            return;
+          }
+
+          try {
+            const result = await bridgeHealth(this.fetchImpl, publicUrl);
+            if (settled) return;
+            if (result.ready) {
+              ready(publicUrl);
+              return;
+            }
+            this.lastError = result.detail;
+          } catch (error) {
+            if (settled) return;
+            this.lastError = error instanceof Error ? error.message : String(error);
+          }
+          if (settled) return;
+          await new Promise((resolveWait) => setTimeout(resolveWait, HEALTH_CHECK_INTERVAL_MS));
+        }
+      };
+
+      timeout = setTimeout(() => {
+        if (!settled) {
+          this.logger.error(`Quick tunnel did not become ready within ${this.startTimeoutMs}ms`);
+          fail(new Error("Tunnel start timed out"));
+        }
+      }, this.startTimeoutMs);
 
       const scan = (stream: NodeJS.ReadableStream): void => {
         const rl = readline.createInterface({ input: stream });
         rl.on("line", (line) => {
           const url = parseQuickTunnelUrl(line);
-          if (url && !this.url) {
-            this.url = url;
-            clearTimeout(timeout);
-            this.logger.info(`Quick tunnel established: ${url}`);
-            resolve(url);
+          if (url && !candidateUrl) {
+            candidateUrl = url;
+            void waitForHealth().catch((error) => {
+              this.logger.error(`Quick tunnel health check failed: ${String(error)}`);
+            });
           }
-          if (/error/i.test(line)) {
+          if (/\b(?:ERR|error|failed|fatal)\b/i.test(line)) {
             this.lastError = line.slice(0, 400);
             this.logger.debug(`cloudflared: ${line.slice(0, 400)}`);
           }
@@ -79,29 +240,44 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       if (child.stderr) scan(child.stderr);
 
       child.on("error", (error) => {
-        clearTimeout(timeout);
-        this.child = null;
-        reject(error);
+        closeReaders();
+        if (this.child === child) {
+          this.child = null;
+          this.url = null;
+        }
+        if (!settled) fail(error);
       });
       child.on("exit", (code) => {
-        clearTimeout(timeout);
-        const wasStarting = this.url === null;
+        closeReaders();
+        if (this.child === child) {
+          this.child = null;
+          this.url = null;
+          this.lastError = `cloudflared exited (code ${code})`;
+        }
         this.logger.warn(`cloudflared exited with code ${code}`);
-        this.child = null;
-        this.url = null;
-        if (wasStarting) {
-          reject(new Error(`cloudflared exited (code ${code}) before establishing a tunnel${this.lastError ? `: ${this.lastError}` : ""}`));
+        if (!settled) {
+          fail(
+            new Error(
+              `cloudflared exited (code ${code}) before establishing a tunnel${this.lastError ? `: ${this.lastError}` : ""}`
+            )
+          );
         }
       });
     });
   }
 
   async stop(): Promise<void> {
+    this.cancelStart?.();
     if (this.child) {
-      this.child.kill("SIGTERM");
+      try {
+        this.child.kill("SIGTERM");
+      } catch {
+        // The process may have exited between the state check and kill().
+      }
       this.child = null;
     }
     this.url = null;
+    this.lastError = null;
   }
 
   async restart(localPort: number): Promise<string> {

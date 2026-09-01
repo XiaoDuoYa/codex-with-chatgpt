@@ -1,5 +1,14 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { parseQuickTunnelUrl } from "../src/tunnel/cloudflared.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { PassThrough } from "node:stream";
+import { findBinary } from "../src/tunnel/detect.js";
+import {
+  CloudflaredQuickTunnel,
+  parseQuickTunnelUrl,
+  type CloudflaredQuickTunnelOptions,
+} from "../src/tunnel/cloudflared.js";
 import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
@@ -11,31 +20,186 @@ import {
   type CloudflaredAccount,
 } from "../src/tunnel/named-provision.js";
 import { isNamedTunnelReady, needsTunnelChoice, readTunnelState } from "../src/tunnel/state.js";
-import { cleanup, isolateStateDir } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
 
 const stateDirs: string[] = [];
 const previousStateDir = process.env.C2C_STATE_DIR;
+const previousCloudflaredPath = process.env.C2C_CLOUDFLARED_PATH;
+const QUICK_URL = "https://random-words-here-1234.trycloudflare.com";
+type FetchImpl = NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
+
+class FakeCloudflaredProcess extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  killed = false;
+  readonly kill = vi.fn(() => {
+    this.killed = true;
+    return true;
+  });
+}
+
+function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
+  const child = new FakeCloudflaredProcess();
+  const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
+  const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
+    spawnImpl,
+    fetchImpl,
+    startTimeoutMs,
+  });
+  return { child, spawnImpl, tunnel };
+}
+
+function announceUrl(child: FakeCloudflaredProcess): void {
+  child.stderr.write(`INF ${QUICK_URL}\n`);
+}
+
+function healthResponse(): Response {
+  return new Response(JSON.stringify({ service: "c2c-bridge", status: "ok" }), { status: 200 });
+}
 
 afterEach(() => {
   while (stateDirs.length) cleanup(stateDirs.pop()!);
   if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
   else process.env.C2C_STATE_DIR = previousStateDir;
+  if (previousCloudflaredPath === undefined) delete process.env.C2C_CLOUDFLARED_PATH;
+  else process.env.C2C_CLOUDFLARED_PATH = previousCloudflaredPath;
+});
+
+describe("findBinary", () => {
+  it("uses C2C_CLOUDFLARED_PATH for an accessible cloudflared executable", () => {
+    const dir = makeTmpDir("cloudflared-path");
+    stateDirs.push(dir);
+    const filename = process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
+    const configured = write(dir, filename, "placeholder");
+    if (process.platform !== "win32") fs.chmodSync(configured, 0o755);
+    process.env.C2C_CLOUDFLARED_PATH = configured;
+    expect(findBinary("cloudflared")).toBe(configured);
+  });
 });
 
 describe("parseQuickTunnelUrl", () => {
   it("extracts the URL from cloudflared banner output", () => {
     const line =
       "2026-08-28T10:00:00Z INF |  https://random-words-here-1234.trycloudflare.com                              |";
-    expect(parseQuickTunnelUrl(line)).toBe("https://random-words-here-1234.trycloudflare.com");
+    expect(parseQuickTunnelUrl(line)).toBe(QUICK_URL);
   });
 
-  it("ignores unrelated lines", () => {
+  it("ignores unrelated lines and non-Quick-Tunnel hosts", () => {
     expect(parseQuickTunnelUrl("INF Starting tunnel connection")).toBeNull();
     expect(parseQuickTunnelUrl("visit https://www.cloudflare.com for docs")).toBeNull();
+    expect(parseQuickTunnelUrl("https://evil.example.com/trycloudflare.com")).toBeNull();
   });
 
-  it("does not match non-trycloudflare hosts", () => {
-    expect(parseQuickTunnelUrl("https://evil.example.com/trycloudflare.com")).toBeNull();
+  it("rejects Cloudflare's API host", () => {
+    expect(parseQuickTunnelUrl("INF https://api.trycloudflare.com")).toBeNull();
+  });
+});
+
+describe("CloudflaredQuickTunnel", () => {
+  it("resolves only after the public health endpoint identifies the bridge", async () => {
+    const fetchImpl = vi.fn(async () => healthResponse());
+    const { child, spawnImpl, tunnel } = setupTunnel(fetchImpl);
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(spawnImpl).toHaveBeenCalledWith(
+      "cloudflared",
+      ["tunnel", "--url", "http://127.0.0.1:3333", "--no-autoupdate"],
+      { stdio: ["ignore", "pipe", "pipe"] }
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(`${QUICK_URL}/health`, {
+      redirect: "error",
+      signal: expect.any(AbortSignal),
+    });
+    expect(tunnel.status()).toMatchObject({ running: true, url: QUICK_URL });
+    await tunnel.stop();
+  });
+
+  it("keeps consuming cloudflared errors after the tunnel is ready", async () => {
+    const { child, tunnel } = setupTunnel(async () => healthResponse());
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+    await expect(starting).resolves.toBe(QUICK_URL);
+
+    child.stderr.write("ERR runtime connection error\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tunnel.status().detail).toBe("ERR runtime connection error");
+    await tunnel.stop();
+  });
+
+  it("does not accept an HTTP 200 response from another service", async () => {
+    const { child, tunnel } = setupTunnel(
+      async () =>
+        new Response(JSON.stringify({ service: "cloudflare", status: "ok" }), { status: 200 }),
+      20
+    );
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).rejects.toThrow(/timed out/i);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(tunnel.status()).toMatchObject({ running: false, url: null });
+  });
+
+  it("does not spawn twice or resolve a stopped pending start", async () => {
+    const { child, spawnImpl, tunnel } = setupTunnel(() => new Promise<Response>(() => {}));
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const concurrent = tunnel.start(3333);
+    await tunnel.stop();
+    await expect(starting).rejects.toThrow(/stopped/i);
+    await expect(concurrent).rejects.toThrow(/stopped/i);
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("does not resolve if cloudflared exits while the health probe is in flight", async () => {
+    let resolveFetch!: (response: Response) => void;
+    const { child, tunnel } = setupTunnel(
+      () => new Promise<Response>((resolve) => (resolveFetch = resolve))
+    );
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    child.exitCode = 1;
+    child.emit("exit", 1, null);
+    resolveFetch(healthResponse());
+    await expect(starting).rejects.toThrow(/exited/i);
+    expect(tunnel.status()).toMatchObject({ running: false, url: null });
+  });
+
+  it("rejects when spawning reports an asynchronous error", async () => {
+    const { child, tunnel } = setupTunnel(async () => new Response(null));
+    const starting = tunnel.start(3333);
+    await new Promise((resolve) => setImmediate(resolve));
+    child.emit("error", new Error("spawn cloudflared ENOENT"));
+
+    await expect(starting).rejects.toThrow(/ENOENT/i);
+    expect(tunnel.status()).toMatchObject({ running: false, url: null });
+  });
+
+  it("retries a non-ready health response before resolving", async () => {
+    let calls = 0;
+    const cancelBody = vi.fn(async () => undefined);
+    const { child, tunnel } = setupTunnel(async () => {
+      calls += 1;
+      return calls === 1
+        ? ({ ok: false, status: 503, body: { cancel: cancelBody } } as unknown as Response)
+        : healthResponse();
+    });
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(calls).toBe(2);
+    expect(cancelBody).toHaveBeenCalledTimes(1);
+    await tunnel.stop();
   });
 });
 

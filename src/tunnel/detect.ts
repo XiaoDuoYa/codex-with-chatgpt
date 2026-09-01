@@ -11,9 +11,24 @@ const COMMON_DIRS = [
   "C:\\Program Files (x86)\\cloudflared",
 ];
 
+function accessibleFile(candidate: string): string | null {
+  try {
+    const resolved = path.resolve(candidate);
+    if (!fs.statSync(resolved).isFile()) return null;
+    fs.accessSync(resolved, fs.constants.F_OK | fs.constants.X_OK);
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
 /** Locate a binary on PATH or in common install locations. */
 export function findBinary(name: string): string | null {
   const exe = process.platform === "win32" ? `${name}.exe` : name;
+  if (name === "cloudflared" && process.env.C2C_CLOUDFLARED_PATH?.trim()) {
+    const configured = accessibleFile(process.env.C2C_CLOUDFLARED_PATH.trim());
+    if (configured) return configured;
+  }
   try {
     const probe = spawnSync(exe, ["--version"], { stdio: "ignore", timeout: 5000 });
     if (probe.status === 0 || probe.status === 1) return exe; // on PATH
@@ -22,14 +37,8 @@ export function findBinary(name: string): string | null {
   }
   for (const dir of COMMON_DIRS) {
     const full = path.join(dir, exe);
-    try {
-      if (fs.existsSync(full)) {
-        fs.accessSync(full, fs.constants.X_OK);
-        return full;
-      }
-    } catch {
-      // try next
-    }
+    const configured = accessibleFile(full);
+    if (configured) return configured;
   }
   return null;
 }
