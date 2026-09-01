@@ -86,7 +86,7 @@ whatever data it needs by itself.
    - sandbox / state-dir write failed (EPERM)
    - this workspace used to have a public URL and the tunnel is down
    - `chatgptRepair.needed` is true (fix the connector first, then doctor again)
-   - `namedRepair.needed` is true (user must login to Cloudflare, then doctor again.
+   - `namedRepair.needed` is true (user must log in to Cloudflare, then doctor again.
      Do not Delete the ChatGPT connector — the address did not change)
    - `report.bridge` says 状态无法确认: the local bridge may still be running.
      Do not `c2c start`, do not Delete the connector, do not treat it as
