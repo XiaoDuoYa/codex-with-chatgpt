@@ -8,3 +8,7 @@ dist/
 .env.*
 !.env.example
 coverage/
+__pycache__/
+.venv/
+secrets.json
+credentials.json

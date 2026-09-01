@@ -41,6 +41,16 @@ describe("PairingManager", () => {
     expect(manager.verify("DDDD-DDDD")).toMatchObject({ ok: false, reason: "no_active_session" });
   });
 
+  it("uses a 30-minute default TTL", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const manager = new PairingManager("ws1");
+    const { code, expiresAt } = manager.create();
+    expect(expiresAt).toBe(1_000 + 30 * 60_000);
+    vi.advanceTimersByTime(30 * 60_000 + 1);
+    expect(manager.verify(code)).toMatchObject({ ok: false, reason: "expired" });
+  });
+
   it("expires codes after the TTL", () => {
     vi.useFakeTimers();
     const manager = new PairingManager("ws1", { ttlMs: 2 * 60_000 });
@@ -60,11 +70,35 @@ describe("PairingManager", () => {
     expect(manager.verify("AAAA-AAAA", "5.6.7.8").reason).not.toBe("rate_limited");
   });
 
-  it("invalidates previous sessions when creating a new one", () => {
-    const manager = new PairingManager("ws1");
+  it("returns the same active code and expiry for repeated create calls", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const manager = new PairingManager("ws1", { ttlMs: 2 * 60_000 });
     const first = manager.create();
-    manager.create();
-    expect(manager.verify(first.code).ok).toBe(false);
+    const repeated = manager.create();
+    expect(repeated.sessionId).toBe(first.sessionId);
+    expect(repeated.code).toBe(first.code);
+    expect(repeated.expiresAt).toBe(first.expiresAt);
+    expect(first.reused).toBe(false);
+    expect(repeated.reused).toBe(true);
+  });
+
+  it("creates a new session only after the active code expires", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const manager = new PairingManager("ws1", { ttlMs: 2 * 60_000 });
+    const first = manager.create();
+
+    vi.advanceTimersByTime(2 * 60_000);
+    const atExpiry = manager.create();
+    expect(atExpiry.sessionId).toBe(first.sessionId);
+    expect(atExpiry.code).toBe(first.code);
+    expect(atExpiry.expiresAt).toBe(first.expiresAt);
+    expect(atExpiry.reused).toBe(true);
+    vi.advanceTimersByTime(1);
+    const afterExpiry = manager.create();
+    expect(afterExpiry.sessionId).not.toBe(first.sessionId);
+    expect(afterExpiry.expiresAt).toBeGreaterThan(first.expiresAt);
   });
 
   it("normalizes input", () => {

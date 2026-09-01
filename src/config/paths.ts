@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-
+import { randomBytes } from "node:crypto";
 /**
  * State directory resolution, following OS conventions.
  * Override with C2C_STATE_DIR (used heavily by tests).
@@ -31,14 +31,25 @@ export function stateSubdir(name: string): string {
   return ensureDir(path.join(getStateDir(), name));
 }
 
-/** Write a JSON file with owner-only permissions. */
+/** Write a JSON file with owner-only permissions and an atomic replacement. */
 export function writeSecureJson(file: string, data: unknown): void {
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const temp = `${file}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
   try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // best effort on platforms without chmod semantics
+    fs.writeFileSync(temp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    try {
+      fs.chmodSync(temp, 0o600);
+    } catch {
+      // macOS / Windows以外でchmodが使えない場合は作成モードに任せる。
+    }
+    fs.renameSync(temp, file);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // 書き込み失敗時に一時ファイルが無ければ後始末は不要。
+    }
+    throw error;
   }
 }
 

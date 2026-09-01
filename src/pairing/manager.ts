@@ -67,6 +67,8 @@ export interface PairingManagerOptions {
 export class PairingManager {
   private sessions = new Map<string, PairingSession>();
   private ipHits = new Map<string, { count: number; resetAt: number }>();
+  private activeCode: { sessionId: string; code: string; expiresAt: number } | null = null;
+  private activeCodeTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly ttlMs: number;
   private readonly maxAttempts: number;
   private readonly ipRateLimit: number;
@@ -76,27 +78,69 @@ export class PairingManager {
     private readonly workspaceId: string,
     opts: PairingManagerOptions = {}
   ) {
-    this.ttlMs = opts.ttlMs ?? 5 * 60_000;
+    this.ttlMs = opts.ttlMs ?? 30 * 60_000;
     this.maxAttempts = opts.maxAttempts ?? 5;
     this.ipRateLimit = opts.ipRateLimit ?? 10;
     this.ipRateWindowMs = opts.ipRateWindowMs ?? 60_000;
   }
 
-  /** Create a new pairing session. Invalidates previous sessions (one active at a time). */
-  create(): { sessionId: string; code: string; expiresAt: number } {
+  private clearActiveCode(): void {
+    if (this.activeCodeTimer) {
+      clearTimeout(this.activeCodeTimer);
+      this.activeCodeTimer = null;
+    }
+    this.activeCode = null;
+  }
+
+  private rememberActiveCode(sessionId: string, code: string, expiresAt: number): void {
+    this.clearActiveCode();
+    this.activeCode = { sessionId, code, expiresAt };
+    const timer = setTimeout(() => {
+      if (this.activeCode?.sessionId !== sessionId) return;
+      this.activeCode = null;
+      this.activeCodeTimer = null;
+    }, Math.max(1, expiresAt - Date.now() + 1));
+    timer.unref?.();
+    this.activeCodeTimer = timer;
+  }
+
+  /** Create or return the active pairing session. */
+  create(): { sessionId: string; code: string; expiresAt: number; reused: boolean } {
+    const now = Date.now();
+    const activeCode = this.activeCode;
+    const activeSession = activeCode ? this.sessions.get(activeCode.sessionId) : undefined;
+    if (
+      activeCode &&
+      activeSession &&
+      !activeSession.used &&
+      activeSession.expiresAt === activeCode.expiresAt &&
+      now <= activeCode.expiresAt
+    ) {
+      return {
+        sessionId: activeSession.id,
+        code: activeCode.code,
+        expiresAt: activeSession.expiresAt,
+        reused: true,
+      };
+    }
+
     this.sessions.clear();
+    this.clearActiveCode();
     const raw = generateCode();
+    const createdAt = Date.now();
     const session: PairingSession = {
       id: randomBytes(16).toString("hex"),
       codeHash: hashCode(raw),
       workspaceId: this.workspaceId,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + this.ttlMs,
+      createdAt,
+      expiresAt: createdAt + this.ttlMs,
       attemptsLeft: this.maxAttempts,
       used: false,
     };
+    const code = formatPairingCode(raw);
     this.sessions.set(session.id, session);
-    return { sessionId: session.id, code: formatPairingCode(raw), expiresAt: session.expiresAt };
+    this.rememberActiveCode(session.id, code, session.expiresAt);
+    return { sessionId: session.id, code, expiresAt: session.expiresAt, reused: false };
   }
 
   private checkIpRate(ip: string | undefined): boolean {
@@ -125,10 +169,12 @@ export class PairingManager {
     for (const session of active) {
       if (now > session.expiresAt) {
         this.sessions.delete(session.id);
+        this.clearActiveCode();
         return { ok: false, reason: "expired" };
       }
       if (session.attemptsLeft <= 0) {
         this.sessions.delete(session.id);
+        this.clearActiveCode();
         return { ok: false, reason: "too_many_attempts" };
       }
       const match = timingSafeEqual(inputHash, session.codeHash);
@@ -136,11 +182,13 @@ export class PairingManager {
         // one-time use: destroy immediately
         session.used = true;
         this.sessions.delete(session.id);
+        this.clearActiveCode();
         return { ok: true, sessionId: session.id };
       }
       session.attemptsLeft--;
       if (session.attemptsLeft <= 0) {
         this.sessions.delete(session.id);
+        this.clearActiveCode();
         return { ok: false, reason: "too_many_attempts" };
       }
       return { ok: false, reason: "invalid", attemptsLeft: session.attemptsLeft };
@@ -152,11 +200,14 @@ export class PairingManager {
     const now = Date.now();
     for (const session of this.sessions.values()) {
       if (!session.used && now <= session.expiresAt) return true;
+      this.sessions.delete(session.id);
+      if (this.activeCode?.sessionId === session.id) this.clearActiveCode();
     }
     return false;
   }
 
   invalidateAll(): void {
     this.sessions.clear();
+    this.clearActiveCode();
   }
 }

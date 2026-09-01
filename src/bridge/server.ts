@@ -93,6 +93,23 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
+  let closed = false;
+  let tunnelOperation: Promise<void> = Promise.resolve();
+  let shutdownPromise: Promise<void> | null = null;
+  const serializeTunnelOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = tunnelOperation;
+    let resolveNext!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      resolveNext = resolve;
+    });
+    tunnelOperation = promise;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      resolveNext();
+    }
+  };
 
   const app = express();
   app.set("trust proxy", true);
@@ -154,7 +171,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   app.post("/admin/pairing", adminGuard, (_req, res) => {
     const session = pairing.create();
     logger.info("Created pairing session");
-    res.json({ code: session.code, expiresAt: session.expiresAt });
+    res.json({ code: session.code, expiresAt: session.expiresAt, reused: session.reused });
   });
 
   app.get("/admin/info", adminGuard, (_req, res) => {
@@ -168,6 +185,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       publicUrl: publicBaseUrl,
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
+      clients: authStore.listClientSummaries(),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,
       startedAt,
@@ -175,13 +193,21 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
-      .start(port)
-      .then((url) => {
-        publicBaseUrl = url;
+    void serializeTunnelOperation(async () => {
+      if (closed) throw new Error("BRIDGE_CLOSED: bridge is shutting down");
+      if (publicBaseUrl) return publicBaseUrl;
+      const current = tunnel.status();
+      if (current.running && current.url) {
+        publicBaseUrl = current.url;
         persistRuntime();
-        res.json({ url });
-      })
+        return current.url;
+      }
+      const url = await tunnel.start(port);
+      publicBaseUrl = url;
+      persistRuntime();
+      return url;
+    })
+      .then((url) => res.json({ url }))
       .catch((error: Error) => {
         logger.error(`Tunnel start failed: ${error.message}`);
         res.status(500).json({ error: "tunnel_failed", message: error.message });
@@ -189,12 +215,19 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
-    void tunnel.stop().then(() => {
+    void serializeTunnelOperation(async () => {
+      if (closed) throw new Error("BRIDGE_CLOSED: bridge is shutting down");
+      await tunnel.stop();
       publicBaseUrl = null;
       persistRuntime();
-      res.json({ stopped: true });
-    });
+    })
+      .then(() => res.json({ stopped: true }))
+      .catch((error: Error) => {
+        logger.error(`Tunnel stop failed: ${error.message}`);
+        res.status(500).json({ error: "tunnel_failed", message: error.message });
+      });
   });
+
 
   app.post("/admin/revoke-all", adminGuard, (_req, res) => {
     const count = authStore.revokeAll();
@@ -231,14 +264,23 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   };
   persistRuntime();
 
-  let closed = false;
-  const shutdown = async (): Promise<void> => {
-    if (closed) return;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
     closed = true;
-    await tunnel.stop().catch(() => undefined);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
-    logger.info("Bridge stopped");
+    shutdownPromise = (async () => {
+      await serializeTunnelOperation(async () => {
+        try {
+          await tunnel.stop();
+        } finally {
+          publicBaseUrl = null;
+          persistRuntime();
+        }
+      }).catch(() => undefined);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
+      logger.info("Bridge stopped");
+    })();
+    return shutdownPromise;
   };
 
   return {

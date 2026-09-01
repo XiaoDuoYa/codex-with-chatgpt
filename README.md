@@ -1,4 +1,5 @@
 # Codex with ChatGPT
+**version:** v0.2.0
 
 > ChatGPT thinks. Codex works.
 > ChatGPT 负责思考，Codex 负责干活。
@@ -45,8 +46,8 @@ Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](
 4. 安装 Skill：把仓库里的 skill/SKILL.md 复制到
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
-5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
+5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行。
+  （首次连接时在内置浏览器中输入一次配对码；同一 workspace 后续任务复用已有 connector，不会重复输入）。
    全程只用内置浏览器，禁止打开任何第三方浏览器。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
@@ -71,9 +72,9 @@ I am a non-technical user — do everything yourself:
 4. Install the Skill: copy skill/SKILL.md to
    ~/.codex/skills/codex-with-chatgpt/SKILL.md, and update the line
    "The codex-with-chatgpt checkout lives at:" to the actual clone path.
-5. First-time setup: follow the SKILL.md "first-time setup" workflow
-   (run c2c setup, configure the ChatGPT connector in the BUILT-IN browser,
-   enter the pairing code). Never open a third-party browser.
+5. First-time setup: follow the SKILL.md "first-time setup" workflow.
+   Enter the pairing code once in the BUILT-IN browser; later tasks in the same
+   workspace reuse the existing connector and do not ask for the code again.
 6. Only interrupt me for logins (ChatGPT / Cloudflare), CAPTCHAs or 2FA —
    and give me exactly ONE action at a time.
 7. When done, show me the ✓ checklist and confirm the file-read test passed.
@@ -123,6 +124,22 @@ The default public address is a temporary Cloudflare URL. It changes when the
 bridge restarts, and Codex repairs ChatGPT by deleting that workspace's
 connector and adding it again.
 
+Deleting and recreating the connector changes its ChatGPT app identity, so the
+saved conversation must also be replaced. After repair, open a fresh ChatGPT
+conversation, add the current connector with `@`, send the Boot Prompt, verify
+`workspace_info`, then commit the new binding:
+
+```sh
+c2c connector commit -w <workspace> \
+  --generation <generation> --fingerprint <fingerprint> --url <conversation-url> \
+  --lock-token <token> --json
+```
+
+Run that command only after `workspace_info` succeeds. It writes the verified
+conversation metadata and the connector binding as one transition; do not call
+`session set` before the commit. A saved session is reusable only when its
+generation and fingerprint exactly match the current `connectorBound` state.
+
 If you have a Cloudflare account and a domain already on Cloudflare, first-time
 setup (and the next coding session, once) will ask whether you want a stable
 hostname such as `c2c-<project>.your-domain.com`. That path opens a browser so
@@ -131,6 +148,67 @@ across restarts. If you skip it, or login fails, Codex stays on the temporary
 address — same features, just a slower repair.
 
 Credentials stay in the OS app state directory, not in the project.
+
+## OMPで使う場合
+
+このワークスペースでは、upstream の Codex Skill ではなく [`skill/omp/SKILL.md`](skill/omp/SKILL.md) を使います。OMP 用ラッパーは次です。
+
+```sh
+./scripts/omp-c2c.sh status -w /Users/arica/Data/OMP --json
+./scripts/omp-c2c.sh tunnel status -w /Users/arica/Data/OMP --json
+./scripts/omp-c2c.sh doctor -w /Users/arica/Data/OMP --no-fix --json
+```
+
+状態変更やChatGPTのブラウザ操作を始める前に、workspaceのセッション排他を取得します。
+返されたtokenを作業中だけ保持し、変更系コマンドへ`--lock-token <token>`を渡します。
+完了時は`session lock release`を実行します。
+
+```sh
+./scripts/omp-c2c.sh session lock acquire \
+  -w /Users/arica/Data/OMP --task <task_id> --json
+```
+
+初回接続または明示的な復旧だけ、次を実行します。
+
+```sh
+./scripts/omp-c2c.sh setup -w /Users/arica/Data/OMP --json --lock-token <token>
+```
+
+`setup`は既存の有効な配対を確認する通常ヘルスチェックではありません。
+出力に`pairingCode`が含まれていても、Connectorを作成する前に保存・入力しません。
+先に`doctor --no-fix --json`で診断し、ChatGPT側でConnectorを作成または再作成した直後、OAuth認可画面を開く直前に同じlock tokenで`doctor --json`（修復あり）を一度だけ実行します。
+返された`chatgptRepair.pairingCode`と`pairingExpiresAt`を直ちにOAuth popupへ入力してください。
+配対が進行中なら新しいコードを発行せず、通常タスクでは`setup`も`pair`も呼びません。
+Pairing codeは30分で期限切れになり、一回限りです。
+期限切れや明示的な再認可だけ、現在のロック token で`pair`を実行します。
+
+OMPではQuick Tunnelを既定とし、固定ドメインはユーザーが明示的に選んだ場合だけ設定します。
+固定ドメインを使う場合は、セッション排他を保持したまま`tunnel login -w /Users/arica/Data/OMP --lock-token <token>`を実行し、
+続けて`tunnel choose --mode named --zone <domain> --lock-token <token>`で設定します。
+
+ChatGPT Webへ接続するときは`--no-tunnel`を使いません。
+通常タスクでは、まず`status`、`session get`、`tunnel status`、`doctor --no-fix --json`を読み取り、
+`session get`の`usable: true`と、doctorの`status: "ok"`を確認して既存のconnector、OAuthトークン、会話を再利用します。
+doctorのJSONは`status: "pending"`を修復待ち、`status: "blocked"`を障害として示します。
+`--no-fix`の`exitCode`が0でも、`status`や`chatgptRepair.needed`を無視してChatGPTへ送信してはいけません。
+
+Quick TunnelのURLが変わった場合は、doctor JSONに出た同じ名前のConnectorだけを削除して再作成します。
+新しいConnectorで`workspace_info`が成功した後、`connector commit --generation <generation> --fingerprint <fingerprint> --url <conversation-url> --lock-token <token>`を実行します。
+この順序で、会話URLを先に保存し、検証済みのconnector bindingを同じ処理で確定します。
+commit前の`session set`は禁止です。commit後に保存済み会話の`usable`がtrueであることを確認してからC2C制御メッセージを送信します。
+Connector再作成でアプリの識別子が変わるため、保存済み会話は使わず、新しいChatGPT会話で`@`から現行connectorを選びます。
+固定ドメインのnamed tunnelが停止した場合は、Cloudflareへ再ログインして復旧し、Connectorは削除しません。
+
+旧endpoint stateは読み取り時にversion 2へ正規化され、connector bindingなしの`legacy_state`保留として扱われます。
+旧保存会話やbindingなしの会話は再利用せず、現行Connectorで`workspace_info`を確認してから`connector commit`で移行します。
+OAuthのDCRはclient名と重複除去・ソート済みredirect URIからfingerprintを作り、同じfingerprintの再登録を同じclientへ収束させます。
+既存stateに重複clientがあれば、token数、作成時刻、client IDの順でcanonical clientを選び、重複clientとそのtokenを退役させます。
+
+ユーザーがプロジェクト単位の分離を明示した場合だけ、そのサブディレクトリを`-w`に指定します。
+配対コード（`XXXX-XXXX`）はChatGPTのログインコードではなく、connector初回認可用の一回限りの確認コードです。
+
+
+---
 
 ## How it works
 
@@ -173,14 +251,15 @@ Credentials stay in the OS app state directory, not in the project.
   exist on the server. No prompt injection can enable them.
 - **One workspace = one boundary**: every token is bound to a single workspace;
   path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
-  are all blocked and tested).
+  are all blocked and tested). In the OMP integration, `/Users/arica/Data/OMP`
+  is the default workspace; a child project is used only for explicit isolation.
 - **Sensitive files never leave**: `.env*`, keys, SSH, credentials are denied by
   default (`.env.example` allowed); `.c2cignore` adds your own rules.
 - **Knowing the URL grants nothing**: the public MCP endpoint requires OAuth 2.1
   (PKCE S256, dynamic client registration, rotating refresh tokens). Without a
   token: 401. Wrong workspace: 403.
 - **The model never sees long-lived credentials**: the only secret that ever
-  touches a browser is a one-time pairing code (5-minute TTL, 5 attempts,
+  touches a browser is a one-time pairing code (30-minute TTL, 5 attempts,
   rate-limited, destroyed on use).
 
 Full threat model: [docs/security.md](docs/security.md)
@@ -190,11 +269,16 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 76 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest: path security, OAuth, pairing, MCP e2e
 
-c2c setup           # bridge + tunnel + pairing code, all in one
-c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
-c2c status / doctor / pair / unpair / logs / stop
+c2c session lock acquire -w <workspace> --task <task-id> --json
+c2c doctor -w <workspace> --no-fix --json
+c2c setup --workspace <workspace> --lock-token <token>  # first setup/recovery only
+c2c connector commit -w <workspace> --generation <n> \
+  --fingerprint <fingerprint> --url <conversation-url> \
+  --lock-token <token> --json
+c2c session get -w <workspace> --json  # require usable: true
+c2c session lock release -w <workspace> --token <token> --json
 ```
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
@@ -214,6 +298,7 @@ src/
   workspace/  path containment, sensitive-file policy, search, git
   tunnel/     TunnelProvider abstraction + Cloudflare Quick/Named Tunnel
   execution/  execution records for the review loop
+  session/    workspace session lease and bridge-start lock
   process/    daemon lifecycle
   cli/        the c2c CLI
 skill/        the Codex Skill (the real UX layer)

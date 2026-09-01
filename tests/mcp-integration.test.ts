@@ -10,6 +10,9 @@ let root: string;
 let bridge: Bridge;
 let client: Client;
 let accessToken: string;
+let stateDir: string;
+let authDir: string;
+let previousStateDir: string | undefined;
 
 function textOf(result: { content?: unknown }): string {
   const content = result.content as { type: string; text: string }[];
@@ -21,7 +24,8 @@ function jsonOf<T = Record<string, unknown>>(result: { content?: unknown }): T {
 }
 
 beforeAll(async () => {
-  isolateStateDir();
+  previousStateDir = process.env.C2C_STATE_DIR;
+  stateDir = isolateStateDir();
   root = makeTmpDir("mcp-ws");
   makeGitRepo(root);
   write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, dependencies: { react: "^19.0.0" } }));
@@ -29,11 +33,12 @@ beforeAll(async () => {
   // an uncommitted change so git_diff has content
   write(root, "src/index.ts", "export const answer = 43; // changed\n");
 
+  authDir = makeTmpDir("auth");
   bridge = await startBridge({
     workspaceRoot: root,
     port: 0,
     persistRuntime: false,
-    authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
+    authStoreFile: path.join(authDir, "store.json"),
   });
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
@@ -49,9 +54,19 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await client.close();
-  await bridge.close();
-  cleanup(root);
+  try {
+    await client.close();
+  } finally {
+    try {
+      await bridge.close();
+    } finally {
+      cleanup(root);
+      cleanup(authDir);
+      cleanup(stateDir);
+      if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
+      else process.env.C2C_STATE_DIR = previousStateDir;
+    }
+  }
 });
 
 describe("MCP tools over Streamable HTTP", () => {

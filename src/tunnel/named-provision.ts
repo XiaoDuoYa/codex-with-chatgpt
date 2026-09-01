@@ -184,11 +184,12 @@ export interface ProvisionNamedResult {
 }
 
 export async function provisionNamedTunnel(opts: {
-  workspaceId: string;
-  workspaceName: string;
-  zone: string;
-  hostname?: string;
-  account?: CloudflaredAccount;
+ workspaceId: string;
+ workspaceName: string;
+ zone: string;
+ hostname?: string;
+ account?: CloudflaredAccount;
+ beforeStateWrite?: () => void;
 }): Promise<ProvisionNamedResult> {
   const account = opts.account ?? new ProcessCloudflaredAccount();
   let hostname: string;
@@ -197,7 +198,12 @@ export async function provisionNamedTunnel(opts: {
       ? normalizeNamedTunnelHostname(opts.hostname)
       : suggestedNamedHostname(opts.zone, opts.workspaceName, opts.workspaceId);
   } catch (error) {
-    return fallbackState(opts.workspaceId, "invalid_hostname", (error as Error).message);
+    return fallbackState(
+      opts.workspaceId,
+      "invalid_hostname",
+      error instanceof Error ? error.message : String(error),
+      opts.beforeStateWrite
+    );
   }
 
   const tunnelName = `c2c-${opts.workspaceId}`;
@@ -205,6 +211,7 @@ export async function provisionNamedTunnel(opts: {
     if (!account.hasCert()) await account.login();
     const tunnel = await account.createTunnel(tunnelName);
     await account.routeDns(tunnel.name, hostname);
+    opts.beforeStateWrite?.();
     const state = writeTunnelState({
       workspaceId: opts.workspaceId,
       preference: "named",
@@ -218,7 +225,12 @@ export async function provisionNamedTunnel(opts: {
     });
     return { ok: true, state, fallback: false };
   } catch (error) {
-    return fallbackState(opts.workspaceId, "provision_failed", (error as Error).message);
+    return fallbackState(
+      opts.workspaceId,
+      "provision_failed",
+      error instanceof Error ? error.message : String(error),
+      opts.beforeStateWrite
+    );
   }
 }
 
@@ -232,13 +244,19 @@ export function chooseQuickTunnel(workspaceId: string, fallbackReason?: string):
   });
 }
 
-function fallbackState(workspaceId: string, reason: string, error: string): ProvisionNamedResult {
-  const state = chooseQuickTunnel(workspaceId, reason);
-  return {
-    ok: true,
-    state,
-    fallback: true,
-    userMessage: NAMED_FALLBACK_MESSAGE,
-    error,
-  };
+function fallbackState(
+ workspaceId: string,
+ reason: string,
+ error: string,
+ beforeStateWrite?: () => void
+): ProvisionNamedResult {
+ beforeStateWrite?.();
+ const state = chooseQuickTunnel(workspaceId, reason);
+ return {
+  ok: true,
+  state,
+  fallback: true,
+  userMessage: NAMED_FALLBACK_MESSAGE,
+  error,
+ };
 }

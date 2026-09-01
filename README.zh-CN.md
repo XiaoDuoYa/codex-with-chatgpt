@@ -33,8 +33,8 @@ Agent（Codex），然后去倒杯咖啡：
 4. 安装 Skill：把仓库里的 skill/SKILL.md 复制到
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
-5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
+5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行。
+  （首次连接时在内置浏览器中输入一次配对码；同一 workspace 后续任务复用已有 connector，不会重复输入。）
    全程只用内置浏览器，禁止打开任何第三方浏览器。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
@@ -70,11 +70,82 @@ Ready.
 
 ### 可选的固定域名
 
-默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
+默认公网地址是临时的，桥重启后会变。Codex 会删除这个 workspace 自己的 ChatGPT Connector，再用新地址重新创建；不会触碰其它 workspace 的 Connector。
 
-如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
+删除并重新创建 Connector 会产生新的 ChatGPT 应用身份，因此保存的会话也必须更换。修复后请新建 ChatGPT 会话，用 `@` 添加当前 Connector，发送 Boot Prompt，确认 `workspace_info` 成功，再提交新的绑定：
 
-凭证放在系统目录，不进项目。
+```sh
+c2c connector commit -w <workspace> \
+  --generation <generation> --fingerprint <fingerprint> --url <conversation-url> \
+  --lock-token <token> --json
+```
+
+## 在 OMP 中使用
+
+OMP 配下的默认 C2C workspace 是 `~/Data/OMP`。即使从某个子项目目录发起任务，也不会把当前目录自动当作 workspace 边界。
+
+通常任务先进行只读检查，不运行 `setup` 或 `pair`：
+
+```sh
+./scripts/omp-c2c.sh status -w ~/Data/OMP --json
+./scripts/omp-c2c.sh session get -w ~/Data/OMP --json
+./scripts/omp-c2c.sh tunnel status -w ~/Data/OMP --json
+./scripts/omp-c2c.sh doctor -w ~/Data/OMP --no-fix --json
+```
+
+只有 `session get` 返回 `usable: true`、doctor 返回 `status: "ok"`，并且
+`report.bridge.ok`、`report.mcp.ok`、`report.tunnel.ok` 都为 true 时，才复用现有
+Connector、OAuth token 和会话。`doctor --no-fix` 即使返回 `exitCode: 0`，也可能是
+`status: "pending"`；不能只看退出码。
+
+如果没有 endpoint 或 usable 会话，自动路由会在 OMP 内部进入初次配置或明确的恢复流程，
+不会要求用户输入 `/chatgpt-setup`。正常健康检查仍然不运行 `setup` 或 `pair`。
+
+在修改状态或操作 ChatGPT 浏览器前，先取得 workspace 会话锁。只在当前任务中保存返回的 token，
+并将 `--lock-token <token>` 传给所有修改命令；结束后运行 `session lock release`。
+
+```sh
+./scripts/omp-c2c.sh session lock acquire \
+  -w ~/Data/OMP --task <task-id> --json
+```
+
+只有首次连接或明确恢复时，才在持有锁的情况下运行 `setup`。`setup` 输出的
+`pairingCode` 不要在 Connector 创建前保存或输入。
+先运行只读的 `doctor --no-fix --json` 完成诊断，在 ChatGPT 创建或重新创建 Connector；
+仅在 Connector 创建完成、即将打开 OAuth 授权弹窗时，才用同一个 lock token 运行修复模式
+`doctor --json --lock-token <token>`，然后立即把返回的 `chatgptRepair.pairingCode`
+输入弹窗。配对码默认有效 30 分钟且只能使用一次；如果已有配对流程，`setup` 不会再发新码。
+
+OMP 默认使用临时地址。只有明确选择固定域名时，才先在会话锁内运行
+`tunnel login -w ~/Data/OMP --lock-token <token>`，再运行
+`tunnel choose --mode named --zone <domain> --lock-token <token>`。
+
+临时地址发生变化时，doctor 会给出当前 Connector、generation 和 fingerprint。
+只删除并重新创建该 workspace 的 Connector，不触碰其它 workspace，也不对旧地址 Reconnect 或编辑。
+重新创建会产生新的 ChatGPT 应用身份，因此不要复用保存的旧会话；请新建会话，用 `@` 添加当前
+Connector，发送 Boot Prompt，确认 `workspace_info` 成功后提交新的绑定：
+
+```sh
+./scripts/omp-c2c.sh connector commit -w ~/Data/OMP \
+  --generation <generation> --fingerprint <fingerprint> --url <conversation-url> \
+  --lock-token <token> --json
+```
+
+`generation` 和 `fingerprint` 必须来自 doctor，并且只能在 `workspace_info` 成功后提交。
+commit 会同时写入已验证的会话元数据和 Connector 绑定；禁止在 commit 前运行 `session set`。
+之后只有当保存会话的 generation、fingerprint 与当前 `connectorBound` 完全一致时，才会复用该会话。
+固定域名连接需要修复时，重新登录 Cloudflare，不删除 Connector。
+
+旧 endpoint state 会在读取时正规化为 version 2 的未绑定 `legacy_state`，旧会话不会因此自动变得可用；
+必须在当前 Connector 上验证 `workspace_info` 后再通过 `connector commit` 迁移。
+OAuth 的动态客户端注册按 client 名称和去重排序后的 redirect URI 计算 fingerprint；
+重复注册会复用同一 client，旧 state 中的重复 client 会确定性地收敛并退役其 token。
+
+连接 ChatGPT 网页版时不要使用 `--no-tunnel`。项目级隔离只有在明确指定时才使用子目录作为 `-w` 参数。
+
+配对码不是 ChatGPT 登录码，而是 connector 首次授权使用的一次性确认码。
+
+---
 
 ## 工作原理
 
@@ -115,13 +186,13 @@ Ready.
 - **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
   注入都无法启用它们。
 - **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
-  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
+  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。在 OMP 集成中，默认 workspace 是 `~/Data/OMP`；只有明确要求隔离时才使用子项目目录。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
   （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
 - **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
   客户端注册、refresh token 轮换）。无令牌：401；令牌属于别的工作区：403。
 - **模型永远接触不到长期凭据**：唯一会出现在浏览器里的秘密是一次性配对码
-  （5 分钟有效、限 5 次尝试、限速、用后即毁）。
+  （30 分钟有效、限 5 次尝试、限速、用后即毁）。
 
 完整威胁模型：[docs/security.md](docs/security.md)
 
@@ -130,11 +201,16 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：76 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # vitest：路径安全、OAuth、配对、MCP 端到端
 
-c2c setup           # 一条命令：Bridge + 隧道 + 配对码
-c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
-c2c status / doctor / pair / unpair / logs / stop
+c2c session lock acquire -w <workspace> --task <task-id> --json
+c2c doctor -w <workspace> --no-fix --json
+c2c setup --workspace <workspace> --lock-token <token>  # 仅首次配置或明确恢复
+c2c connector commit -w <workspace> --generation <n> \
+  --fingerprint <fingerprint> --url <conversation-url> \
+  --lock-token <token> --json
+c2c session get -w <workspace> --json  # 仅 usable: true 时复用
+c2c session lock release -w <workspace> --token <token> --json
 ```
 
 环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
@@ -154,6 +230,7 @@ src/
   workspace/  路径收敛、敏感文件策略、搜索、git
   tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
   execution/  审查闭环所需的执行记录
+  session/    workspace 会话锁和 Bridge 启动锁
   process/    守护进程生命周期
   cli/        c2c 命令行
 skill/        Codex Skill（真正的 UX 层）

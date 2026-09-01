@@ -23,6 +23,42 @@ INIT → PLAN → EXECUTING → EXECUTED → REVIEW → PLAN | DONE | BLOCKED | 
 | ERROR | either | Protocol/infrastructure failure |
 | HANDOFF | Codex | Continuation brief sent to a replacement conversation |
 
+## Session lease
+
+Only one C2C browser session may control a workspace at a time. The caller
+acquires a lease before opening the ChatGPT conversation or changing bridge
+state:
+
+```
+c2c session lock acquire -w <workspace> --task <task-id> --json
+```
+
+The caller keeps the returned token out of control messages and passes it to
+mutating commands with `--lock-token`. Mutating commands include:
+
+- `setup`, `start`, `restart`, `stop`
+- `doctor` without `--no-fix`, `pair`, `unpair`, `tunnel choose`, `tunnel login`
+- `session set`, `session clear`, `record`
+
+`status`, `session get`, `session lock status`, and `doctor --no-fix` are
+read-only and do not require the lease.
+
+The lease has a finite TTL. Refresh it before a long planning or review loop,
+and release it after the conversation is closed or handed off:
+
+```
+c2c session lock refresh -w <workspace> --token <token> --json
+c2c session lock release -w <workspace> --token <token> --json
+```
+
+The CLI serializes each acquire, refresh, release, and stale-lock reclaim
+through a short-lived per-workspace mutation guard. Callers do not manage this
+internal guard directly.
+
+If acquisition reports `busy`, do not use another task's token or mutate the
+workspace. Wait for release, or report the current task and expiry to the
+caller.
+
 ## Message format
 
 Every control message starts with `[C2C]` and key-value headers, then sections.
@@ -77,6 +113,14 @@ Plans must be finite, concrete, executable. Not 40-step epics.
 
 ### EXECUTED (Codex → ChatGPT)
 
+Before sending EXECUTED, Codex records the iteration while holding the
+workspace lease:
+
+`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests ... --exit-status ok --lock-token <token>`
+
+ChatGPT can then read the record through the `execution_summary` /
+`test_status` tools.
+
 ```
 [C2C]
 STATE: EXECUTED
@@ -94,10 +138,6 @@ TESTS:
 
 Please independently inspect the workspace and current git diff through MCP.
 ```
-
-Before sending EXECUTED, Codex records the iteration:
-`c2c record --task c2c_f81a --iteration 1 --changed-files ... --tests ... --exit-status ok`
-so ChatGPT can read it via the `execution_summary` / `test_status` tools.
 
 ### DONE / BLOCKED (ChatGPT → Codex)
 
@@ -127,10 +167,21 @@ NEEDS:
 ### HANDOFF (Codex → new ChatGPT conversation)
 
 One workspace keeps one long-lived C2C conversation (`c2c session get/set`).
+
+For the OMP integration, the canonical workspace is `/Users/arica/Data/OMP`.
+The harness passes that root with `-w` even when the current directory is a
+child project. A child directory is selected only for explicit project-level
+isolation.
 Codex switches to a new chat only when the user asks for it or the old chat has
 grown long enough to lag. Right after the boot prompt, Codex sends a HANDOFF so
 the new chat can continue seamlessly — a brief, never a data dump (the new chat
 re-reads code via MCP):
+
+Connector replacement is different from an ordinary HANDOFF. Deleting and
+recreating a connector creates a new ChatGPT app identity, so the old
+conversation must not be reused. Add the current connector to a fresh
+conversation, send the Boot Prompt, verify `workspace_info`, and save the new
+URL before sending the next C2C control message.
 
 ```
 [C2C]
@@ -171,7 +222,9 @@ Codex owns execution.
 You own high-level reasoning, planning and review.
 
 You have access to the current local workspace through the
-"Codex with ChatGPT" MCP connector.
+"Codex with ChatGPT" MCP connector. For OMP sessions, this means the canonical
+root `/Users/arica/Data/OMP`, not the child project directory from which the
+harness was launched.
 
 Rules:
 

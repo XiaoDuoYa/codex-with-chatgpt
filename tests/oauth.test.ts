@@ -1,30 +1,44 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import path from "node:path";
+import fs from "node:fs";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
+import { AuthStore, registrationFingerprint } from "../src/auth/store.js";
 import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
 
 let root: string;
 let bridge: Bridge;
 let base: string;
+let stateDir: string;
+let authDir: string;
+let previousStateDir: string | undefined;
 
 const REDIRECT_URI = "http://127.0.0.1:19999/callback";
 
 beforeAll(async () => {
-  isolateStateDir();
+  previousStateDir = process.env.C2C_STATE_DIR;
+  stateDir = isolateStateDir();
   root = makeTmpDir("oauth-ws");
   write(root, "hello.txt", "hello oauth\n");
+  authDir = makeTmpDir("auth");
   bridge = await startBridge({
     workspaceRoot: root,
     port: 0,
     persistRuntime: false,
-    authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
+    authStoreFile: path.join(authDir, "store.json"),
   });
   base = bridge.localBaseUrl();
 });
 
 afterAll(async () => {
-  await bridge.close();
-  cleanup(root);
+  try {
+    await bridge.close();
+  } finally {
+    cleanup(root);
+    cleanup(authDir);
+    cleanup(stateDir);
+    if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
+    else process.env.C2C_STATE_DIR = previousStateDir;
+  }
 });
 
 async function registerClient(): Promise<string> {
@@ -141,7 +155,6 @@ describe("authorization + token flow", () => {
     });
     expect(mcpResponse.status).toBe(200);
   });
-
   it("rejects a wrong pairing code", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
@@ -154,15 +167,17 @@ describe("authorization + token flow", () => {
 
   it("escapes the workspace name in the pairing page", async () => {
     const xssWorkspaceRoot = makeTmpDir("oauth-html");
+    const xssAuthDir = makeTmpDir("auth-html");
     write(xssWorkspaceRoot, ".c2c.json", JSON.stringify({ name: "<script>alert('xss')</script>" }));
-    const xssBridge = await startBridge({
-      workspaceRoot: xssWorkspaceRoot,
-      port: 0,
-      persistRuntime: false,
-      authStoreFile: path.join(makeTmpDir("auth-html"), "store.json"),
-    });
+    let xssBridge: Bridge | undefined;
 
     try {
+      xssBridge = await startBridge({
+        workspaceRoot: xssWorkspaceRoot,
+        port: 0,
+        persistRuntime: false,
+        authStoreFile: path.join(xssAuthDir, "store.json"),
+      });
       const xssBase = xssBridge.localBaseUrl();
       const registration = await fetch(`${xssBase}/oauth/register`, {
         method: "POST",
@@ -187,10 +202,12 @@ describe("authorization + token flow", () => {
       expect(html).not.toContain("<script>alert('xss')</script>");
       expect(html).toContain("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;");
     } finally {
-      await xssBridge.close();
+      if (xssBridge) await xssBridge.close();
       cleanup(xssWorkspaceRoot);
+      cleanup(xssAuthDir);
     }
   });
+
 
   it("sets browser security headers on the pairing page", async () => {
     const clientId = await registerClient();
@@ -205,7 +222,7 @@ describe("authorization + token flow", () => {
     const response = await fetch(authorizeUrl, { redirect: "manual" });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-security-policy")).toBe(
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' http://127.0.0.1:19999; base-uri 'none'; frame-ancestors 'none'"
     );
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     expect(response.headers.get("x-frame-options")).toBe("DENY");
@@ -252,6 +269,98 @@ describe("authorization + token flow", () => {
       body: JSON.stringify({ redirect_uris: ["http://evil.example.com/cb"] }),
     });
     expect(response.status).toBe(400);
+  });
+});
+
+describe("DCR identity and persistence", () => {
+  it("returns the same client for the same registration fingerprint", () => {
+    const dir = makeTmpDir("auth-dcr");
+    const file = path.join(dir, "store.json");
+    try {
+      const store = new AuthStore("workspace-dcr", { file });
+      const first = store.registerClient({ clientName: "same", redirectUris: [REDIRECT_URI] });
+      const second = store.registerClient({ clientName: "same", redirectUris: [REDIRECT_URI] });
+      expect(second.clientId).toBe(first.clientId);
+      expect(store.listClientSummaries()).toHaveLength(1);
+      expect(second.registrationFingerprint).toBeTruthy();
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it("merges registrations written by separate AuthStore instances", () => {
+    const dir = makeTmpDir("auth-merge");
+    const file = path.join(dir, "store.json");
+    try {
+      const first = new AuthStore("workspace-merge", { file });
+      const second = new AuthStore("workspace-merge", { file });
+      first.registerClient({ clientName: "one", redirectUris: ["http://127.0.0.1:20001/cb"] });
+      second.registerClient({ clientName: "two", redirectUris: ["http://127.0.0.1:20002/cb"] });
+      const merged = new AuthStore("workspace-merge", { file });
+      expect(merged.listClientSummaries().map((client) => client.clientName).sort()).toEqual(["one", "two"]);
+    } finally {
+      cleanup(dir);
+    }
+  });
+  it("converges legacy duplicate clients and retires duplicate tokens", () => {
+    const dir = makeTmpDir("auth-dedup");
+    const file = path.join(dir, "store.json");
+    const redirectUris = ["http://127.0.0.1:21001/cb"];
+    const fingerprint = registrationFingerprint({ clientName: "duplicate", redirectUris });
+    const expiresAt = Date.now() + 60_000;
+    const token = (hash: string, clientId: string) => ({
+      hash,
+      kind: "access" as const,
+      clientId,
+      workspaceId: "workspace-dedup",
+      scopes: ["workspace.read"],
+      issuedAt: Date.now(),
+      expiresAt,
+      revoked: false,
+    });
+    try {
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          clients: [
+            {
+              clientId: "canonical-client",
+              clientName: "duplicate",
+              redirectUris,
+              createdAt: "2026-01-01T00:00:00.000Z",
+              registrationFingerprint: fingerprint,
+            },
+            {
+              clientId: "duplicate-client",
+              clientName: "duplicate",
+              redirectUris,
+              createdAt: "2026-02-01T00:00:00.000Z",
+              registrationFingerprint: fingerprint,
+            },
+          ],
+          tokens: [
+            token("canonical-token-1", "canonical-client"),
+            token("canonical-token-2", "canonical-client"),
+            token("duplicate-token", "duplicate-client"),
+          ],
+        })
+      );
+      const store = new AuthStore("workspace-dedup", { file });
+      expect(store.listClientSummaries().map((client) => client.clientId)).toEqual(["canonical-client"]);
+      expect(store.tokenCount("canonical-client")).toBe(2);
+      expect(store.tokenCount("duplicate-client")).toBe(0);
+
+      // A subsequent mutation persists the in-memory migration.
+      store.registerClient({ clientName: "different", redirectUris: ["http://127.0.0.1:21002/cb"] });
+      const persisted = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        clients: Array<{ clientId: string }>;
+        tokens: Array<{ clientId: string }>;
+      };
+      expect(persisted.clients.map((client) => client.clientId)).toEqual(["canonical-client", expect.any(String)]);
+      expect(persisted.tokens.map((entry) => entry.clientId)).toEqual(["canonical-client", "canonical-client"]);
+    } finally {
+      cleanup(dir);
+    }
   });
 });
 

@@ -9,10 +9,11 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-export function setAuthSecurityHeaders(res: Response): void {
+export function setAuthSecurityHeaders(res: Response, redirectUri?: string): void {
+  const formAction = redirectUri ? ` ${new URL(redirectUri).origin}` : "";
   res.setHeader(
     "Content-Security-Policy",
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formAction}; base-uri 'none'; frame-ancestors 'none'`
   );
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");

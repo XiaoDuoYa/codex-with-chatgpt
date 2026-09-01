@@ -126,7 +126,7 @@ describe("gitDiff pagination", () => {
       { path: "credentials.json", content: '{"client_secret": "leaked-creds"}\n', sentinel: "leaked-creds" },
       { path: "service-account-prod.json", content: '{"private_key": "leaked-sa"}\n', sentinel: "leaked-sa" },
       { path: "secrets.json", content: '{"db_pass": "leaked-secrets"}\n', sentinel: "leaked-secrets" },
-      { path: "id_ed25519", content: "-----BEGIN OPENSSH PRIVATE KEY-----\nleaked-key\n", sentinel: "leaked-key" },
+      { path: "id_ed25519", content: "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nleaked-key\n", sentinel: "leaked-key" },
     ];
 
     // Also include a safe file to confirm normal diffs are returned alongside excluded secrets
