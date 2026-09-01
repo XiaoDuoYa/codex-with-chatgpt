@@ -137,7 +137,7 @@ If you have a Cloudflare account and a domain already on Cloudflare, first-time
 setup (and the next coding session, once) will ask whether you want a stable
 hostname such as `c2c-<project>.your-domain.com`. That path opens a browser so
 you can authorize Cloudflare. After that, the ChatGPT connector keeps working
-across restarts. If you skip it, or login fails, Codex stays on the temporary
+across restarts. If you skip it, or the login fails, Codex stays on the temporary
 address — same features, just a slower repair.
 
 Credentials stay in the OS app state directory, not in the project.
