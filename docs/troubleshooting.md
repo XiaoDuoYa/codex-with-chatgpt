@@ -19,7 +19,7 @@ If doctor says the bridge state is **uncertain** (无法确认), do not start a
 second bridge and do not Delete the ChatGPT connector. Wait and run doctor
 again. The local process may still be running.
 
-### Everything was quit and ChatGPT can no longer connect
+### Everything was closed and ChatGPT can no longer connect
 Quitting Codex / the terminal stops the public address. The next `c2c doctor`
 starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
 user that the old address expired, then **Delete** THIS workspace's
