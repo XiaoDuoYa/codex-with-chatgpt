@@ -74,6 +74,17 @@ describe("MCP tools over Streamable HTTP", () => {
     for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
     }
+
+    const executionOutput = tools.find((tool) => tool.name === "execution_output");
+    expect(executionOutput?.outputSchema).toMatchObject({
+      type: "object",
+      properties: {
+        action: { type: "string" },
+        items: { type: "array" },
+        text: { type: "string" },
+      },
+      required: ["action"],
+    });
   });
 
   it("workspace_info returns identity and project detection", async () => {
@@ -188,16 +199,27 @@ describe("MCP tools over Streamable HTTP", () => {
       raw: "-----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----",
       exitCode: 0,
     });
-    const list = jsonOf<{ items: { id: number; status: string; command: string; text?: string }[] }>(
-      await client.callTool({ name: "execution_output", arguments: { action: "list" } })
-    );
+    const listResult = await client.callTool({
+      name: "execution_output",
+      arguments: { action: "list" },
+    });
+    const list = jsonOf<{
+      action: "list";
+      items: { id: number; status: string; command: string; text?: string }[];
+    }>(listResult);
+    expect(listResult.structuredContent).toEqual(list);
+    expect(list.action).toBe("list");
     expect(list.items.some((item) => item.id === readable.id && item.status === "readable")).toBe(true);
     expect(list.items.some((item) => item.id === hidden.id && item.status === "restricted")).toBe(true);
     expect(list.items.every((item) => item.text === undefined)).toBe(true);
 
-    const body = jsonOf<{ text: string }>(
-      await client.callTool({ name: "execution_output", arguments: { action: "read", id: readable.id } })
-    );
+    const readResult = await client.callTool({
+      name: "execution_output",
+      arguments: { action: "read", id: readable.id },
+    });
+    const body = jsonOf<{ action: "read"; text: string }>(readResult);
+    expect(readResult.structuredContent).toEqual(body);
+    expect(body.action).toBe("read");
     expect(body.text).toContain("AssertionError");
 
     const denied = await client.callTool({
