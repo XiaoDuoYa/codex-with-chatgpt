@@ -15,11 +15,16 @@ const UNTRUSTED_NOTE =
 
 type ToolResult = {
   content: { type: "text"; text: string }[];
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 };
 
 function ok(data: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+
+function okStructured<T extends Record<string, unknown>>(data: T): ToolResult {
+  return { ...ok(data), structuredContent: data };
 }
 
 function fail(code: string, message: string): ToolResult {
@@ -285,6 +290,32 @@ export function createMcpServer(ctx: McpContext): McpServer {
         id: z.number().int().positive().optional(),
         limit: z.number().int().min(1).max(50).default(20),
       },
+      outputSchema: {
+        action: z.enum(["list", "read"]).describe("The operation represented by this result"),
+        items: z
+          .array(
+            z.object({
+              id: z.number().int().positive(),
+              command: z.string(),
+              exitCode: z.number().int().nullable(),
+              timestamp: z.string(),
+              taskId: z.string().nullable(),
+              iteration: z.number().int().nullable(),
+              readable: z.boolean(),
+              status: z.enum(["readable", "restricted"]),
+              truncated: z.boolean(),
+              sizeBytes: z.number().int().nonnegative(),
+            })
+          )
+          .optional()
+          .describe("Recorded output metadata returned by the list operation"),
+        id: z.number().int().positive().optional(),
+        command: z.string().optional(),
+        exitCode: z.number().int().nullable().optional(),
+        timestamp: z.string().optional(),
+        truncated: z.boolean().optional(),
+        text: z.string().optional().describe("Sanitized command output returned by the read operation"),
+      },
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
@@ -304,7 +335,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
           truncated: item.truncated,
           sizeBytes: item.sizeBytes,
         }));
-        return ok({ items });
+        return okStructured({ action: "list", items });
       }
       if (args.id === undefined) return fail("INVALID_ARGUMENTS", "read requires id");
       const result = readExecutionOutput(workspace.id, args.id);
@@ -314,7 +345,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
         }
         return fail("NOT_FOUND", `No execution output with id ${args.id}.`);
       }
-      return ok({
+      return okStructured({
+        action: "read",
         id: result.meta.id,
         command: result.meta.command,
         exitCode: result.meta.exitCode,
