@@ -23,8 +23,8 @@ function ok(data: unknown): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
 }
 
-function okStructured<T extends Record<string, unknown>>(data: T): ToolResult {
-  return { ...ok(data), structuredContent: data };
+function okStructured<T extends object>(data: T): ToolResult {
+  return { ...ok(data), structuredContent: data as Record<string, unknown> };
 }
 
 function fail(code: string, message: string): ToolResult {
@@ -48,6 +48,145 @@ function requireScope(authInfo: AuthInfo | undefined, scope: string): ToolResult
   return null;
 }
 
+const gitIdentityOutputSchema = z.object({
+  isRepo: z.boolean(),
+  branch: z.string().nullable(),
+  commit: z.string().nullable(),
+  dirty: z.boolean(),
+});
+
+const workspaceInfoOutputSchema = {
+  workspaceId: z.string(),
+  workspaceName: z.string(),
+  rootAlias: z.string(),
+  projectType: z.string(),
+  languages: z.array(z.string()),
+  frameworks: z.array(z.string()),
+  packageManager: z.string().nullable(),
+  scripts: z.record(z.string()),
+  git: gitIdentityOutputSchema,
+};
+
+const directoryEntryOutputSchema = z.object({
+  path: z.string(),
+  type: z.enum(["file", "dir"]),
+  sizeBytes: z.number().int().nonnegative().optional(),
+});
+
+const listDirectoryOutputSchema = {
+  path: z.string(),
+  entries: z.array(directoryEntryOutputSchema),
+  total: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
+  hasMore: z.boolean(),
+};
+
+const readFileOutputSchema = {
+  path: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  totalLines: z.number().int().nonnegative(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  remainingLines: z.number().int().nonnegative(),
+  nextStartLine: z.number().int().positive().nullable(),
+  content: z.string(),
+};
+
+const searchMatchOutputSchema = z.object({
+  path: z.string(),
+  line: z.number().int().nonnegative(),
+  text: z.string(),
+});
+
+const searchWorkspaceOutputSchema = {
+  matches: z.array(searchMatchOutputSchema),
+  matchCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  engine: z.enum(["ripgrep", "node"]),
+};
+
+const gitChangeOutputSchema = z.object({
+  path: z.string(),
+  change: z.string(),
+});
+
+const gitStatusOutputSchema = {
+  isRepo: z.boolean(),
+  branch: z.string().nullable(),
+  upstream: z.string().nullable(),
+  ahead: z.number().int().nonnegative(),
+  behind: z.number().int().nonnegative(),
+  staged: z.array(gitChangeOutputSchema),
+  unstaged: z.array(gitChangeOutputSchema),
+  untracked: z.array(z.string()),
+  conflicted: z.array(z.string()),
+};
+
+const gitDiffOutputSchema = {
+  isRepo: z.boolean(),
+  mode: z.enum(["unstaged", "staged", "head"]),
+  totalBytes: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  returnedBytes: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextOffset: z.number().int().nonnegative().nullable(),
+  diff: z.string(),
+};
+
+const testStatusOutputSchema = {
+  available: z.boolean(),
+  message: z.string().optional(),
+  taskId: z.string().optional(),
+  iteration: z.number().int().optional(),
+  tests: z.string().nullable().optional(),
+  exitStatus: z.string().optional(),
+  timestamp: z.string().optional(),
+  outputAvailable: z.boolean().optional(),
+  outputId: z.number().int().positive().nullable().optional(),
+};
+
+const executionRecordOutputSchema = z.object({
+  taskId: z.string(),
+  iteration: z.number().int(),
+  changedFiles: z.union([z.array(z.string()), z.number().int().nonnegative()]),
+  tests: z.string().nullable(),
+  exitStatus: z.string(),
+  timestamp: z.string(),
+  notes: z.string().optional(),
+  outputId: z.number().int().positive().optional(),
+  outputAvailable: z.boolean().optional(),
+});
+
+const executionSummaryOutputSchema = {
+  records: z.array(executionRecordOutputSchema),
+};
+
+const executionOutputItemOutputSchema = z.object({
+  id: z.number().int().positive(),
+  command: z.string(),
+  exitCode: z.number().int().nullable(),
+  timestamp: z.string(),
+  taskId: z.string().nullable(),
+  iteration: z.number().int().nullable(),
+  readable: z.boolean(),
+  status: z.enum(["readable", "restricted"]),
+  truncated: z.boolean(),
+  sizeBytes: z.number().int().nonnegative(),
+});
+
+const executionOutputOutputSchema = {
+  action: z.enum(["list", "read"]).describe("The operation represented by this result"),
+  items: z.array(executionOutputItemOutputSchema).optional().describe("Recorded output metadata returned by the list operation"),
+  id: z.number().int().positive().optional(),
+  command: z.string().optional(),
+  exitCode: z.number().int().nullable().optional(),
+  timestamp: z.string().optional(),
+  truncated: z.boolean().optional(),
+  text: z.string().optional().describe("Sanitized command output returned by the read operation"),
+};
+
 export interface McpContext {
   workspace: Workspace;
   logger: Logger;
@@ -68,6 +207,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `Get an overview of the connected workspace: identity, project type, languages, ` +
         `frameworks, git state and available scripts. Call this first. ${UNTRUSTED_NOTE}`,
       inputSchema: {},
+      outputSchema: workspaceInfoOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (_args, extra) => {
@@ -76,7 +216,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       try {
         const project = workspace.detectProject();
         const git = gitInfo(workspace.root);
-        return ok({
+        return okStructured({
           workspaceId: workspace.id,
           workspaceName: workspace.name,
           rootAlias: "workspace:/",
@@ -107,13 +247,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
         limit: z.number().int().min(1).max(1000).default(200),
         offset: z.number().int().min(0).default(0),
       },
+      outputSchema: listDirectoryOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
-        return ok(await workspace.listDirectory(args.path, args));
+        return okStructured(await workspace.listDirectory(args.path, args));
       } catch (error) {
         return mapError(error);
       }
@@ -133,13 +274,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
         start_line: z.number().int().min(1).optional().describe("1-based first line to return"),
         end_line: z.number().int().min(1).optional().describe("1-based last line to return"),
       },
+      outputSchema: readFileOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
-        return ok(await workspace.readFile(args.path, { startLine: args.start_line, endLine: args.end_line }));
+        return okStructured(await workspace.readFile(args.path, { startLine: args.start_line, endLine: args.end_line }));
       } catch (error) {
         return mapError(error);
       }
@@ -160,13 +302,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
         limit: z.number().int().min(1).max(200).default(50),
         regex: z.boolean().default(false).describe("Treat query as a regular expression"),
       },
+      outputSchema: searchWorkspaceOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "workspace.search");
       if (denied) return denied;
       try {
-        return ok(await searchWorkspace(workspace, args));
+        return okStructured(await searchWorkspace(workspace, args));
       } catch (error) {
         return mapError(error);
       }
@@ -179,13 +322,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
       title: "Git status",
       description: `Structured git status of the workspace: branch, staged/unstaged/untracked files. ${UNTRUSTED_NOTE}`,
       inputSchema: {},
+      outputSchema: gitStatusOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (_args, extra) => {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
-        return ok(gitStatus(workspace.root));
+        return okStructured(gitStatus(workspace.root));
       } catch (error) {
         return mapError(error);
       }
@@ -205,6 +349,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         offset: z.number().int().min(0).default(0).describe("Byte offset for pagination"),
         max_bytes: z.number().int().min(1024).max(262144).default(65536),
       },
+      outputSchema: gitDiffOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
@@ -215,7 +360,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         if (args.path) {
           relPath = workspace.resolve(args.path).rel;
         }
-        return ok(
+        return okStructured(
           gitDiff(
             workspace,
             { mode: args.mode as DiffMode, offset: args.offset, maxBytes: args.max_bytes },
@@ -236,6 +381,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `Summary of the most recent test run reported by the Codex harness. This does NOT run ` +
         `tests; it reads the latest execution record. ${UNTRUSTED_NOTE}`,
       inputSchema: {},
+      outputSchema: testStatusOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (_args, extra) => {
@@ -243,9 +389,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
       if (denied) return denied;
       const latest = latestExecutionRecord(workspace.id);
       if (!latest) {
-        return ok({ available: false, message: "No execution records yet for this workspace." });
+        return okStructured({ available: false, message: "No execution records yet for this workspace." });
       }
-      return ok({
+      return okStructured({
         available: true,
         taskId: latest.taskId,
         iteration: latest.iteration,
@@ -268,12 +414,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
       inputSchema: {
         limit: z.number().int().min(1).max(50).default(5),
       },
+      outputSchema: executionSummaryOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      return ok({ records: readExecutionRecords(workspace.id, args.limit) });
+      return okStructured({ records: readExecutionRecords(workspace.id, args.limit) });
     }
   );
 
@@ -290,32 +437,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         id: z.number().int().positive().optional(),
         limit: z.number().int().min(1).max(50).default(20),
       },
-      outputSchema: {
-        action: z.enum(["list", "read"]).describe("The operation represented by this result"),
-        items: z
-          .array(
-            z.object({
-              id: z.number().int().positive(),
-              command: z.string(),
-              exitCode: z.number().int().nullable(),
-              timestamp: z.string(),
-              taskId: z.string().nullable(),
-              iteration: z.number().int().nullable(),
-              readable: z.boolean(),
-              status: z.enum(["readable", "restricted"]),
-              truncated: z.boolean(),
-              sizeBytes: z.number().int().nonnegative(),
-            })
-          )
-          .optional()
-          .describe("Recorded output metadata returned by the list operation"),
-        id: z.number().int().positive().optional(),
-        command: z.string().optional(),
-        exitCode: z.number().int().nullable().optional(),
-        timestamp: z.string().optional(),
-        truncated: z.boolean().optional(),
-        text: z.string().optional().describe("Sanitized command output returned by the read operation"),
-      },
+      outputSchema: executionOutputOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
