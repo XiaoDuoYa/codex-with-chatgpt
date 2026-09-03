@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import fs from "node:fs";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -11,6 +12,7 @@ let root: string;
 let bridge: Bridge;
 let client: Client;
 let accessToken: string;
+let stateDir: string;
 
 function textOf(result: { content?: unknown }): string {
   const content = result.content as { type: string; text: string }[];
@@ -40,7 +42,7 @@ function expectToolOutputSchema(
 }
 
 beforeAll(async () => {
-  isolateStateDir();
+  stateDir = isolateStateDir();
   root = makeTmpDir("mcp-ws");
   makeGitRepo(root);
   write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, dependencies: { react: "^19.0.0" } }));
@@ -102,6 +104,15 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+  });
+
+  it("documents git_diff pagination with its output field names", async () => {
+    const { tools } = await client.listTools();
+    const description = tools.find((tool) => tool.name === "git_diff")?.description;
+    expect(description).toContain("hasMore");
+    expect(description).toContain("nextOffset");
+    expect(description).not.toContain("has_more");
+    expect(description).not.toContain("next_offset");
   });
 
   it("workspace_info returns identity and project detection", async () => {
@@ -203,6 +214,39 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(status.tests).toBe("27 passed");
     expect(status.outputAvailable).toBe(false);
     expect(status.outputId).toBeNull();
+  });
+
+  it("skips invalid persisted records when reporting execution status", async () => {
+    appendExecutionRecord(bridge.workspace.id, {
+      taskId: "c2c_valid_before_invalid",
+      iteration: 2,
+      changedFiles: 0,
+      tests: "31 passed",
+      exitStatus: "ok",
+      timestamp: new Date().toISOString(),
+    });
+    fs.appendFileSync(
+      path.join(stateDir, "executions", `${bridge.workspace.id}.jsonl`),
+      JSON.stringify({
+        taskId: "c2c_invalid",
+        iteration: null,
+        changedFiles: 0,
+        tests: null,
+        exitStatus: "ok",
+        timestamp: new Date().toISOString(),
+      }) + "\n"
+    );
+
+    const statusResult = await client.callTool({ name: "test_status", arguments: {} });
+    expect(statusResult.isError ?? false).toBe(false);
+    const status = structuredJsonOf<{ taskId: string; iteration: number }>(statusResult);
+    expect(status.taskId).toBe("c2c_valid_before_invalid");
+    expect(status.iteration).toBe(2);
+
+    const summaryResult = await client.callTool({ name: "execution_summary", arguments: { limit: 1 } });
+    expect(summaryResult.isError ?? false).toBe(false);
+    const summary = structuredJsonOf<{ records: { taskId: string }[] }>(summaryResult);
+    expect(summary.records.map((record) => record.taskId)).toEqual(["c2c_valid_before_invalid"]);
   });
 
   it("execution_output lists readable items and refuses restricted bodies", async () => {

@@ -60,6 +60,23 @@ export interface ProjectConfig {
   maxIterations?: number;
 }
 
+function parseProjectConfig(value: unknown): ProjectConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const config: ProjectConfig = {};
+  if (typeof raw.name === "string") config.name = raw.name;
+  if (typeof raw.maxIterations === "number") config.maxIterations = raw.maxIterations;
+  return config;
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value as Record<string, unknown>).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string"
+  );
+  return Object.fromEntries(entries);
+}
+
 const DEFAULT_MAX_LINES = 400;
 const HARD_MAX_LINES = 2000;
 const DEFAULT_MAX_BYTES = 256 * 1024;
@@ -85,7 +102,7 @@ export class Workspace {
     this.root = real;
     this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
     this.ignoreRules = new IgnoreRules(real);
-    this.projectConfig = readJsonIfExists<ProjectConfig>(path.join(real, ".c2c.json")) ?? {};
+    this.projectConfig = parseProjectConfig(readJsonIfExists<unknown>(path.join(real, ".c2c.json")));
     this.name = this.projectConfig.name ?? path.basename(real);
   }
 
@@ -308,13 +325,12 @@ export class Workspace {
     if (has("package.json")) {
       projectType = "node";
       languages.add("JavaScript");
-      const pkg = readJsonIfExists<{
-        scripts?: Record<string, string>;
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-      }>(path.join(this.root, "package.json"));
-      scripts = pkg?.scripts ?? {};
-      const deps = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
+      const rawPackage = readJsonIfExists<unknown>(path.join(this.root, "package.json"));
+      const pkg = rawPackage && typeof rawPackage === "object" && !Array.isArray(rawPackage)
+        ? rawPackage as Record<string, unknown>
+        : {};
+      scripts = stringRecord(pkg.scripts);
+      const deps = { ...stringRecord(pkg.dependencies), ...stringRecord(pkg.devDependencies) };
       const known: Record<string, string> = {
         next: "Next.js",
         react: "React",

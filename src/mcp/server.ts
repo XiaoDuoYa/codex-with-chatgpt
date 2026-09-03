@@ -4,7 +4,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
-import { latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
+import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
@@ -139,7 +139,7 @@ const testStatusOutputSchema = {
   available: z.boolean(),
   message: z.string().optional(),
   taskId: z.string().optional(),
-  iteration: z.number().int().optional(),
+  iteration: z.number().int().nonnegative().optional(),
   tests: z.string().nullable().optional(),
   exitStatus: z.string().optional(),
   timestamp: z.string().optional(),
@@ -147,20 +147,8 @@ const testStatusOutputSchema = {
   outputId: z.number().int().positive().nullable().optional(),
 };
 
-const executionRecordOutputSchema = z.object({
-  taskId: z.string(),
-  iteration: z.number().int(),
-  changedFiles: z.union([z.array(z.string()), z.number().int().nonnegative()]),
-  tests: z.string().nullable(),
-  exitStatus: z.string(),
-  timestamp: z.string(),
-  notes: z.string().optional(),
-  outputId: z.number().int().positive().optional(),
-  outputAvailable: z.boolean().optional(),
-});
-
 const executionSummaryOutputSchema = {
-  records: z.array(executionRecordOutputSchema),
+  records: z.array(executionRecordSchema),
 };
 
 const executionOutputItemOutputSchema = z.object({
@@ -342,7 +330,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       title: "Git diff",
       description:
         `Git diff with byte-offset pagination. mode: 'unstaged' (default), 'staged', or 'head' ` +
-        `(working tree vs HEAD). When has_more is true, call again with offset=next_offset. ${UNTRUSTED_NOTE}`,
+        `(working tree vs HEAD). When hasMore is true, call again with offset=nextOffset. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         mode: z.enum(["unstaged", "staged", "head"]).default("unstaged"),
         path: z.string().optional().describe("Limit the diff to one workspace-relative path"),
