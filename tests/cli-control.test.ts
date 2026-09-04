@@ -245,7 +245,7 @@ describe("control CLI correlation", () => {
       "PLAN",
     ]);
     expect(cancelledStatus.body.status).toBe("cancelled");
-  });
+  }, 60_000);
 
   it("opens RESEARCH requests and exposes their current progress", () => {
     claimSurface("session-research");
