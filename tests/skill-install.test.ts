@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   installGlobalSkill,
@@ -97,13 +98,25 @@ describe("global Skill installation", () => {
   it("installs through the CLI under an isolated CODEX_HOME", () => {
     const codexHome = tempDir("skill-cli-home");
     const stateDir = tempDir("skill-cli-state");
+    const runtimeRoot = tempDir("skill-cli-runtime");
+    fs.mkdirSync(path.join(runtimeRoot, "skill"), { recursive: true });
+    fs.copyFileSync(path.join(projectRoot, "skill", "SKILL.md"), path.join(runtimeRoot, "skill", "SKILL.md"));
+    const loader = pathToFileURL(path.join(projectRoot, "tests", "fixtures", "runtime-install-loader.mjs")).href;
     const result = spawnSync(process.execPath, ["--import", "tsx/esm", cliEntry, "skill", "install", "--json"], {
       cwd: projectRoot,
       encoding: "utf8",
-      env: { ...process.env, HOME: codexHome, CODEX_HOME: codexHome, C2C_STATE_DIR: stateDir },
+      env: {
+        ...process.env,
+        HOME: codexHome,
+        CODEX_HOME: codexHome,
+        C2C_STATE_DIR: stateDir,
+        C2C_TEST_RUNTIME_PATH: runtimeRoot,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--experimental-loader=${loader}`].filter(Boolean).join(" "),
+        NODE_NO_WARNINGS: "1",
+      },
       timeout: 20_000,
     });
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.error?.message ?? result.stderr).toBe(0);
     const payload = JSON.parse(result.stdout.trim()) as Record<string, unknown>;
     expect(payload).toMatchObject({ ok: true, installed: true, changed: true });
     expect(String(payload.path)).toContain(path.join(codexHome, "skills", "codex-with-chatgpt"));
@@ -115,5 +128,6 @@ describe("global Skill installation", () => {
     expect(installedSkill).toContain("<git-common-dir>/codex-with-chatgpt");
     expect(installedSkill).toContain("<workspace-root>/.codex-with-chatgpt");
     expect(installedSkill).not.toContain("c2c sandbox-allow");
+    expect(installedSkill).toContain(runtimeRoot);
   });
 });
