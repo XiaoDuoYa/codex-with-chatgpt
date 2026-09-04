@@ -9,6 +9,12 @@ c2c doctor
 It checks Node, workspace, bridge, MCP, OAuth and tunnel — and repairs what it
 can (restarts the bridge, restarts the tunnel) without asking.
 
+After upgrading from a version without mailbox result submission, doctor may
+report that the existing ChatGPT authorization lacks result-write access. This
+permission cannot be added to an issued token. Delete and recreate only this
+workspace's connector using the returned `chatgptRepair` details, then run
+doctor again.
+
 ## Common situations
 
 ### "Bridge 未运行"

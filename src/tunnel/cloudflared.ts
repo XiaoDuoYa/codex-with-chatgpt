@@ -9,21 +9,54 @@ import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provide
 const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
 const HEALTH_CHECK_INTERVAL_MS = 250;
-const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const DEFAULT_START_TIMEOUT_MS = 45_000;
+const MAX_START_TIMEOUT_MS = 90_000;
 
-function isBridgeHealth(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object") return false;
-  const health = payload as Record<string, unknown>;
-  return health.service === SERVICE_NAME && health.status === "ok";
+export type TunnelFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
+
+function boundedTimeoutMs(
+  configured: string | undefined,
+  fallback: number,
+  min: number,
+  max: number
+): number {
+  if (!configured?.trim()) return fallback;
+  const timeout = Number(configured);
+  if (!Number.isFinite(timeout) || timeout < min || timeout > max) return fallback;
+  return Math.trunc(timeout);
 }
 
-async function bridgeHealth(
-  fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>,
-  publicUrl: string
+export function quickTunnelStartTimeoutMs(
+  configured = process.env.C2C_QUICK_TUNNEL_START_TIMEOUT_MS
+): number {
+  return boundedTimeoutMs(configured, DEFAULT_START_TIMEOUT_MS, 5_000, MAX_START_TIMEOUT_MS);
+}
+
+export function quickTunnelHealthCheckTimeoutMs(
+  configured = process.env.C2C_TUNNEL_HEALTH_CHECK_TIMEOUT_MS
+): number {
+  return boundedTimeoutMs(configured, DEFAULT_HEALTH_CHECK_TIMEOUT_MS, 1_000, 30_000);
+}
+
+function isBridgeHealth(payload: unknown, expectedWorkspaceId?: string): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const health = payload as Record<string, unknown>;
+  return (
+    health.service === SERVICE_NAME &&
+    health.status === "ok" &&
+    (expectedWorkspaceId === undefined || health.workspaceId === expectedWorkspaceId)
+  );
+}
+
+export async function bridgeHealth(
+  fetchImpl: TunnelFetch,
+  publicUrl: string,
+  expectedWorkspaceId?: string
 ): Promise<{ ready: boolean; detail: string }> {
   const response = await fetchImpl(new URL("/health", publicUrl).toString(), {
     redirect: "error",
-    signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT_MS),
+    signal: AbortSignal.timeout(quickTunnelHealthCheckTimeoutMs()),
   });
   if (!response) return { ready: false, detail: "Health check did not run" };
   if (!response.ok) {
@@ -31,7 +64,7 @@ async function bridgeHealth(
     return { ready: false, detail: `Health check returned HTTP ${response.status}` };
   }
   return {
-    ready: isBridgeHealth(await response.json().catch(() => null)),
+    ready: isBridgeHealth(await response.json().catch(() => null), expectedWorkspaceId),
     detail: `Health check did not identify ${SERVICE_NAME}`,
   };
 }
@@ -53,12 +86,13 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  expectedWorkspaceId?: string;
   spawnImpl?: (
     command: string,
     args: string[],
     options: { stdio: ["ignore", "pipe", "pipe"]; windowsHide: true }
   ) => ChildProcess;
-  fetchImpl?: (input: string | URL, init?: RequestInit) => Promise<Response>;
+  fetchImpl?: TunnelFetch;
 }
 
 /**
@@ -74,6 +108,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private readonly startTimeoutMs: number;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
+  private readonly expectedWorkspaceId?: string;
   private starting: Promise<string> | null = null;
   private cancelStart: (() => void) | null = null;
 
@@ -82,9 +117,10 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     private readonly binaryOverride?: string,
     options: CloudflaredQuickTunnelOptions = {}
   ) {
-    this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.startTimeoutMs = options.startTimeoutMs ?? quickTunnelStartTimeoutMs();
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
+    this.expectedWorkspaceId = options.expectedWorkspaceId;
   }
 
   private binary(): string | null {
@@ -197,7 +233,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
           }
 
           try {
-            const result = await bridgeHealth(this.fetchImpl, publicUrl);
+            const result = await bridgeHealth(this.fetchImpl, publicUrl, this.expectedWorkspaceId);
             if (settled) return;
             if (result.ready) {
               ready(publicUrl);
@@ -267,7 +303,10 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   }
 
   async stop(): Promise<void> {
+    const pending = this.starting;
+    this.starting = null;
     this.cancelStart?.();
+    this.cancelStart = null;
     if (this.child) {
       try {
         this.child.kill("SIGTERM");
@@ -278,6 +317,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     }
     this.url = null;
     this.lastError = null;
+    await pending?.catch(() => undefined);
   }
 
   async restart(localPort: number): Promise<string> {

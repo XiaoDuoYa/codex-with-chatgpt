@@ -1,6 +1,12 @@
 import { Router, type Request, type Response, urlencoded, json } from "express";
 import { randomBytes } from "node:crypto";
-import { AuthStore, SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual } from "./store.js";
+import {
+  AuthStore,
+  OAuthClientRegistrationError,
+  SUPPORTED_SCOPES,
+  filterScopes,
+  isAllowedRedirectUri,
+} from "./store.js";
 import { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME } from "../version.js";
@@ -25,18 +31,19 @@ interface PendingAuthRequest {
   expiresAt: number;
 }
 
-function isAllowedRedirectUri(uri: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(uri);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol === "https:") return true;
-  if (parsed.protocol === "http:" && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")) {
-    return true;
-  }
-  return false;
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringValue(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function hasNonScalarValues(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.some((key) => record[key] !== undefined && typeof record[key] !== "string");
 }
 
 function authorizationServerMetadata(base: string): Record<string, unknown> {
@@ -76,6 +83,7 @@ function pairingPage(opts: {
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
+    "c2c.result.write": "Report bounded progress and submit control results to local C2C state",
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
@@ -119,7 +127,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> (read-only):</p>
+  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong>:</p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">
@@ -162,7 +170,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
   router.post("/oauth/register", json(), (req, res) => {
-    const body = req.body as { client_name?: string; redirect_uris?: unknown };
+    const body = recordValue(req.body);
     const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
     if (
       redirectUris.length === 0 ||
@@ -174,10 +182,28 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       });
       return;
     }
-    const client = deps.store.registerClient({
-      clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
-      redirectUris: redirectUris as string[],
-    });
+    if (!deps.pairing.claimClientRegistration()) {
+      res.status(429).json({
+        error: "registration_unavailable",
+        error_description: "Start a new local pairing session before registering a connector.",
+      });
+      return;
+    }
+    let client;
+    try {
+      client = deps.store.registerClient({
+        clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
+        redirectUris: redirectUris as string[],
+      });
+    } catch (error) {
+      if (error instanceof OAuthClientRegistrationError) {
+        res.status(429).json({ error: error.code, error_description: error.message });
+        return;
+      }
+      deps.logger.error(`OAuth client registration failed: ${error instanceof Error ? error.message : String(error)}`);
+      res.status(500).json({ error: "server_error", error_description: "OAuth client registration failed." });
+      return;
+    }
     deps.logger.info(`Registered OAuth client ${client.clientId} (${client.clientName ?? "unnamed"})`);
     res.status(201).json({
       client_id: client.clientId,
@@ -193,7 +219,25 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
 
   router.get("/oauth/authorize", (req, res) => {
     prunePending();
-    const query = req.query as Record<string, string | undefined>;
+    const rawQuery = recordValue(req.query);
+    const oauthQueryKeys = [
+      "client_id",
+      "redirect_uri",
+      "response_type",
+      "state",
+      "code_challenge",
+      "code_challenge_method",
+      "scope",
+      "resource",
+    ] as const;
+    if (hasNonScalarValues(rawQuery, oauthQueryKeys)) {
+      setAuthSecurityHeaders(res);
+      res.status(400).send("OAuth parameters must have one value each.");
+      return;
+    }
+    const query = Object.fromEntries(
+      oauthQueryKeys.map((key) => [key, stringValue(rawQuery, key)])
+    ) as Record<(typeof oauthQueryKeys)[number], string | undefined>;
     const client = query.client_id ? deps.store.getClient(query.client_id) : undefined;
     if (!client) {
       setAuthSecurityHeaders(res);
@@ -222,6 +266,25 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
     const scopes = filterScopes(query.scope);
+    const requestedScopes = [...new Set((query.scope ?? "").split(/[\s+]+/).filter(Boolean))];
+    if (requestedScopes.length > 0 && scopes.length !== requestedScopes.length) {
+      fail("invalid_scope", "One or more requested scopes are not supported");
+      return;
+    }
+    if (query.resource) {
+      let requestedResource: string;
+      try {
+        requestedResource = new URL(query.resource).toString();
+      } catch {
+        fail("invalid_target", "The requested resource is invalid");
+        return;
+      }
+      const expectedResource = new URL("/mcp", `${deps.getBaseUrl(req)}/`).toString();
+      if (requestedResource !== expectedResource) {
+        fail("invalid_target", "The requested resource is not served by this workspace");
+        return;
+      }
+    }
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
       clientId: client.clientId,
@@ -242,14 +305,16 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
     prunePending();
-    const body = req.body as { request_id?: string; pairing_code?: string };
-    const request = body.request_id ? pendingRequests.get(body.request_id) : undefined;
+    const body = recordValue(req.body);
+    const requestId = stringValue(body, "request_id");
+    const pairingCode = stringValue(body, "pairing_code");
+    const request = requestId ? pendingRequests.get(requestId) : undefined;
     if (!request) {
       setAuthSecurityHeaders(res);
       res.status(400).send("This authorization request has expired. Please reconnect from ChatGPT.");
       return;
     }
-    const verdict = deps.pairing.verify(body.pairing_code ?? "", req.ip);
+    const verdict = deps.pairing.verify(pairingCode ?? "", req.ip);
     if (!verdict.ok) {
       const messages: Record<string, string> = {
         invalid: `Incorrect pairing code.${verdict.attemptsLeft !== undefined ? ` ${verdict.attemptsLeft} attempts left.` : ""}`,
@@ -292,29 +357,38 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   // ---- Token endpoint --------------------------------------------------------
 
   router.post("/oauth/token", urlencoded({ extended: false }), json(), (req, res) => {
-    const body = req.body as Record<string, string | undefined>;
-    const grantType = body.grant_type;
+    const body = recordValue(req.body);
+    const grantType = stringValue(body, "grant_type");
 
     if (grantType === "authorization_code") {
-      const { code, code_verifier: codeVerifier, client_id: clientId, redirect_uri: redirectUri } = body;
-      if (!code || !codeVerifier || !clientId) {
+      const code = stringValue(body, "code");
+      const codeVerifier = stringValue(body, "code_verifier");
+      const clientId = stringValue(body, "client_id");
+      const redirectUri = stringValue(body, "redirect_uri");
+      if (!code || !codeVerifier || !clientId || !redirectUri) {
         res.status(400).json({ error: "invalid_request" });
         return;
       }
-      const record = deps.store.consumeAuthorizationCode(code);
-      if (!record || record.clientId !== clientId) {
+      const exchange = deps.store.exchangeAuthorizationCode({
+        code,
+        clientId,
+        redirectUri,
+        codeVerifier,
+      });
+      if (!exchange.ok) {
+        if (exchange.reason === "pkce_mismatch") {
+          deps.logger.warn("PKCE verification failed at token endpoint");
+          res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
+          return;
+        }
+        if (exchange.reason === "redirect_uri_mismatch") {
+          res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
+          return;
+        }
         res.status(400).json({ error: "invalid_grant" });
         return;
       }
-      if (redirectUri && redirectUri !== record.redirectUri) {
-        res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
-        return;
-      }
-      if (!safeEqual(base64UrlSha256(codeVerifier), record.codeChallenge)) {
-        deps.logger.warn("PKCE verification failed at token endpoint");
-        res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
-        return;
-      }
+      const { record } = exchange;
       const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
       deps.logger.info(`Issued access token for client ${clientId}`);
       res.json({
@@ -328,7 +402,8 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     }
 
     if (grantType === "refresh_token") {
-      const { refresh_token: refreshToken, client_id: clientId } = body;
+      const refreshToken = stringValue(body, "refresh_token");
+      const clientId = stringValue(body, "client_id");
       if (!refreshToken || !clientId) {
         res.status(400).json({ error: "invalid_request" });
         return;
@@ -354,8 +429,8 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   // ---- Revocation (RFC 7009) ---------------------------------------------------
 
   router.post("/oauth/revoke", urlencoded({ extended: false }), (req, res) => {
-    const body = req.body as { token?: string };
-    if (body.token) deps.store.revokeToken(body.token);
+    const token = stringValue(recordValue(req.body), "token");
+    if (token) deps.store.revokeToken(token);
     res.status(200).json({});
   });
 

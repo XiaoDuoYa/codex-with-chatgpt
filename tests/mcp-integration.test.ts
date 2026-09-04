@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { appendExecutionRecord } from "../src/execution/records.js";
 import { saveExecutionOutput } from "../src/execution/output.js";
+import { getControlResultStatus, openControlResultRequest } from "../src/control/mailbox.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git, isolateStateDir } from "./helpers.js";
 
 let root: string;
@@ -56,7 +57,7 @@ beforeAll(async () => {
   });
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
-    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read"],
+    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read", "c2c.result.write"],
   });
   accessToken = tokens.accessToken;
 
@@ -74,7 +75,7 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all nine read-only tools", async () => {
+  it("lists all read-only tools plus the bounded control write tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
@@ -84,11 +85,12 @@ describe("MCP tools over Streamable HTTP", () => {
       "git_status",
       "list_directory",
       "read_file",
+      "report_control_progress",
       "search_workspace",
+      "submit_control_result",
       "test_status",
       "workspace_info",
     ]);
-    // no write tools in V1
     for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
     }
@@ -99,9 +101,66 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
     expectToolOutputSchema(tools, "git_status", ["isRepo", "branch", "staged", "unstaged", "untracked"]);
     expectToolOutputSchema(tools, "git_diff", ["isRepo", "mode", "diff", "hasMore", "nextOffset"]);
-    expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
+    expectToolOutputSchema(tools, "test_status", [
+      "available",
+      "localSessionId",
+      "taskId",
+      "iteration",
+      "tests",
+      "outputAvailable",
+      "outputId",
+    ]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
-    expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    expectToolOutputSchema(tools, "execution_output", [
+      "action",
+      "items",
+      "localSessionId",
+      "taskId",
+      "iteration",
+      "text",
+    ]);
+    expectToolOutputSchema(tools, "report_control_progress", [
+      "accepted",
+      "requestId",
+      "localSessionId",
+      "progressId",
+      "phase",
+      "status",
+      "reportedAt",
+      "idempotentReplay",
+    ]);
+    const progressInput = tools.find((tool) => tool.name === "report_control_progress")?.inputSchema;
+    expect(JSON.stringify(progressInput)).toContain('"SEARCHING"');
+    expect(JSON.stringify(progressInput)).toContain('"READING_CODE"');
+    expect(JSON.stringify(progressInput)).toContain('"SYNTHESIZING"');
+    expectToolOutputSchema(tools, "submit_control_result", [
+      "accepted",
+      "requestId",
+      "localSessionId",
+      "resultId",
+      "phase",
+      "kind",
+      "receivedAt",
+      "idempotentReplay",
+    ]);
+    const submitInput = tools.find((tool) => tool.name === "submit_control_result")?.inputSchema;
+    expect(submitInput?.type).toBe("object");
+    const serializedSubmitInput = JSON.stringify(submitInput);
+    expect(serializedSubmitInput).toContain('"localSessionId"');
+    for (const payloadField of [
+      "question",
+      "conclusions",
+      "sources",
+      "publishedDate",
+      "keyEvidence",
+      "goal",
+      "rationale",
+      "findings",
+      "verification",
+      "needs",
+    ]) {
+      expect(serializedSubmitInput).toContain(`\"${payloadField}\"`);
+    }
   });
 
   it("workspace_info returns identity and project detection", async () => {
@@ -184,6 +243,7 @@ describe("MCP tools over Streamable HTTP", () => {
 
   it("execution_summary and test_status read harness records", async () => {
     appendExecutionRecord(bridge.workspace.id, {
+      localSessionId: "integration-session",
       taskId: "c2c_test1",
       iteration: 1,
       changedFiles: ["src/index.ts"],
@@ -191,18 +251,43 @@ describe("MCP tools over Streamable HTTP", () => {
       exitStatus: "ok",
       timestamp: new Date().toISOString(),
     });
+    appendExecutionRecord(bridge.workspace.id, {
+      localSessionId: "other-session",
+      taskId: "c2c_other",
+      iteration: 1,
+      changedFiles: ["src/other.ts"],
+      tests: "1 failed",
+      exitStatus: "failed",
+      timestamp: new Date().toISOString(),
+    });
     const summary = structuredJsonOf<{ records: { taskId: string }[] }>(
-      await client.callTool({ name: "execution_summary", arguments: {} })
+      await client.callTool({
+        name: "execution_summary",
+        arguments: { local_session_id: "integration-session", task_id: "c2c_test1" },
+      })
     );
     expect(summary.records[0].taskId).toBe("c2c_test1");
+    expect(summary.records).toHaveLength(1);
 
     const status = structuredJsonOf<{ available: boolean; tests: string; outputAvailable: boolean; outputId: number | null }>(
-      await client.callTool({ name: "test_status", arguments: {} })
+      await client.callTool({
+        name: "test_status",
+        arguments: { local_session_id: "integration-session", task_id: "c2c_test1", iteration: 1 },
+      })
     );
     expect(status.available).toBe(true);
     expect(status.tests).toBe("27 passed");
     expect(status.outputAvailable).toBe(false);
     expect(status.outputId).toBeNull();
+
+    const unrelated = structuredJsonOf<{ available: boolean; taskId: string }>(
+      await client.callTool({
+        name: "test_status",
+        arguments: { local_session_id: "integration-session", task_id: "c2c_other", iteration: 1 },
+      })
+    );
+    expect(unrelated.available).toBe(false);
+    expect(unrelated.taskId).toBe("c2c_other");
   });
 
   it("execution_output lists readable items and refuses restricted bodies", async () => {
@@ -210,15 +295,26 @@ describe("MCP tools over Streamable HTTP", () => {
       command: "pnpm test",
       raw: "FAIL src/a.test.ts\nAssertionError: expected true",
       exitCode: 1,
+      localSessionId: "integration-session",
+      taskId: "c2c_output1",
+      iteration: 2,
     });
     const hidden = saveExecutionOutput(bridge.workspace.id, {
       command: "print-key",
       raw: "-----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----",
       exitCode: 0,
+      localSessionId: "integration-session",
+      taskId: "c2c_output1",
+      iteration: 2,
     });
     const listResult = await client.callTool({
       name: "execution_output",
-      arguments: { action: "list" },
+      arguments: {
+        action: "list",
+        local_session_id: "integration-session",
+        task_id: "c2c_output1",
+        iteration: 2,
+      },
     });
     const list = structuredJsonOf<{
       action: "list";
@@ -231,15 +327,40 @@ describe("MCP tools over Streamable HTTP", () => {
 
     const readResult = await client.callTool({
       name: "execution_output",
-      arguments: { action: "read", id: readable.id },
+      arguments: {
+        action: "read",
+        id: readable.id,
+        local_session_id: "integration-session",
+        task_id: "c2c_output1",
+        iteration: 2,
+      },
     });
     const body = structuredJsonOf<{ action: "read"; text: string }>(readResult);
     expect(body.action).toBe("read");
     expect(body.text).toContain("AssertionError");
 
+    const mismatched = await client.callTool({
+      name: "execution_output",
+      arguments: {
+        action: "read",
+        id: readable.id,
+        local_session_id: "other-session",
+        task_id: "c2c_output1",
+        iteration: 2,
+      },
+    });
+    expect(mismatched.isError).toBe(true);
+    expect(textOf(mismatched)).toContain("EXECUTION_CORRELATION_MISMATCH");
+
     const denied = await client.callTool({
       name: "execution_output",
-      arguments: { action: "read", id: hidden.id },
+      arguments: {
+        action: "read",
+        id: hidden.id,
+        local_session_id: "integration-session",
+        task_id: "c2c_output1",
+        iteration: 2,
+      },
     });
     expect(denied.isError).toBe(true);
     expect(textOf(denied)).toContain("OUTPUT_RESTRICTED");
@@ -247,7 +368,13 @@ describe("MCP tools over Streamable HTTP", () => {
 
     const missing = await client.callTool({
       name: "execution_output",
-      arguments: { action: "read", id: 999999 },
+      arguments: {
+        action: "read",
+        id: 999999,
+        local_session_id: "integration-session",
+        task_id: "c2c_output1",
+        iteration: 2,
+      },
     });
     expect(missing.isError).toBe(true);
     expect(textOf(missing)).toContain("NOT_FOUND");
@@ -265,13 +392,117 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(denied)).toContain("INSUFFICIENT_SCOPE");
     const outputDenied = await limitedClient.callTool({
       name: "execution_output",
-      arguments: { action: "list" },
+      arguments: { action: "list", local_session_id: "limited", task_id: "c2c_limited", iteration: 0 },
     });
     expect(outputDenied.isError).toBe(true);
     expect(textOf(outputDenied)).toContain("INSUFFICIENT_SCOPE");
+    const writeDenied = await limitedClient.callTool({
+      name: "submit_control_result",
+      arguments: {
+        requestId: "missing",
+        localSessionId: "limited",
+        taskId: "c2c_test",
+        iteration: 0,
+        phase: "PLAN",
+        kind: "PLAN",
+        payload: {
+          goal: "demo",
+          rationale: "scope check",
+          actions: [{ change: "inspect", why: "verify denial" }],
+          tests: [],
+          successCriteria: ["denied"],
+        },
+      },
+    });
+    expect(writeDenied.isError).toBe(true);
+    expect(textOf(writeDenied)).toContain("INSUFFICIENT_SCOPE");
+    const progressDenied = await limitedClient.callTool({
+      name: "report_control_progress",
+      arguments: {
+        requestId: "missing",
+        localSessionId: "limited",
+        taskId: "c2c_test",
+        iteration: 0,
+        phase: "PLAN",
+        status: "READING_CODE",
+      },
+    });
+    expect(progressDenied.isError).toBe(true);
+    expect(textOf(progressDenied)).toContain("INSUFFICIENT_SCOPE");
     const allowed = await limitedClient.callTool({ name: "read_file", arguments: { path: "hello.txt" } });
     expect(allowed.isError ?? false).toBe(false);
     await limitedClient.close();
+  });
+
+  it("submit_control_result writes one structured result to the local mailbox", async () => {
+    const request = openControlResultRequest(bridge.workspace.id, {
+      localSessionId: "integration-session",
+      taskId: "c2c_plan1",
+      iteration: 0,
+      phase: "PLAN",
+    });
+    const progressResult = await client.callTool({
+      name: "report_control_progress",
+      arguments: {
+        requestId: request.requestId,
+        localSessionId: request.localSessionId,
+        taskId: request.taskId,
+        iteration: request.iteration,
+        phase: request.phase,
+        status: "READING_CODE",
+        message: "Inspecting the mailbox implementation.",
+      },
+    });
+    const progressReceipt = structuredJsonOf<{
+      accepted: true;
+      requestId: string;
+      status: string;
+    }>(progressResult);
+    expect(progressReceipt).toMatchObject({
+      accepted: true,
+      requestId: request.requestId,
+      status: "READING_CODE",
+    });
+    const result = await client.callTool({
+      name: "submit_control_result",
+      arguments: {
+        requestId: request.requestId,
+        localSessionId: request.localSessionId,
+        taskId: request.taskId,
+        iteration: request.iteration,
+        phase: request.phase,
+        kind: "PLAN",
+        payload: {
+          goal: "Add mailbox transport",
+          rationale: "Avoid parsing browser-rendered results.",
+          actions: [{ file: "src/control/mailbox.ts", change: "read mailbox result", why: "local handoff" }],
+          tests: ["pnpm test"],
+          successCriteria: ["Codex reads the PLAN locally"],
+        },
+      },
+    });
+    const receipt = structuredJsonOf<{
+      accepted: true;
+      requestId: string;
+      localSessionId: string;
+      phase: string;
+      kind: string;
+    }>(result);
+    expect(receipt.accepted).toBe(true);
+    expect(receipt.requestId).toBe(request.requestId);
+    expect(receipt.localSessionId).toBe(request.localSessionId);
+    expect(receipt.phase).toBe("PLAN");
+    expect(receipt.kind).toBe("PLAN");
+
+    const local = getControlResultStatus(bridge.workspace.id, request.requestId, "integration-session", {
+      taskId: request.taskId,
+      iteration: request.iteration,
+      phase: request.phase,
+    });
+    expect(local.status).toBe("received");
+    expect(local.result?.kind).toBe("PLAN");
+    expect(local.result?.localSessionId).toBe("integration-session");
+    expect(local.progress?.status).toBe("READING_CODE");
   });
 
   it("git_diff over MCP excludes sensitive files like .npmrc and service-account*.json", async () => {

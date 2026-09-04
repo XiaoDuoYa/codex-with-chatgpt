@@ -11,24 +11,35 @@
 
 **中文** — ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的
 API 额度做规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，
-Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 工作区只读 MCP
+桥接 + 本地结构化结果回传。
 
 **EN** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
 scarce API/Codex tokens on planning and review. This project moves the
 thinking to the subscription you already pay for; Codex only executes.
-No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
+No API keys, no reverse proxy — official web UI plus workspace-read-only MCP
+access and a bounded local result mailbox.
 
 ## What it is · 这是什么
 
 **中文** — 把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，执行权
 完全保留在 Codex 手里。你的仓库永远不会被上传：ChatGPT 通过一条安全的、
-OAuth 保护的**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
+OAuth 保护的连接按需读取代码，并且只能向 C2C 本地状态提交一次性、结构化的
+建议结果，不能修改工作区。
 
 **EN** — Use the ChatGPT web app as the planning and review brain for your
 Codex coding sessions, while Codex keeps full ownership of execution. Your
 repository is never uploaded: ChatGPT reads exactly the lines it needs through
-a secure, OAuth-protected, **read-only** MCP connection to your current
+a secure, OAuth-protected connection. Its only write capabilities are bounded
+progress and one-shot advisory results stored in C2C local state, never in your
 workspace.
+
+ChatGPT can also own code discovery and current-web research, including waits;
+formal research returns separately with conclusions, source links, publication
+dates, key evidence, and open questions before implementation planning.
+Codex remains responsible for applying edits and verifying them locally. C2C
+does not switch the active Codex model; model selection stays with the user or
+host runtime.
 
 Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](README.zh-CN.md)**
 
@@ -124,8 +135,8 @@ you to create a ChatGPT Project (collection) once — pick **project-only
 memory**, name it after the workspace. If the sidebar has no Projects row,
 hover **Chats**, open the … menu, and choose **Organize by project**. Codex
 then saves that collection link and starts chats from that page. Existing
-workspaces that already have a C2C chat stay on the old one-conversation
-style until you ask to switch.
+workspaces can stay outside Projects until you ask to switch; each local Codex
+session still keeps its own ChatGPT chat URL.
 
 ### Optional stable hostname
 
@@ -150,38 +161,65 @@ Credentials stay in the OS app state directory, not in the project.
              │  Reason / Plan / Review   │
              └──────────┬──────────▲─────┘
                         │          │
-               MCP      │          │ Computer Use
-            Data Plane  │          │ Control Plane (<1 KB messages)
+        MCP data reads  │          │ Browser control plane
+ + progress/result send │          │ RESEARCH / INIT / EXECUTED (<1 KB)
                         ▼          │
              ┌─────────────────────┐
              │      C2C Bridge     │   loopback-only HTTP server
-             │  read-only MCP      │   OAuth 2.1 + one-time pairing code
+             │ MCP + result mailbox│   OAuth 2.1 + one-time pairing code
              │  OAuth + Pairing    │   Cloudflare Quick Tunnel
              │  Tunnel Manager     │
-             └──────────┬──────────┘
-                        │  read-only
-                        ▼
-             ┌─────────────────────┐          ┌─────────────────────┐
-             │   Local Workspace   │◀─────────│    Codex Harness    │
-             └─────────────────────┘ edit/git │ shell / tests / fix │
-                                              └─────────────────────┘
+             └──────┬────────┬─────┘
+          read-only │        │ bounded result to C2C state
+                   ▼        ▼
+       ┌────────────────┐  ┌─────────────────────┐
+       │Local Workspace │  │Local Control Mailbox│
+       └───────▲────────┘  └──────────▲──────────┘
+               │ edit/git/tests       │ local read/ack
+               └──────────┬───────────┘
+                    ┌─────┴───────┐
+                    │Codex Harness│
+                    └─────────────┘
 ```
 
-- **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
-  `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
-  no logs, no file bodies are ever pasted.
+- **Outbound control plane (browser UI)**: Codex sends tiny `[C2C]` RESEARCH,
+  INIT, and EXECUTED messages. The full state loop is
+  `[RESEARCH] → INIT → PLAN → EXECUTED → REVIEW → DONE`; no diffs, logs, or file bodies are
+  ever pasted.
 - **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
   tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
   `git_status`, `git_diff`, `test_status`, `execution_summary`,
   `execution_output`.
+- **Return plane (local mailbox)**: `report_control_progress` exposes bounded
+  forward-only progress, and `submit_control_result` accepts only a schema-bound
+  RESEARCH/PLAN/REVIEW/DONE/BLOCKED payload for an active one-shot request.
+  Each request is one question/answer turn; Codex reads and acknowledges it
+  locally with the exact local-session/task/iteration/phase tuple, without
+  parsing page text.
+- **Parallel sessions**: one ChatGPT Project belongs to the workspace; each
+  local Codex session gets its own ChatGPT chat, checkpoint, and result request.
+  C2C returns the exact saved URL as a routing gate, so switching the visible
+  page cannot redirect a task into another session's chat.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
-  git diff and test records through MCP — it never trusts "all tests passed"
-  claims blindly.
+  git diff and only the execution records matching the current local session,
+  task, and iteration through MCP. It never trusts "all tests passed" claims
+  blindly.
+
+Result delivery defaults to mailbox-first with a browser fallback. Set it per
+workspace in `.c2c.json` when you need a strict mode:
+
+```json
+{ "resultTransport": "auto" }
+```
+
+Supported values are `auto` (default), `mailbox`, and `browser` (legacy).
 
 ## Security model (short version)
 
-- **Read-only by construction**: write/delete/shell/commit tools simply do not
-  exist on the server. No prompt injection can enable them.
+- **Workspace-read-only by construction**: write/delete/shell/commit tools do
+  not exist. The two bounded write tools store progress or schema-bound advice
+  in C2C state, cannot select a workspace write target, and require a scoped,
+  expiring one-shot request.
 - **One workspace = one boundary**: every token is bound to a single workspace;
   path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
   are all blocked and tested).
@@ -201,7 +239,7 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest: path security, OAuth, pairing, mailbox, MCP e2e
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
@@ -219,12 +257,14 @@ Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 ```
 src/
   bridge/     loopback HTTP server, port recovery, admin API
-  mcp/        9 read-only tools, stateless Streamable HTTP
+  mcp/        9 read-only data tools + bounded progress/result submit, stateless HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
   workspace/  path containment, sensitive-file policy, search, git
   tunnel/     TunnelProvider abstraction + Cloudflare Quick/Named Tunnel
   execution/  execution records for the review loop
+  control/    research/result/progress schemas and local mailbox lifecycle
+  session/    workspace Project binding + per-local-session chat/checkpoint
   process/    daemon lifecycle
   cli/        the c2c CLI
 skill/        the Codex Skill (the real UX layer)

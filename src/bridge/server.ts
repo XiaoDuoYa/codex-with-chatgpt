@@ -23,10 +23,11 @@ function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider
     return new CloudflaredNamedTunnel({
       tunnelName: binding.tunnelName,
       hostname: binding.hostname,
+      expectedWorkspaceId: workspaceId,
       logger,
     });
   }
-  return new CloudflaredQuickTunnel(logger);
+  return new CloudflaredQuickTunnel(logger, undefined, { expectedWorkspaceId: workspaceId });
 }
 
 export interface BridgeOptions {
@@ -93,13 +94,64 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
+  let persistRuntime: () => void = () => undefined;
+  let tunnelOperationTail: Promise<void> = Promise.resolve();
+  let closing = false;
+
+  const syncPublicBaseUrl = (): string | null => {
+    const providerUrl = tunnel.getPublicUrl();
+    if (providerUrl !== publicBaseUrl) {
+      publicBaseUrl = providerUrl;
+      persistRuntime();
+    }
+    return publicBaseUrl;
+  };
+
+  const enqueueTunnelOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = tunnelOperationTail.then(operation, operation);
+    tunnelOperationTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  };
+
+  const startManagedTunnel = (restart: boolean): Promise<string> =>
+    enqueueTunnelOperation(async () => {
+      if (restart) {
+        publicBaseUrl = null;
+        persistRuntime();
+        await tunnel.stop();
+      }
+      try {
+        const url = await tunnel.start(port);
+        publicBaseUrl = url;
+        persistRuntime();
+        return url;
+      } catch (error) {
+        publicBaseUrl = tunnel.getPublicUrl();
+        persistRuntime();
+        throw error;
+      }
+    });
+
+  const stopManagedTunnel = (): Promise<void> =>
+    enqueueTunnelOperation(async () => {
+      try {
+        await tunnel.stop();
+      } finally {
+        publicBaseUrl = null;
+        persistRuntime();
+      }
+    });
 
   const app = express();
   app.set("trust proxy", true);
   app.disable("x-powered-by");
 
   const getBaseUrl = (req: Request): string => {
-    if (publicBaseUrl) return publicBaseUrl;
+    const activePublicBaseUrl = syncPublicBaseUrl();
+    if (activePublicBaseUrl) return activePublicBaseUrl;
     const proto = req.protocol;
     const hostHeader = req.get("host") ?? `${host}:${port}`;
     return `${proto}://${hostHeader}`;
@@ -151,6 +203,12 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     next();
   };
 
+  const rejectWhileClosing = (res: Response): boolean => {
+    if (!closing) return false;
+    res.status(503).json({ error: "bridge_shutting_down", message: "Bridge is shutting down." });
+    return true;
+  };
+
   app.post("/admin/pairing", adminGuard, (_req, res) => {
     const session = pairing.create();
     logger.info("Created pairing session");
@@ -158,6 +216,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.get("/admin/info", adminGuard, (_req, res) => {
+    const activePublicBaseUrl = syncPublicBaseUrl();
     res.json({
       service: SERVICE_NAME,
       version: VERSION,
@@ -165,9 +224,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       workspaceName: workspace.name,
       workspaceRoot: workspace.root,
       port,
-      publicUrl: publicBaseUrl,
+      publicUrl: activePublicBaseUrl,
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
+      authorization: authStore.authorizationStatus(),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,
       startedAt,
@@ -175,11 +235,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
-      .start(port)
+    if (rejectWhileClosing(res)) return;
+    startManagedTunnel(false)
       .then((url) => {
-        publicBaseUrl = url;
-        persistRuntime();
         res.json({ url });
       })
       .catch((error: Error) => {
@@ -188,12 +246,28 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       });
   });
 
+  app.post("/admin/tunnel/restart", adminGuard, (_req, res) => {
+    if (rejectWhileClosing(res)) return;
+    startManagedTunnel(true)
+      .then((url) => {
+        res.json({ url });
+      })
+      .catch((error: Error) => {
+        logger.error(`Tunnel restart failed: ${error.message}`);
+        res.status(500).json({ error: "tunnel_failed", message: error.message });
+      });
+  });
+
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
-    void tunnel.stop().then(() => {
-      publicBaseUrl = null;
-      persistRuntime();
-      res.json({ stopped: true });
-    });
+    if (rejectWhileClosing(res)) return;
+    void stopManagedTunnel()
+      .then(() => {
+        res.json({ stopped: true });
+      })
+      .catch((error: Error) => {
+        logger.error(`Tunnel stop failed: ${error.message}`);
+        res.status(500).json({ error: "tunnel_failed", message: error.message });
+      });
   });
 
   app.post("/admin/revoke-all", adminGuard, (_req, res) => {
@@ -204,9 +278,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/shutdown", adminGuard, (_req, res) => {
+    if (rejectWhileClosing(res)) return;
+    closing = true;
     res.json({ shuttingDown: true });
     setTimeout(() => {
-      void shutdown().then(() => process.exit(0));
+      void shutdown()
+        .then(() => process.exit(0))
+        .catch((error) => logger.error(`Bridge shutdown failed: ${String(error)}`));
     }, 100);
   });
 
@@ -214,7 +292,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
-  const persistRuntime = (): void => {
+  persistRuntime = (): void => {
     if (opts.persistRuntime === false) return;
     const state: RuntimeState = {
       service: SERVICE_NAME,
@@ -231,14 +309,19 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   };
   persistRuntime();
 
-  let closed = false;
-  const shutdown = async (): Promise<void> => {
-    if (closed) return;
-    closed = true;
-    await tunnel.stop().catch(() => undefined);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
-    logger.info("Bridge stopped");
+  let shutdownPromise: Promise<void> | null = null;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    closing = true;
+    shutdownPromise = (async () => {
+      await stopManagedTunnel().catch(() => undefined);
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      if (opts.persistRuntime !== false) clearRuntimeState(workspace.id);
+      logger.info("Bridge stopped");
+    })();
+    return shutdownPromise;
   };
 
   return {
@@ -249,7 +332,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     authStore,
     pairing,
     tunnel,
-    getPublicBaseUrl: () => publicBaseUrl,
+    getPublicBaseUrl: syncPublicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,
   };

@@ -1,16 +1,103 @@
+import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   clearChatPointer,
+  currentLocalSessionId,
+  currentLocalSessionIdentity,
   mergeSession,
+  normalizeChatUrl,
   normalizeProjectUrl,
+  projectIdFromChatUrl,
   projectIdFromUrl,
   readSession,
   resolveConversation,
-  writeSession,
+  resolveConversationRoute,
+  sessionFile,
+  threadSessionFile,
+  updateSession,
+  type SavedSession,
 } from "../src/session/state.js";
-import { cleanup, makeTmpDir } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir } from "./helpers.js";
 
 const PROJECT = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
+const PROJECT_CHAT =
+  "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const SLUGGED_PROJECT =
+  "https://chatgpt.com/g/g-p-6a97c355a5c88191a62d30cee1326a7d-cloudflare-llm-api/project";
+const SLUGGED_PROJECT_CHAT =
+  "https://chatgpt.com/g/g-p-6a97c355a5c88191a62d30cee1326a7d-cloudflare-llm-api/c/6a99248b-493c-83ec-868e-86dde7469950";
+const CANONICAL_SLUGGED_PROJECT =
+  "https://chatgpt.com/g/g-p-6a97c355a5c88191a62d30cee1326a7d/project";
+const CANONICAL_SLUGGED_PROJECT_CHAT =
+  "https://chatgpt.com/g/g-p-6a97c355a5c88191a62d30cee1326a7d/c/6a99248b-493c-83ec-868e-86dde7469950";
+
+function writeSession(
+  workspaceId: string,
+  session: SavedSession,
+  localSessionId = session.localSessionId ?? currentLocalSessionId()
+): SavedSession {
+  return updateSession(workspaceId, localSessionId, session);
+}
+
+const SESSION_ENV_KEYS = [
+  "C2C_LOCAL_SESSION_ID",
+  "CODEX_THREAD_ID",
+  "CODEX_SESSION_ID",
+  "CODEX_APP_TOOLS_PIPE_PATH",
+  "TERM_SESSION_ID",
+  "WT_SESSION",
+  "VSCODE_PID",
+  "SHELL_PID",
+] as const;
+
+describe("currentLocalSessionId", () => {
+  it("prefers explicit and Codex task identifiers before runtime fallbacks", () => {
+    const previous = Object.fromEntries(SESSION_ENV_KEYS.map((key) => [key, process.env[key]]));
+    try {
+      process.env.C2C_LOCAL_SESSION_ID = "c2c-override";
+      process.env.CODEX_THREAD_ID = "codex-thread";
+      process.env.CODEX_SESSION_ID = "codex-session";
+      expect(currentLocalSessionId("explicit-session")).toBe("explicit-session");
+      expect(currentLocalSessionIdentity("explicit-session")).toEqual({
+        id: "explicit-session",
+        source: "explicit",
+        stability: "durable",
+      });
+      expect(currentLocalSessionId()).toBe("c2c-override");
+
+      delete process.env.C2C_LOCAL_SESSION_ID;
+      expect(currentLocalSessionId()).toBe("codex-thread");
+      delete process.env.CODEX_THREAD_ID;
+      expect(currentLocalSessionId()).toBe("codex-session");
+      delete process.env.CODEX_SESSION_ID;
+
+      process.env.CODEX_APP_TOOLS_PIPE_PATH = "/tmp/codex-browser-use/runtime-a.sock";
+      const runtime = currentLocalSessionIdentity();
+      expect(runtime.source).toBe("codex-runtime");
+      expect(runtime.stability).toBe("runtime");
+      expect(currentLocalSessionId()).toBe(runtime.id);
+
+      for (const key of SESSION_ENV_KEYS) delete process.env[key];
+      process.env.SHELL_PID = "4242";
+      const terminal = currentLocalSessionIdentity();
+      expect(terminal.source).toBe("terminal-runtime");
+      expect(terminal.stability).toBe("runtime");
+
+      delete process.env.SHELL_PID;
+      const temporary = currentLocalSessionIdentity();
+      expect(temporary.source).toBe("process-temporary");
+      expect(temporary.stability).toBe("process");
+      expect(currentLocalSessionId()).toBe(temporary.id);
+      expect(() => currentLocalSessionId("invalid:windows-id")).toThrow(/safe identifier/);
+    } finally {
+      for (const key of SESSION_ENV_KEYS) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
 
 describe("normalizeProjectUrl", () => {
   it("accepts the collection URL and strips extras", () => {
@@ -19,12 +106,31 @@ describe("normalizeProjectUrl", () => {
       "https://chatgpt.com/g/g-p-abc123/project"
     );
     expect(projectIdFromUrl(PROJECT)).toBe("g-p-6a94399430e08191860ab5364b7748b8");
+    expect(normalizeProjectUrl(`${SLUGGED_PROJECT}?tab=sources`)).toBe(CANONICAL_SLUGGED_PROJECT);
+    expect(projectIdFromUrl(SLUGGED_PROJECT)).toBe("g-p-6a97c355a5c88191a62d30cee1326a7d");
   });
 
   it("rejects a normal chat URL or a guessed name", () => {
     expect(normalizeProjectUrl("https://chatgpt.com/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")).toBeNull();
     expect(normalizeProjectUrl("https://chatgpt.com/")).toBeNull();
     expect(normalizeProjectUrl("https://example.com/g/g-p-abc/project")).toBeNull();
+  });
+});
+
+describe("normalizeChatUrl", () => {
+  it("normalizes direct and Project conversation URLs", () => {
+    expect(normalizeChatUrl("https://www.chatgpt.com/c/direct-chat/?foo=1#latest")).toBe(
+      "https://chatgpt.com/c/direct-chat"
+    );
+    expect(normalizeChatUrl(`${SLUGGED_PROJECT_CHAT}?model=auto`)).toBe(CANONICAL_SLUGGED_PROJECT_CHAT);
+    expect(normalizeChatUrl(CANONICAL_SLUGGED_PROJECT_CHAT)).toBe(CANONICAL_SLUGGED_PROJECT_CHAT);
+    expect(projectIdFromChatUrl(SLUGGED_PROJECT_CHAT)).toBe("g-p-6a97c355a5c88191a62d30cee1326a7d");
+  });
+
+  it("rejects non-conversation and untrusted URLs", () => {
+    expect(normalizeChatUrl(PROJECT)).toBeNull();
+    expect(normalizeChatUrl("http://chatgpt.com/c/not-secure")).toBeNull();
+    expect(normalizeChatUrl("https://example.com/c/not-chatgpt")).toBeNull();
   });
 });
 
@@ -63,14 +169,73 @@ describe("resolveConversation", () => {
     const view = resolveConversation({
       conversationMode: "project",
       projectUrl: PROJECT,
-      url: "https://chatgpt.com/c/thread-1",
+      url: PROJECT_CHAT,
       connectorName: "Codex with ChatGPT · Demo",
       savedAt: "2026-01-01T00:00:00.000Z",
     });
     expect(view.mode).toBe("project");
     expect(view.projectReady).toBe(true);
-    expect(view.reuseSavedChat).toBe(false);
+    expect(view.reuseSavedChat).toBe(true);
     expect(view.connectorName).toBe("Codex with ChatGPT · Demo");
+  });
+
+  it("routes slugged and id-only URLs to one stable Project conversation", () => {
+    const view = resolveConversation({
+      conversationMode: "project",
+      projectUrl: SLUGGED_PROJECT,
+      url: SLUGGED_PROJECT_CHAT,
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(view.projectUrl).toBe(CANONICAL_SLUGGED_PROJECT);
+    expect(view.chatUrl).toBe(CANONICAL_SLUGGED_PROJECT_CHAT);
+    expect(resolveConversationRoute(view)).toEqual({
+      action: "resume-chat",
+      targetUrl: CANONICAL_SLUGGED_PROJECT_CHAT,
+      expectedChatUrl: CANONICAL_SLUGGED_PROJECT_CHAT,
+      controlReady: true,
+    });
+  });
+
+  it("does not route a Project session to a chat saved for another Project", () => {
+    const view = resolveConversation({
+      conversationMode: "project",
+      projectUrl: PROJECT,
+      url: "https://chatgpt.com/g/g-p-other/c/wrong-project",
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(view.chatUrl).toBeNull();
+    expect(view.reuseSavedChat).toBe(false);
+    expect(resolveConversationRoute(view).action).toBe("create-project-chat");
+    expect(resolveConversationRoute(view).targetUrl).toBe(PROJECT);
+  });
+
+  it("returns an explicit browser route for each conversation state", () => {
+    const saved = resolveConversation({
+      conversationMode: "project",
+      projectUrl: PROJECT,
+      url: PROJECT_CHAT,
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(resolveConversationRoute(saved)).toEqual({
+      action: "resume-chat",
+      targetUrl: PROJECT_CHAT,
+      expectedChatUrl: PROJECT_CHAT,
+      controlReady: true,
+    });
+
+    const freshThread = resolveConversation({
+      conversationMode: "project",
+      projectUrl: PROJECT,
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(resolveConversationRoute(freshThread)).toEqual({
+      action: "create-project-chat",
+      targetUrl: PROJECT,
+      expectedChatUrl: null,
+      controlReady: false,
+    });
+    expect(resolveConversationRoute(resolveConversation(null)).action).toBe("bind-project");
   });
 });
 
@@ -81,16 +246,375 @@ describe("mergeSession", () => {
         conversationMode: "project",
         projectUrl: PROJECT,
         connectorName: "Codex with ChatGPT · Demo",
-        url: "https://chatgpt.com/c/old",
+        url: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/old",
         savedAt: "2026-01-01T00:00:00.000Z",
       },
-      { url: "https://chatgpt.com/c/new", taskId: "c2c_ab12", iteration: 1 }
+      {
+        url: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/new",
+        taskId: "c2c_ab12",
+        iteration: 1,
+      }
     );
     expect(next.projectUrl).toBe(PROJECT);
     expect(next.conversationMode).toBe("project");
-    expect(next.url).toBe("https://chatgpt.com/c/new");
+    expect(next.url).toBe("https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/new");
     expect(next.connectorName).toBe("Codex with ChatGPT · Demo");
     expect(next.taskId).toBe("c2c_ab12");
+  });
+
+  it("does not modify persisted state when correlation validation fails", () => {
+    const dir = isolateStateDir();
+    const workspaceId = "prewrite123";
+    const localSessionId = "session-prewrite";
+    try {
+      const initial = writeSession(
+        workspaceId,
+        {
+          localSessionId,
+          conversationMode: "project",
+          projectUrl: PROJECT,
+          connectorName: "Codex with ChatGPT · Demo",
+          url: PROJECT_CHAT,
+          taskId: "c2c_valid",
+          iteration: 2,
+          checkpoint: {
+            taskId: "c2c_valid",
+            iteration: 2,
+            protocolState: "EXECUTED_SENT",
+            waitingFor: "GPT_REVIEW",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        localSessionId
+      );
+      const workspaceFile = sessionFile(workspaceId);
+      const threadFile = threadSessionFile(workspaceId, localSessionId);
+      const beforeWorkspace = fs.readFileSync(workspaceFile, "utf8");
+      const beforeThread = fs.readFileSync(threadFile, "utf8");
+
+      expect(() =>
+        writeSession(workspaceId, { ...initial, connectorName: "must not persist", taskId: "bad/task" }, localSessionId)
+      ).toThrow(/task id/);
+      expect(() =>
+        writeSession(workspaceId, { ...initial, connectorName: "must not persist", iteration: -1 }, localSessionId)
+      ).toThrow(/iteration/);
+      expect(() =>
+        writeSession(
+          workspaceId,
+          {
+            ...initial,
+            connectorName: "must not persist",
+            checkpoint: { ...initial.checkpoint!, taskId: "c2c_other" },
+          },
+          localSessionId
+        )
+      ).toThrow(/checkpoint task|correlation/);
+      expect(() =>
+        writeSession(
+          workspaceId,
+          { ...initial, connectorName: "must not persist", title: "invalid\ncontrol" },
+          localSessionId
+        )
+      ).toThrow(/title/);
+
+      expect(fs.readFileSync(workspaceFile, "utf8")).toBe(beforeWorkspace);
+      expect(fs.readFileSync(threadFile, "utf8")).toBe(beforeThread);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("persists a resumable RESEARCH checkpoint", () => {
+    const dir = isolateStateDir();
+    try {
+      const saved = writeSession(
+        "research123",
+        {
+          localSessionId: "session-research",
+          conversationMode: "project",
+          projectUrl: PROJECT,
+          url: PROJECT_CHAT,
+          taskId: "c2c_research1",
+          iteration: 0,
+          checkpoint: {
+            taskId: "c2c_research1",
+            iteration: 0,
+            protocolState: "RESEARCH_SENT",
+            waitingFor: "GPT_RESEARCH",
+            mailboxRequestId: "research-request",
+            mailboxPhase: "RESEARCH",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        "session-research"
+      );
+
+      expect(saved.checkpoint).toMatchObject({
+        protocolState: "RESEARCH_SENT",
+        waitingFor: "GPT_RESEARCH",
+        mailboxPhase: "RESEARCH",
+      });
+      expect(readSession("research123", "session-research")?.checkpoint).toEqual(saved.checkpoint);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("keeps separate chat URLs and checkpoints per local session", () => {
+    const dir = isolateStateDir();
+    const workspaceBase = {
+      conversationMode: "project" as const,
+      projectUrl: PROJECT,
+      connectorName: "Codex with ChatGPT · Demo",
+      savedAt: "2026-01-01T00:00:00.000Z",
+    };
+    try {
+      writeSession(
+        "parallel123",
+        {
+          ...workspaceBase,
+          localSessionId: "session-a",
+          url: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-a",
+          taskId: "c2c_a001",
+          iteration: 1,
+          checkpoint: {
+            taskId: "c2c_a001",
+            iteration: 1,
+            protocolState: "INIT",
+            waitingFor: "GPT_PLAN",
+            mailboxRequestId: "req-a",
+            mailboxPhase: "PLAN",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        },
+        "session-a"
+      );
+      writeSession(
+        "parallel123",
+        {
+          localSessionId: "session-b",
+          url: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-b",
+          taskId: "c2c_b001",
+          iteration: 2,
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        "session-b"
+      );
+
+      const a = readSession("parallel123", "session-a");
+      const b = readSession("parallel123", "session-b");
+      expect(a?.projectUrl).toBe(PROJECT);
+      expect(b?.projectUrl).toBe(PROJECT);
+      expect(a?.url).toContain("chat-a");
+      expect(b?.url).toContain("chat-b");
+      expect(a?.checkpoint?.mailboxRequestId).toBe("req-a");
+      expect(b?.checkpoint).toBeUndefined();
+      expect(resolveConversation(a).reuseSavedChat).toBe(true);
+      expect(resolveConversation(b).reuseSavedChat).toBe(true);
+
+      const fresh = readSession("parallel123", "session-c");
+      expect(fresh?.url).toBeUndefined();
+      expect(resolveConversation(fresh).reuseSavedChat).toBe(false);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("merges each update from the latest shared workspace state", () => {
+    const dir = isolateStateDir();
+    try {
+      updateSession("atomic123456", "session-a", {
+        conversationMode: "project",
+        projectUrl: PROJECT,
+        connectorName: "Codex with ChatGPT - Initial",
+        url: `${PROJECT.slice(0, -"/project".length)}/c/chat-a`,
+      });
+      const staleSessionA = readSession("atomic123456", "session-a");
+      expect(staleSessionA?.connectorName).toBe("Codex with ChatGPT - Initial");
+
+      updateSession("atomic123456", "session-b", {
+        connectorName: "Codex with ChatGPT - Updated",
+        taskId: "c2c_b001",
+        iteration: 1,
+      });
+      updateSession("atomic123456", "session-a", {
+        taskId: "c2c_a001",
+        iteration: 2,
+      });
+
+      expect(readSession("atomic123456", "session-a")).toMatchObject({
+        connectorName: "Codex with ChatGPT - Updated",
+        taskId: "c2c_a001",
+        iteration: 2,
+      });
+      expect(readSession("atomic123456", "session-b")).toMatchObject({
+        connectorName: "Codex with ChatGPT - Updated",
+        taskId: "c2c_b001",
+        iteration: 1,
+      });
+      expect(() =>
+        updateSession("atomic123456", "session-a", {
+          localSessionId: "session-b",
+          taskId: "c2c_wrong",
+        })
+      ).toThrow(/does not match/);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("rejects thread state moved to another local session path", () => {
+    const dir = isolateStateDir();
+    try {
+      writeSession(
+        "session-swap",
+        {
+          localSessionId: "session-a",
+          conversationMode: "project",
+          projectUrl: PROJECT,
+          url: `${PROJECT.slice(0, -"/project".length)}/c/chat-a`,
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        "session-a"
+      );
+      writeSession(
+        "session-swap",
+        {
+          localSessionId: "session-b",
+          url: `${PROJECT.slice(0, -"/project".length)}/c/chat-b`,
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        "session-b"
+      );
+      const aFile = threadSessionFile("session-swap", "session-a");
+      const bFile = threadSessionFile("session-swap", "session-b");
+      const a = fs.readFileSync(aFile, "utf8");
+      fs.writeFileSync(aFile, fs.readFileSync(bFile, "utf8"));
+      fs.writeFileSync(bFile, a);
+
+      expect(() => readSession("session-swap", "session-a")).toThrow(/does not match its storage path/);
+      expect(() => readSession("session-swap", "session-b")).toThrow(/does not match its storage path/);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("rejects workspace state moved to another workspace path", () => {
+    const dir = isolateStateDir();
+    try {
+      writeSession("workspace-a", {
+        conversationMode: "project",
+        projectUrl: PROJECT,
+        savedAt: "2026-01-01T00:00:00.000Z",
+      });
+      writeSession("workspace-b", {
+        conversationMode: "long-chat",
+        savedAt: "2026-01-01T00:00:00.000Z",
+      });
+      fs.copyFileSync(sessionFile("workspace-a"), sessionFile("workspace-b"));
+
+      expect(() => readSession("workspace-b")).toThrow(/does not match its storage path/);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("rejects malformed persisted state instead of routing from partial data", () => {
+    const dir = isolateStateDir();
+    try {
+      writeSession("malformed-state", {
+        conversationMode: "project",
+        projectUrl: PROJECT,
+        savedAt: "2026-01-01T00:00:00.000Z",
+      });
+      fs.writeFileSync(sessionFile("malformed-state"), "{");
+      expect(() => readSession("malformed-state")).toThrow(/unreadable or malformed/);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("rejects every invalid persisted correlation and metadata field", () => {
+    const dir = isolateStateDir();
+    const workspaceId = "strict-state";
+    const localSessionId = "strict-session";
+    try {
+      writeSession(
+        workspaceId,
+        {
+          localSessionId,
+          conversationMode: "project",
+          projectUrl: PROJECT,
+          connectorName: "Codex with ChatGPT · Strict",
+          url: PROJECT_CHAT,
+          title: "C2C Strict",
+          taskId: "c2c_strict",
+          iteration: 3,
+          lastState: "EXECUTED",
+          checkpoint: {
+            taskId: "c2c_strict",
+            iteration: 3,
+            protocolState: "EXECUTED_SENT",
+            waitingFor: "GPT_REVIEW",
+            originalGoal: "verify persisted state",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        localSessionId
+      );
+      const workspacePath = sessionFile(workspaceId);
+      const threadPath = threadSessionFile(workspaceId, localSessionId);
+      const validWorkspace = JSON.parse(fs.readFileSync(workspacePath, "utf8")) as Record<string, unknown>;
+      const validThread = JSON.parse(fs.readFileSync(threadPath, "utf8")) as Record<string, unknown>;
+
+      const invalidThreadMutations: Array<(value: Record<string, unknown>) => void> = [
+        (value) => { value.taskId = "../other"; },
+        (value) => { value.iteration = 10_001; },
+        (value) => { value.title = "invalid\ncontrol"; },
+        (value) => { value.lastState = 42; },
+        (value) => { value.savedAt = "2026-01-01"; },
+        (value) => { value.unexpected = true; },
+        (value) => {
+          (value.checkpoint as Record<string, unknown>).originalGoal = "x".repeat(501);
+        },
+        (value) => {
+          (value.checkpoint as Record<string, unknown>).chatUrl =
+            "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/other";
+        },
+      ];
+      for (const mutate of invalidThreadMutations) {
+        const invalid = structuredClone(validThread);
+        mutate(invalid);
+        fs.writeFileSync(threadPath, JSON.stringify(invalid));
+        expect(() => readSession(workspaceId, localSessionId)).toThrow();
+      }
+      fs.writeFileSync(threadPath, JSON.stringify(validThread));
+
+      const invalidWorkspaceMutations: Array<(value: Record<string, unknown>) => void> = [
+        (value) => { value.connectorName = "invalid\u0000name"; },
+        (value) => { delete value.projectUrl; },
+        (value) => { value.unexpected = true; },
+      ];
+      for (const mutate of invalidWorkspaceMutations) {
+        const invalid = structuredClone(validWorkspace);
+        mutate(invalid);
+        fs.writeFileSync(workspacePath, JSON.stringify(invalid));
+        expect(() => readSession(workspaceId, localSessionId)).toThrow();
+      }
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
   });
 
   it("writes and clears a checkpoint without dropping the chat URL", () => {
@@ -119,6 +643,97 @@ describe("mergeSession", () => {
     expect(cleared.url).toBe("https://chatgpt.com/c/keep");
   });
 
+  it("does not carry mailbox result metadata into a new request or browser fallback", () => {
+    const previous = mergeSession(
+      {
+        url: "https://chatgpt.com/c/keep",
+        taskId: "c2c_ab12",
+        iteration: 1,
+        savedAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        checkpoint: {
+          protocolState: "PLAN_RECEIVED",
+          waitingFor: "none",
+          mailboxRequestId: "request-plan",
+          mailboxPhase: "PLAN",
+          mailboxResultId: "result-plan",
+        },
+      }
+    );
+
+    const nextRequest = mergeSession(previous, {
+      iteration: 2,
+      checkpoint: {
+        protocolState: "EXECUTED_SENT",
+        waitingFor: "GPT_REVIEW",
+        mailboxRequestId: "request-review",
+        mailboxPhase: "REVIEW",
+      },
+    });
+    expect(nextRequest.checkpoint?.mailboxRequestId).toBe("request-review");
+    expect(nextRequest.checkpoint?.mailboxPhase).toBe("REVIEW");
+    expect(nextRequest.checkpoint?.mailboxResultId).toBeUndefined();
+
+    const browserFallback = mergeSession(nextRequest, {
+      clearMailbox: true,
+      checkpoint: {
+        protocolState: "PLAN_RECEIVED",
+        waitingFor: "none",
+      },
+    });
+    expect(browserFallback.checkpoint?.mailboxRequestId).toBeUndefined();
+    expect(browserFallback.checkpoint?.mailboxPhase).toBeUndefined();
+    expect(browserFallback.checkpoint?.mailboxResultId).toBeUndefined();
+  });
+
+  it("requires complete mailbox correlation and clears it when the turn changes", () => {
+    expect(() =>
+      mergeSession(
+        {
+          conversationMode: "long-chat",
+          url: "https://chatgpt.com/c/keep",
+          taskId: "c2c_ab12",
+          iteration: 0,
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          checkpoint: {
+            protocolState: "INIT",
+            waitingFor: "GPT_PLAN",
+            mailboxRequestId: "request-only",
+          },
+        }
+      )
+    ).toThrow(/request id and phase together/);
+
+    const previous = mergeSession(
+      {
+        conversationMode: "long-chat",
+        url: "https://chatgpt.com/c/keep",
+        taskId: "c2c_ab12",
+        iteration: 0,
+        savedAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        checkpoint: {
+          protocolState: "PLAN_RECEIVED",
+          waitingFor: "none",
+          mailboxRequestId: "plan-request",
+          mailboxPhase: "PLAN",
+          mailboxResultId: "plan-result",
+        },
+      }
+    );
+    const nextIteration = mergeSession(previous, {
+      iteration: 1,
+      checkpoint: { protocolState: "EXECUTED_LOCAL", waitingFor: "none" },
+    });
+    expect(nextIteration.checkpoint?.mailboxRequestId).toBeUndefined();
+    expect(nextIteration.checkpoint?.mailboxPhase).toBeUndefined();
+    expect(nextIteration.checkpoint?.mailboxResultId).toBeUndefined();
+  });
+
   it("keeps an existing checkpoint when only the chat URL is updated", () => {
     const previous = mergeSession(
       {
@@ -139,6 +754,7 @@ describe("mergeSession", () => {
     expect(next.url).toBe("https://chatgpt.com/c/new");
     expect(next.checkpoint?.protocolState).toBe("EXECUTED_SENT");
     expect(next.checkpoint?.originalGoal).toBe("dark mode");
+    expect(next.checkpoint?.chatUrl).toBe("https://chatgpt.com/c/new");
   });
 
   it("caps checkpoint text so it cannot become a log dump", () => {
@@ -182,6 +798,19 @@ describe("mergeSession", () => {
       })
     ).toThrow(/project URL/);
   });
+
+  it("rejects an invalid chat URL or a chat from another Project", () => {
+    expect(() => mergeSession(null, { conversationMode: "long-chat", url: "https://example.com/c/nope" })).toThrow(
+      /chat URL/
+    );
+    expect(() =>
+      mergeSession(null, {
+        conversationMode: "project",
+        projectUrl: PROJECT,
+        url: "https://chatgpt.com/g/g-p-other/c/wrong-project",
+      })
+    ).toThrow(/must belong/);
+  });
 });
 
 describe("clearChatPointer", () => {
@@ -200,7 +829,7 @@ describe("clearChatPointer", () => {
     writeSession("abc123abc123", {
       conversationMode: "project",
       projectUrl: PROJECT,
-      url: "https://chatgpt.com/c/gone",
+      url: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/gone",
       connectorName: "Codex with ChatGPT · Demo",
       checkpoint: {
         taskId: "c2c_ab12",
@@ -208,6 +837,7 @@ describe("clearChatPointer", () => {
         protocolState: "EXECUTED_SENT",
         waitingFor: "GPT_REVIEW",
         originalGoal: "dark mode",
+        chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/gone",
         updatedAt: "2026-01-01T00:00:00.000Z",
       },
       savedAt: "2026-01-01T00:00:00.000Z",
@@ -217,6 +847,7 @@ describe("clearChatPointer", () => {
     expect(saved?.projectUrl).toBe(PROJECT);
     expect(saved?.url).toBeUndefined();
     expect(saved?.checkpoint?.protocolState).toBe("EXECUTED_SENT");
+    expect(saved?.checkpoint?.chatUrl).toBeUndefined();
   });
 
   it("deletes a legacy long-chat file", () => {
@@ -229,5 +860,48 @@ describe("clearChatPointer", () => {
     });
     expect(clearChatPointer("def456def456")).toEqual({ cleared: true, keptProject: false });
     expect(readSession("def456def456")).toBeNull();
+  });
+
+  it("clears only the current chat while preserving explicit long-chat workspace configuration", () => {
+    const dir = makeTmpDir("session-clear-shared-long-chat");
+    dirs.push(dir);
+    process.env.C2C_STATE_DIR = dir;
+    writeSession(
+      "shared123456",
+      {
+        localSessionId: "session-a",
+        conversationMode: "long-chat",
+        connectorName: "Codex with ChatGPT - Shared",
+        url: "https://chatgpt.com/c/chat-a",
+        savedAt: "2026-01-01T00:00:00.000Z",
+      },
+      "session-a"
+    );
+    writeSession(
+      "shared123456",
+      {
+        localSessionId: "session-b",
+        url: "https://chatgpt.com/c/chat-b",
+        savedAt: "2026-01-01T00:00:00.000Z",
+      },
+      "session-b"
+    );
+
+    expect(clearChatPointer("shared123456", "session-a")).toEqual({
+      cleared: true,
+      keptProject: false,
+    });
+    const cleared = readSession("shared123456", "session-a");
+    const other = readSession("shared123456", "session-b");
+    expect(cleared).toMatchObject({
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT - Shared",
+    });
+    expect(cleared?.url).toBeUndefined();
+    expect(other).toMatchObject({
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT - Shared",
+      url: "https://chatgpt.com/c/chat-b",
+    });
   });
 });

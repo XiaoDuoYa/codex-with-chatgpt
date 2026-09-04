@@ -181,11 +181,24 @@ describe("workspace identity", () => {
       JSON.stringify({
         name: "Remi",
         maxIterations: 12,
+        resultTransport: "mailbox",
       })
     );
     const namedWs = new Workspace(named);
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
+    expect(namedWs.projectConfig.resultTransport).toBe("mailbox");
+    expect(namedWs.resultTransport).toBe("mailbox");
     cleanup(named);
+  });
+
+  it("rejects an unknown result transport", () => {
+    const invalid = makeTmpDir("invalid-transport");
+    try {
+      write(invalid, ".c2c.json", JSON.stringify({ resultTransport: "mail-box" }));
+      expect(() => new Workspace(invalid)).toThrow(/resultTransport must be one of auto, mailbox, browser/);
+    } finally {
+      cleanup(invalid);
+    }
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import path from "node:path";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
@@ -7,7 +7,7 @@ let root: string;
 let bridge: Bridge;
 let base: string;
 
-const REDIRECT_URI = "http://127.0.0.1:19999/callback";
+const REDIRECT_URI = "https://chatgpt.com/connector/oauth/test-callback";
 
 beforeAll(async () => {
   isolateStateDir();
@@ -28,6 +28,7 @@ afterAll(async () => {
 });
 
 async function registerClient(): Promise<string> {
+  bridge.pairing.create();
   const response = await fetch(`${base}/oauth/register`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -51,7 +52,10 @@ async function authorizeWithPairing(
   authorizeUrl.searchParams.set("state", state);
   authorizeUrl.searchParams.set("code_challenge", challenge);
   authorizeUrl.searchParams.set("code_challenge_method", "S256");
-  authorizeUrl.searchParams.set("scope", "workspace.read workspace.search git.read execution.read offline_access");
+  authorizeUrl.searchParams.set(
+    "scope",
+    "workspace.read workspace.search git.read execution.read c2c.result.write offline_access"
+  );
 
   const pageResponse = await fetch(authorizeUrl, { redirect: "manual" });
   const html = await pageResponse.text();
@@ -75,7 +79,8 @@ async function authorizeWithPairing(
 async function exchangeToken(
   clientId: string,
   code: string,
-  verifier: string
+  verifier: string,
+  redirectUri = REDIRECT_URI
 ): Promise<{ status: number; body: Record<string, string> }> {
   const response = await fetch(`${base}/oauth/token`, {
     method: "POST",
@@ -85,7 +90,7 @@ async function exchangeToken(
       code,
       code_verifier: verifier,
       client_id: clientId,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri,
     }),
   });
   return { status: response.status, body: (await response.json()) as Record<string, string> };
@@ -95,9 +100,14 @@ describe("discovery metadata", () => {
   it("serves protected resource metadata", async () => {
     const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { resource: string; authorization_servers: string[] };
+    const body = (await response.json()) as {
+      resource: string;
+      authorization_servers: string[];
+      scopes_supported: string[];
+    };
     expect(body.resource).toContain("/mcp");
     expect(body.authorization_servers.length).toBe(1);
+    expect(body.scopes_supported).toContain("c2c.result.write");
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -106,6 +116,7 @@ describe("discovery metadata", () => {
     expect(body.code_challenge_methods_supported).toEqual(["S256"]);
     expect(body.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(body.registration_endpoint).toContain("/oauth/register");
+    expect(body.scopes_supported).toEqual(expect.arrayContaining(["c2c.result.write"]));
   });
 });
 
@@ -123,6 +134,20 @@ describe("authorization + token flow", () => {
     expect(token.body.access_token).toMatch(/^c2c_at_/);
     expect(token.body.refresh_token).toMatch(/^c2c_rt_/);
     expect(token.body.token_type).toBe("Bearer");
+    expect(token.body.scope).toContain("c2c.result.write");
+
+    const adminResponse = await fetch(`${base}/admin/info`, {
+      headers: { authorization: `Bearer ${bridge.adminToken}` },
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(await adminResponse.json()).toMatchObject({
+      authorization: {
+        activeClientCount: 1,
+        connectorClientCount: 1,
+        connectorActiveTokenCount: 2,
+        resultWriteAuthorized: true,
+      },
+    });
 
     // authorized MCP request
     const mcpResponse = await fetch(`${base}/mcp`, {
@@ -164,6 +189,7 @@ describe("authorization + token flow", () => {
 
     try {
       const xssBase = xssBridge.localBaseUrl();
+      xssBridge.pairing.create();
       const registration = await fetch(`${xssBase}/oauth/register`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -213,14 +239,122 @@ describe("authorization + token flow", () => {
     expect(response.headers.get("cache-control")).toBe("no-store, max-age=0");
   });
 
-  it("rejects PKCE verifier mismatch", async () => {
+  it("shows the bounded result-write consent label when requested", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "c2c.result.write");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Report bounded progress and submit control results to local C2C state");
+  });
+
+  it("rejects unknown scopes instead of expanding them to all permissions", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "unknown.scope");
+
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location");
+    expect(location).toContain("error=invalid_scope");
+    expect(location).not.toContain("c2c.result.write");
+  });
+
+  it("rejects duplicate scalar parameters and a foreign resource audience", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const duplicateUrl = new URL(`${base}/oauth/authorize`);
+    duplicateUrl.searchParams.append("client_id", clientId);
+    duplicateUrl.searchParams.append("client_id", clientId);
+    duplicateUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    duplicateUrl.searchParams.set("response_type", "code");
+    duplicateUrl.searchParams.set("code_challenge", challenge);
+    duplicateUrl.searchParams.set("code_challenge_method", "S256");
+    expect((await fetch(duplicateUrl, { redirect: "manual" })).status).toBe(400);
+
+    const resourceUrl = new URL(`${base}/oauth/authorize`);
+    resourceUrl.searchParams.set("client_id", clientId);
+    resourceUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    resourceUrl.searchParams.set("response_type", "code");
+    resourceUrl.searchParams.set("code_challenge", challenge);
+    resourceUrl.searchParams.set("code_challenge_method", "S256");
+    resourceUrl.searchParams.set("resource", "https://other.example.com/mcp");
+    const resourceResponse = await fetch(resourceUrl, { redirect: "manual" });
+    expect(resourceResponse.status).toBe(302);
+    expect(resourceResponse.headers.get("location")).toContain("error=invalid_target");
+  });
+
+  it("requires redirect_uri during authorization-code exchange", async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
     const pairing = bridge.pairing.create();
     const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
-    const token = await exchangeToken(clientId, code!, "wrong-verifier-wrong-verifier-wrong");
-    expect(token.status).toBe(400);
-    expect(token.body.error).toBe("invalid_grant");
+    const response = await fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code!,
+        code_verifier: verifier,
+        client_id: clientId,
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_request" });
+  });
+
+  it("does not consume an authorization code when PKCE verification fails", async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
+    const pairing = bridge.pairing.create();
+    const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
+    const rejected = await exchangeToken(clientId, code!, "wrong-verifier-wrong-verifier-wrong");
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toBe("invalid_grant");
+
+    const accepted = await exchangeToken(clientId, code!, verifier);
+    expect(accepted.status).toBe(200);
+  });
+
+  it("does not consume an authorization code when redirect_uri verification fails", async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
+    const pairing = bridge.pairing.create();
+    const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
+    const rejected = await exchangeToken(clientId, code!, verifier, "http://127.0.0.1:19999/other");
+    expect(rejected.status).toBe(400);
+    expect(rejected.body).toMatchObject({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
+
+    const accepted = await exchangeToken(clientId, code!, verifier);
+    expect(accepted.status).toBe(200);
+  });
+
+  it("does not consume an authorization code when client verification fails", async () => {
+    const clientId = await registerClient();
+    const otherClientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
+    const pairing = bridge.pairing.create();
+    const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
+    const rejected = await exchangeToken(otherClientId, code!, verifier);
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toBe("invalid_grant");
+
+    const accepted = await exchangeToken(clientId, code!, verifier);
+    expect(accepted.status).toBe(200);
   });
 
   it("authorization codes are one-time", async () => {
@@ -245,13 +379,43 @@ describe("authorization + token flow", () => {
     expect(response.headers.get("location")).toContain("error=invalid_request");
   });
 
-  it("rejects registration with non-https redirect uris", async () => {
-    const response = await fetch(`${base}/oauth/register`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ redirect_uris: ["http://evil.example.com/cb"] }),
+  it("rejects registration with unsafe redirect uris", async () => {
+    for (const redirectUri of [
+      "http://evil.example.com/cb",
+      "https://user:password@example.com/cb",
+      "https://example.com/cb#fragment",
+    ]) {
+      const response = await fetch(`${base}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ redirect_uris: [redirectUri] }),
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+
+  it("rejects valid anonymous registration outside a local pairing window", async () => {
+    const isolatedRoot = makeTmpDir("oauth-no-pairing-ws");
+    const isolatedAuthRoot = makeTmpDir("oauth-no-pairing-auth");
+    const isolatedBridge = await startBridge({
+      workspaceRoot: isolatedRoot,
+      port: 0,
+      persistRuntime: false,
+      authStoreFile: path.join(isolatedAuthRoot, "store.json"),
     });
-    expect(response.status).toBe(400);
+    try {
+      const response = await fetch(`${isolatedBridge.localBaseUrl()}/oauth/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_name: "Untrusted", redirect_uris: [REDIRECT_URI] }),
+      });
+      expect(response.status).toBe(429);
+      expect(await response.json()).toMatchObject({ error: "registration_unavailable" });
+    } finally {
+      await isolatedBridge.close();
+      cleanup(isolatedRoot);
+      cleanup(isolatedAuthRoot);
+    }
   });
 });
 
@@ -279,23 +443,43 @@ describe("token enforcement on /mcp", () => {
   });
 
   it("401 with an expired token", async () => {
-    const expired = bridge.authStore.issueTokens({
-      clientId: "test",
-      scopes: ["workspace.read"],
-      accessTtlMs: -1000,
-    });
-    const response = await mcpCall(expired.accessToken);
-    expect(response.status).toBe(401);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const expired = bridge.authStore.issueTokens({
+        clientId: "test",
+        scopes: ["workspace.read"],
+        accessTtlMs: 1_000,
+      });
+      clock.mockReturnValue(now + 1_001);
+      const response = await mcpCall(expired.accessToken);
+      expect(response.status).toBe(401);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
-  it("403 with a token bound to another workspace", async () => {
-    const foreign = bridge.authStore.issueTokens({
-      clientId: "test",
-      scopes: ["workspace.read"],
-      workspaceId: "deadbeef0000",
+  it("rejects a token issued by another workspace bridge", async () => {
+    const foreignRoot = makeTmpDir("oauth-foreign-ws");
+    const foreignAuthRoot = makeTmpDir("oauth-foreign-auth");
+    const foreignBridge = await startBridge({
+      workspaceRoot: foreignRoot,
+      port: 0,
+      persistRuntime: false,
+      authStoreFile: path.join(foreignAuthRoot, "store.json"),
     });
-    const response = await mcpCall(foreign.accessToken);
-    expect(response.status).toBe(403);
+    try {
+      const foreign = foreignBridge.authStore.issueTokens({
+        clientId: "test",
+        scopes: ["workspace.read"],
+      });
+      const response = await mcpCall(foreign.accessToken);
+      expect(response.status).toBe(401);
+    } finally {
+      await foreignBridge.close();
+      cleanup(foreignRoot);
+      cleanup(foreignAuthRoot);
+    }
   });
 
   it("401 after revocation", async () => {
@@ -326,6 +510,7 @@ describe("refresh token rotation", () => {
     const rotated = await refresh(initial.body.refresh_token);
     expect(rotated.status).toBe(200);
     expect(rotated.body.refresh_token).not.toBe(initial.body.refresh_token);
+    expect(rotated.body.scope).toContain("c2c.result.write");
 
     const replayed = await refresh(initial.body.refresh_token);
     expect(replayed.status).toBe(400);

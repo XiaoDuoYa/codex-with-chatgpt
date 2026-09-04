@@ -7,9 +7,16 @@ import { findBinary } from "../src/tunnel/detect.js";
 import {
   CloudflaredQuickTunnel,
   parseQuickTunnelUrl,
+  quickTunnelHealthCheckTimeoutMs,
+  quickTunnelStartTimeoutMs,
   type CloudflaredQuickTunnelOptions,
 } from "../src/tunnel/cloudflared.js";
-import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
+import {
+  CloudflaredNamedTunnel,
+  namedTunnelStartRequestTimeoutMs,
+  namedTunnelStartTimeoutMs,
+  normalizeNamedTunnelHostname,
+} from "../src/tunnel/cloudflared-named.js";
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
   chooseQuickTunnel,
@@ -40,13 +47,14 @@ class FakeCloudflaredProcess extends EventEmitter {
   });
 }
 
-function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
+function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000, expectedWorkspaceId?: string) {
   const child = new FakeCloudflaredProcess();
   const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
   const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
     spawnImpl,
     fetchImpl,
     startTimeoutMs,
+    expectedWorkspaceId,
   });
   return { child, spawnImpl, tunnel };
 }
@@ -55,8 +63,8 @@ function announceUrl(child: FakeCloudflaredProcess): void {
   child.stderr.write(`INF ${QUICK_URL}\n`);
 }
 
-function healthResponse(): Response {
-  return new Response(JSON.stringify({ service: "c2c-bridge", status: "ok" }), { status: 200 });
+function healthResponse(workspaceId?: string): Response {
+  return new Response(JSON.stringify({ service: "c2c-bridge", status: "ok", workspaceId }), { status: 200 });
 }
 
 afterEach(() => {
@@ -94,6 +102,28 @@ describe("parseQuickTunnelUrl", () => {
 
   it("rejects Cloudflare's API host", () => {
     expect(parseQuickTunnelUrl("INF https://api.trycloudflare.com")).toBeNull();
+  });
+});
+
+describe("quickTunnelStartTimeoutMs", () => {
+  it("accepts a bounded C2C-specific timeout", () => {
+    expect(quickTunnelStartTimeoutMs("85000")).toBe(85_000);
+  });
+
+  it("falls back for invalid or excessive values", () => {
+    expect(quickTunnelStartTimeoutMs("invalid")).toBe(45_000);
+    expect(quickTunnelStartTimeoutMs("120000")).toBe(45_000);
+  });
+});
+
+describe("quickTunnelHealthCheckTimeoutMs", () => {
+  it("accepts a bounded C2C-specific timeout", () => {
+    expect(quickTunnelHealthCheckTimeoutMs("15000")).toBe(15_000);
+  });
+
+  it("falls back for invalid or excessive values", () => {
+    expect(quickTunnelHealthCheckTimeoutMs("invalid")).toBe(5_000);
+    expect(quickTunnelHealthCheckTimeoutMs("60000")).toBe(5_000);
   });
 });
 
@@ -144,6 +174,15 @@ describe("CloudflaredQuickTunnel", () => {
     expect(tunnel.status()).toMatchObject({ running: false, url: null });
   });
 
+  it("does not accept a healthy bridge for another workspace", async () => {
+    const { child, tunnel } = setupTunnel(async () => healthResponse("workspace-b"), 20, "workspace-a");
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).rejects.toThrow(/timed out/i);
+    expect(tunnel.status()).toMatchObject({ running: false, url: null });
+  });
+
   it("does not spawn twice or resolve a stopped pending start", async () => {
     const { child, spawnImpl, tunnel } = setupTunnel(() => new Promise<Response>(() => {}));
     const starting = tunnel.start(3333);
@@ -156,6 +195,32 @@ describe("CloudflaredQuickTunnel", () => {
     await expect(concurrent).rejects.toThrow(/stopped/i);
     expect(spawnImpl).toHaveBeenCalledTimes(1);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("starts a fresh quick tunnel when restart interrupts an in-flight start", async () => {
+    const firstChild = new FakeCloudflaredProcess();
+    const secondChild = new FakeCloudflaredProcess();
+    const spawnImpl = vi
+      .fn()
+      .mockReturnValueOnce(firstChild as unknown as ChildProcess)
+      .mockReturnValueOnce(secondChild as unknown as ChildProcess);
+    const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
+      spawnImpl,
+      fetchImpl: async () => healthResponse(),
+      startTimeoutMs: 1_000,
+    });
+
+    const first = tunnel.start(3333);
+    const firstRejected = expect(first).rejects.toThrow(/stopped/i);
+    const restarted = tunnel.restart(4444);
+    await firstRejected;
+    await new Promise((resolve) => setImmediate(resolve));
+    announceUrl(secondChild);
+
+    await expect(restarted).resolves.toBe(QUICK_URL);
+    expect(spawnImpl).toHaveBeenCalledTimes(2);
+    expect(firstChild.kill).toHaveBeenCalledWith("SIGTERM");
+    await tunnel.stop();
   });
 
   it("does not resolve if cloudflared exits while the health probe is in flight", async () => {
@@ -211,6 +276,110 @@ describe("normalizeNamedTunnelHostname", () => {
   it("rejects URLs and invalid hostnames", () => {
     expect(() => normalizeNamedTunnelHostname("https://dev.getremi.xyz")).toThrow(/invalid/i);
     expect(() => normalizeNamedTunnelHostname("localhost")).toThrow(/invalid/i);
+  });
+});
+
+describe("namedTunnelStartTimeoutMs", () => {
+  it("accepts a bounded C2C-specific timeout", () => {
+    expect(namedTunnelStartTimeoutMs("90000")).toBe(90_000);
+  });
+
+  it("falls back for invalid or excessive values", () => {
+    expect(namedTunnelStartTimeoutMs("invalid")).toBe(45_000);
+    expect(namedTunnelStartTimeoutMs("120001")).toBe(45_000);
+  });
+
+  it("keeps the admin request alive beyond the tunnel startup timeout", () => {
+    expect(namedTunnelStartRequestTimeoutMs("90000")).toBe(95_000);
+    expect(namedTunnelStartRequestTimeoutMs("120000")).toBe(125_000);
+  });
+});
+
+describe("CloudflaredNamedTunnel", () => {
+  it("reuses an in-flight named tunnel start", async () => {
+    const child = new FakeCloudflaredProcess();
+    const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
+    const fetchImpl = vi.fn(async () => healthResponse());
+    const tunnel = new CloudflaredNamedTunnel({
+      tunnelName: "c2c-test",
+      hostname: "c2c.example.com",
+      binaryOverride: "cloudflared",
+      startTimeoutMs: 1_000,
+      spawnImpl,
+      fetchImpl,
+    });
+
+    const first = tunnel.start(4444);
+    const second = tunnel.start(4444);
+    expect(spawnImpl).toHaveBeenCalledTimes(1);
+    child.stderr.write("ERR edge discovery failed\n");
+    child.stderr.write("INF Registered tunnel connection\n");
+
+    await expect(first).resolves.toBe("https://c2c.example.com");
+    await expect(second).resolves.toBe("https://c2c.example.com");
+    expect(fetchImpl).toHaveBeenCalledWith("https://c2c.example.com/health", {
+      redirect: "error",
+      signal: expect.any(AbortSignal),
+    });
+    expect(tunnel.status()).toMatchObject({ running: true, url: "https://c2c.example.com" });
+    expect(tunnel.status().detail).toBeUndefined();
+    await tunnel.stop();
+  });
+
+  it("waits through a public 503 before marking a named tunnel ready", async () => {
+    const child = new FakeCloudflaredProcess();
+    const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
+    let calls = 0;
+    const tunnel = new CloudflaredNamedTunnel({
+      tunnelName: "c2c-test",
+      hostname: "c2c.example.com",
+      binaryOverride: "cloudflared",
+      startTimeoutMs: 1_000,
+      spawnImpl,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Response(JSON.stringify({ status: "starting" }), { status: 503 })
+          : healthResponse();
+      },
+    });
+
+    const starting = tunnel.start(4444);
+    child.stderr.write("INF Registered tunnel connection\n");
+
+    await expect(starting).resolves.toBe("https://c2c.example.com");
+    expect(calls).toBe(2);
+    expect(tunnel.status()).toMatchObject({ running: true, url: "https://c2c.example.com" });
+    await tunnel.stop();
+  });
+
+  it("starts a fresh named tunnel when restart interrupts an in-flight start", async () => {
+    const firstChild = new FakeCloudflaredProcess();
+    const secondChild = new FakeCloudflaredProcess();
+    const spawnImpl = vi
+      .fn()
+      .mockReturnValueOnce(firstChild as unknown as ChildProcess)
+      .mockReturnValueOnce(secondChild as unknown as ChildProcess);
+    const tunnel = new CloudflaredNamedTunnel({
+      tunnelName: "c2c-test",
+      hostname: "c2c.example.com",
+      binaryOverride: "cloudflared",
+      startTimeoutMs: 1_000,
+      spawnImpl,
+      fetchImpl: async () => healthResponse(),
+    });
+
+    const first = tunnel.start(3333);
+    const firstRejected = expect(first).rejects.toThrow(/stopped/i);
+    const restarted = tunnel.restart(4444);
+    await firstRejected;
+    await new Promise((resolve) => setImmediate(resolve));
+    secondChild.stderr.write("INF Registered tunnel connection\n");
+
+    await expect(restarted).resolves.toBe("https://c2c.example.com");
+    expect(spawnImpl).toHaveBeenCalledTimes(2);
+    expect(firstChild.kill).toHaveBeenCalledWith("SIGTERM");
+    await tunnel.stop();
   });
 });
 

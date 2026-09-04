@@ -11,6 +11,7 @@ export interface PairingSession {
   createdAt: number;
   expiresAt: number;
   attemptsLeft: number;
+  registrationAttempts: number;
   used: boolean;
 }
 
@@ -93,6 +94,7 @@ export class PairingManager {
       createdAt: Date.now(),
       expiresAt: Date.now() + this.ttlMs,
       attemptsLeft: this.maxAttempts,
+      registrationAttempts: 0,
       used: false,
     };
     this.sessions.set(session.id, session);
@@ -152,6 +154,21 @@ export class PairingManager {
     const now = Date.now();
     for (const session of this.sessions.values()) {
       if (!session.used && now <= session.expiresAt) return true;
+    }
+    return false;
+  }
+
+  /** Bound anonymous client registration to a locally initiated pairing window. */
+  claimClientRegistration(maxAttempts = 10): boolean {
+    const now = Date.now();
+    for (const session of this.sessions.values()) {
+      if (session.used || now > session.expiresAt) {
+        this.sessions.delete(session.id);
+        continue;
+      }
+      if (session.registrationAttempts >= maxAttempts) return false;
+      session.registrationAttempts++;
+      return true;
     }
     return false;
   }

@@ -12,11 +12,35 @@ description: >
 
 ChatGPT thinks. Codex works.
 
-You (Codex) own execution: editing, shell, git, tests, recovery.
-ChatGPT owns high-level reasoning: understanding, planning, review, debug strategy.
-The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, so
-control messages between you and ChatGPT stay tiny (< 1 KB) — ChatGPT pulls
-whatever data it needs by itself.
+You (Codex) own the local harness: routing, correlation, editing, shell, git,
+tests, recovery, and final verification. Keep local reasoning focused on safely
+applying and checking the returned work.
+ChatGPT owns codebase discovery through MCP, architecture/debug analysis,
+planning, review, and web research that requires browsing or waiting.
+The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, plus
+bounded `report_control_progress` and `submit_control_result` tools for returning
+progress and RESEARCH/PLAN/REVIEW/DONE/BLOCKED payloads to local state. Control messages between you and ChatGPT stay tiny
+(< 1 KB) — ChatGPT pulls whatever data it needs by itself and Codex reads
+substantive results locally when a result request is active.
+
+**Work allocation**
+
+- Before PLAN, Codex performs only connection, session, and routing checks. Do
+  not duplicate repository exploration that ChatGPT can perform through MCP.
+- ChatGPT searches/reads the code it needs, performs any necessary current-web
+  research itself, waits for that research to finish, and returns concrete
+  structured guidance. Current-web research is a separate `RESEARCH` request
+  with conclusions, source URLs, publication dates, key evidence, and open
+  questions; do not bury it inside a PLAN or REVIEW payload.
+- Codex reads only the local context needed to apply those actions, edits the
+  workspace, runs commands/tests, and independently verifies the result. If the
+  advice is insufficient, ask ChatGPT to refine it in the same correlated turn
+  or next PLAN/REVIEW turn; do not silently replace the requested collaboration
+  with a large local analysis pass.
+- This Skill cannot select or change the active Codex model. Model choice belongs
+  to the user or host runtime. Never claim that C2C switched to a cheaper model.
+  A low-cost local model can apply structured guidance when it is capable of the
+  required edits, but execution correctness still has to pass local verification.
 
 **Golden rules**
 
@@ -61,14 +85,22 @@ whatever data it needs by itself.
      keep ChatGPT in the built-in browser, every time they ask.
 6. Conversation reuse depends on `c2c session --json` → `conversation.mode`
    (see Conversation management). Do not invent a second mode.
-   - **long-chat** (legacy session file, or the user opted out): ONE ChatGPT
-     conversation per workspace. Never silently start a new chat.
+   - The first session read returns `sessionIdentity.id`. Capture it as
+     `<localSessionId>` and pass `--local-session <localSessionId>` to every
+     later `c2c session` and `c2c control` command in this Codex task. Do not
+     re-resolve identity midway through a workflow.
+   - It also returns `route`. Before every `[C2C]` RESEARCH, INIT, EXECUTED, or HANDOFF,
+     enforce the routing gate in **Conversation management**. Never send a
+     control message in whichever ChatGPT chat merely happens to be visible.
+   - **long-chat** (no Project collection): ONE ChatGPT conversation per local
+     Codex session. Reuse only that session's saved URL; a different local
+     session starts and owns a different chat.
    - **project** (new workspaces, or an existing workspace that opted in):
-     ONE ChatGPT Project (collection) per workspace. Same Codex conversation
-     reuses the ChatGPT chat URL saved in THIS thread. A new Codex
-     conversation opens a new chat from the Project collection page — never
+     ONE ChatGPT Project (collection) per workspace. Same local Codex session
+     reuses the ChatGPT chat URL saved for THIS session. A new local Codex
+     session opens a new chat from the Project collection page — never
      `goto` `https://chatgpt.com/` to create it, and never reuse another
-     Codex conversation's chat URL just because `session.url` exists.
+     session's chat URL just because `session.url` exists.
    Each workspace also has exactly ONE ChatGPT connector. Do not create a
    second connector for the same workspace. Other workspaces may have their
    own connectors — never edit those.
@@ -83,6 +115,8 @@ whatever data it needs by itself.
    `chatgptRepair.needed` is true. Not green:
    - `report.bridge.ok` is not true
    - `report.mcp.ok` is not true (unauthenticated local `/mcp` must be 401)
+   - `report.oauth.ok` is not true (an existing connector may need the new
+     bounded result-write authorization)
    - sandbox / state-dir write failed (EPERM)
    - this workspace used to have a public URL and the tunnel is down
    - `chatgptRepair.needed` is true (fix the connector first, then doctor again)
@@ -93,6 +127,10 @@ whatever data it needs by itself.
      `chatgptRepair`. Wait and run doctor again.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
+10. **Let ChatGPT finish research.** A longer wait while ChatGPT is searching
+    the web or reading the connector is normal. Continue the same mailbox wait
+    and generation checks; never resend the question, switch chats, or perform
+    the same broad research locally merely because it takes longer.
 
 ## In-app browser (ChatGPT)
 
@@ -104,9 +142,16 @@ that close the tab, hide the window, or stall on the settings page.
    `documentation()` if it is already bound. Never `getDefault()`, `getForUrl()`,
    or Computer Use.
 
-2. **One tab.** Create the ChatGPT tab once (`tabs.new()`). After that, only
-   `tab.goto(...)` to switch URLs. If the tab still exists, claim it — never
-   open a second ChatGPT tab. Do not `goto` the URL you are already on.
+2. **One tab per local Codex session.** If this session already has a saved
+   chat, claim only a tab whose normalized URL equals its `route.expectedChatUrl`.
+   For this comparison: require HTTPS `chatgpt.com`, drop query/hash and a
+   trailing slash, and canonicalize any Project segment
+   `g-p-<32 hex>-<display-slug>` to `g-p-<32 hex>`. ChatGPT may add or remove
+   that display slug while keeping the same Project and conversation.
+   Never claim or navigate a tab showing another active local session's chat.
+   If this local session has no tab yet, create a fresh one even when another
+   C2C tab is open. After that, reuse only this session's tab and use
+   `tab.goto(...)` to switch its URL. Do not `goto` the URL it is already on.
 
 3. **Foreground + keep (standby).** Right after opening or claiming the tab:
    - `await (await iab.capabilities.get("visibility")).set(true)` — first-time
@@ -124,7 +169,7 @@ that close the tab, hide the window, or stall on the settings page.
    - 加插件: `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
    - 新对话 (long-chat only, and only if no saved chat): `https://chatgpt.com/`
    - Saved C2C chat: `conversation.chatUrl` / `session.url` (long-chat, or
-     the chat already bound in THIS Codex conversation)
+     the chat already bound to THIS local Codex session)
    - Saved Project collection: `conversation.projectUrl`
      (`https://chatgpt.com/g/g-p-…/project`)
    Never click Reconnect / Refresh on an existing connector. The old address is
@@ -133,7 +178,7 @@ that close the tab, hide the window, or stall on the settings page.
    via the 加插件 URL (same name, new Server URL). Do not put that public
    address into Project instructions — write the connector **name** only.
 
-5. **Do not wait for 8 tools** on the settings page. "Connected" / authorize
+5. **Do not wait for a fixed tool count** on the settings page. "Connected" / authorize
    success / pairing accepted is enough. Confirm tools in the conversation with
    `workspace_info`.
 
@@ -151,17 +196,44 @@ that close the tab, hide the window, or stall on the settings page.
    the session URL. If validation fails, keep the old saved URL. Do not open a
    throwaway verify chat and later another C2C chat.
 
-8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
-   send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
-   the tab foreground, and stay in this same task. Do not `waitFor` 5 minutes
-   and do not screenshot-poll. Every 20–30 seconds, one cheap DOM check:
-   - still generating → wait again (do not type, do not resend);
-   - `STATE: PLAN` / `DONE` / `BLOCKED` / the verify workspace name → read it
-     and continue the existing protocol;
-   - visible error → repair; do not start a new chat.
-   A browser/js timeout is not failure. Claim the same tab, read the page, keep
-   standby. If ChatGPT is still thinking, keep polling. Never open a second
-   tab and never resend INIT/EXECUTED just because a wait timed out.
+8. **Wait on the selected result transport.** After every send, `markHandoff`,
+   keep the tab foreground, and stay in this same task.
+   One `RESULT_REQUEST_ID` represents exactly one question and one answer. Never
+   open or send the next control question until the current request is received
+   and acknowledged, cancelled, or expired. Never read a generic "latest"
+   mailbox file or the last visible assistant message.
+   - Boot and `workspace_info` verification always use one cheap DOM check every
+     20–30 seconds. They do not have a mailbox request, so inspect only the
+     assistant answer paired with that exact verification prompt in the
+     candidate chat; never use the latest answer from another turn.
+   - For RESEARCH / INIT / EXECUTED with `resultTransport=mailbox`, wait with
+     `c2c control wait -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration <n> --phase <RESEARCH|PLAN|REVIEW> --json`.
+     Read the substantive
+     result from that JSON only; do not parse the visible ChatGPT reply.
+   - For RESEARCH / INIT / EXECUTED with `resultTransport=auto`, use the same local wait.
+     A wait timeout alone is not enough if ChatGPT is still generating: wait
+     locally again. Fall back only when the same page has a completed
+     substantive reply but no mailbox result, the request expired, or ChatGPT
+     visibly reports that `submit_control_result` failed. Before parsing a
+     completed visible reply, find the exact outbound user message containing
+     this `RESULT_REQUEST_ID` and inspect only its associated assistant answer.
+     Accept it only when it echoes the same `RESULT_REQUEST_ID`,
+     `LOCAL_SESSION_ID`, `TASK_ID`, `ITERATION`, and `RESULT_PHASE`; otherwise
+     treat it as unrelated. Cancel a
+     still-pending request before parsing with
+     `c2c control cancel -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration <n> --phase <RESEARCH|PLAN|REVIEW> --json`.
+     If
+     cancellation races with receipt, use the local result instead. After
+     accepting a browser fallback, pass `--clear-mailbox` on the checkpoint
+     update.
+   - With `resultTransport=browser`, use the DOM loop: every 20–30
+     seconds check whether ChatGPT is still generating, completed, or shows an
+     error. Select only the assistant answer associated with the exact outbound
+     `[C2C]` message and require matching LOCAL_SESSION_ID / TASK_ID / ITERATION /
+     expected state;
+     do not use whichever answer appears last. Do not screenshot-poll.
+   A browser/js timeout is not failure. A local mailbox timeout does not permit
+   resending RESEARCH/INIT/EXECUTED. Never open a second tab or duplicate a request.
 
 ## Locations
 
@@ -173,6 +245,21 @@ that close the tab, hide the window, or stall on the settings page.
 - If the checkout has no `node_modules` or no `dist/`, first run
   `corepack pnpm install && corepack pnpm build` inside it.
 - Always pass `-w <workspace root>` (the project the user is working on, NOT the c2c repo).
+
+## Autostart
+
+When the user asks for login/boot autostart, use C2C's managed autostart
+entrypoint:
+
+1. `c2c autostart enable -w <workspace> --json`
+2. Verify with `c2c autostart status -w <workspace> --json`.
+3. Run `c2c doctor -w <workspace> --json` and respect the Doctor gate.
+
+The OS autostart service must only wake C2C. Never create or preserve a
+separate script/service whose ProgramArguments run `cloudflared tunnel run`
+or kill a cloudflared process directly. C2C owns bridge startup, named tunnel
+startup, tunnel status, and repair. To remove this behavior, use
+`c2c autostart disable -w <workspace> --json`.
 
 ## Daily update check
 
@@ -276,8 +363,10 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
       - Authentication: OAuth
      Fill the known form in one script when you can. Then Connect / Authorize
      and type the pairing code. As soon as it shows Connected / authorized /
-     pairing accepted, continue — do NOT wait for 8 tools on this page.
+     pairing accepted, continue — do NOT wait for a fixed tool count on this page.
 6. Same tab: open the first C2C chat per **Conversation management**
+   (first run `c2c session -w <workspace> --json` and capture
+   `sessionIdentity.id` as `<localSessionId>`).
    (Project collection for a new workspace; `https://chatgpt.com/` only
    in long-chat). Confirm Chat mode per **In-app browser** §7 (if it is Work,
    open a new Chat conversation instead). Send the boot prompt from
@@ -346,26 +435,69 @@ next action:
 
 ## Conversation management
 
-`c2c session -w <ws> --json` → `{ session, conversation }`.
-`conversation.mode` is the only switch. Missing / legacy files with a chat URL
-and no Project stay **long-chat**. Do not ask those users to migrate. If they
-later say they want a Project, run **Bind Project**. A brand-new workspace
-(no session file) is **project**.
+`c2c session -w <ws> --json` →
+`{ sessionIdentity, session, conversation, route, resultTransport }`.
+Capture `sessionIdentity.id` once as `<localSessionId>` and use it explicitly
+for the rest of the workflow. `codex-thread` / `codex-session` identities are
+durable. A runtime or process fallback is valid only while its owning runtime
+continues, so explicit propagation is mandatory.
+
+`conversation.mode` is the only switch. A brand-new workspace (no session
+state) is **project**. Unsupported or corrupt session state must be repaired or
+rebound explicitly; never infer a chat from stale state. If an existing
+workspace is explicitly set to long-chat and the user later wants a Project,
+run **Bind Project**.
+
+`resultTransport` is independent of conversation mode:
+
+- `mailbox`: structured local result only; a missing result is an error.
+- `auto` (default): local result first, browser parsing only after explicit
+  mailbox timeout/expiry/tool failure.
+- `browser`: legacy visible-reply parsing; do not open mailbox requests.
 
 Never match a Project or a chat by display name. Never upload the repo to
 Project sources. Never click 分享 / Share. Do not rename ChatGPT chats.
 
-### long-chat (do not rewrite this path)
+### Routing gate (before every control message)
 
-ONE ChatGPT conversation per workspace. Same as before.
+Use `route`, not the currently visible page, as the source of truth:
+
+- `resume-chat`: `route.expectedChatUrl` is the only chat for this local Codex
+  session. Normalize the current tab URL with **In-app browser** §2. If it
+  differs, `goto` `route.targetUrl`, wait for the same normalized conversation
+  URL, and only then send.
+  Perform the final normalized-URL assertion and composer submission in the
+  same browser script; abort without sending if the URL changed.
+- `create-project-chat`: `goto route.targetUrl` (the saved collection), create
+  a chat with the collection composer. As soon as the first boot send creates a
+  `/c/` URL, capture it as `candidateChatUrl`; route every workspace verification
+  message back to that candidate if the page changes. After `workspace_info`
+  succeeds, save the candidate URL for `<localSessionId>`, then re-read
+  `c2c session -w <ws> --local-session <localSessionId> --json`. Do not
+  send `[C2C]` until the new route is `resume-chat` and `controlReady=true`.
+- `create-long-chat`: `goto route.targetUrl`, create/boot/verify the chat, save
+  its `candidateChatUrl` for `<localSessionId>` only after verification, then
+  re-read the session and require the same `resume-chat` gate. Before it is
+  saved, never send a verification message from a different URL.
+- `bind-project`: run **Bind Project**. No control message is allowed yet.
+
+Re-check this gate after a login redirect, a settings/reconnect operation, a
+HANDOFF, or whenever the user changes the visible ChatGPT page. During a wait,
+navigate back to `route.expectedChatUrl` before inspecting browser state. A
+mailbox result may be consumed locally without changing the visible page.
+
+### long-chat
+
+No Project collection. Each local Codex session still owns exactly one ChatGPT
+conversation and never borrows another local session's saved URL.
 
 - **Find it**: if `conversation.reuseSavedChat` and `conversation.chatUrl`,
   `goto` that URL (foreground + markHandoff) and continue there.
 - **Save it**: after boot + workspace_info, and the reply names this workspace,
-  `c2c session set -w <ws> --mode long-chat --url <url> --title "C2C <workspace name>"`.
+  `c2c session set -w <ws> --local-session <localSessionId> --mode long-chat --url <url> --title "C2C <workspace name>"`.
   If the name does not match, do not overwrite a previously saved URL.
 - **Update it**: after each EXECUTED/DONE,
-  `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>`
+  `c2c session set -w <ws> --local-session <localSessionId> --task <id> --iteration <n> --state <STATE>`
   plus checkpoint flags from the coding workflow (`--protocol-state`,
   `--waiting-for`, `--goal`, `--next-step`, `--known-issues`, or
   `--clear-checkpoint` on DONE). Do not put logs or diffs in those fields.
@@ -373,10 +505,13 @@ ONE ChatGPT conversation per workspace. Same as before.
   chat visibly lags, or (c) this conversation is Work. Then:
   1. Same iab tab: `goto` `https://chatgpt.com/`, confirm Chat mode
      (**In-app browser** §7), then send the boot prompt.
-  2. Send a HANDOFF (`docs/protocol.md`) — goal, progress, state, issues,
-     next step. Never paste files.
-  3. workspace_info check; only then `c2c session set --url`. On failure,
-     leave the old saved URL unchanged.
+  2. Run the workspace_info check; only then
+     `c2c session set --local-session <localSessionId> --url <url>` and re-read
+     the route. On failure, leave the old saved URL unchanged.
+  3. After the route is `resume-chat`, send a HANDOFF (`docs/protocol.md`) —
+     goal, progress, state, issues, next step. If the checkpoint is waiting on
+     a mailbox result, include its `RESULT_REQUEST_ID` and `RESULT_PHASE`.
+     Never paste files.
 - Saved chat 404s: treat as a switch. Reconstruct HANDOFF from
   `session.checkpoint` (goal, progress, issues, next step). If there is no
   checkpoint, use `task` / `iteration` / `lastState` and `execution_summary`
@@ -386,38 +521,43 @@ ONE ChatGPT conversation per workspace. Same as before.
 
 One ChatGPT Project per workspace. Mapping:
 
-1. Same Codex conversation (this thread still has context) → same ChatGPT
+1. Same local Codex session → same ChatGPT
    chat URL. `goto` that URL directly. Do not open the collection first.
-2. Same workspace, a **new** Codex conversation → new ChatGPT chat from the
-   collection page (`conversation.projectUrl`). Ignore `session.url` unless
-   you already saved it earlier in THIS Codex thread.
+2. Same workspace, a **new** local Codex session → new ChatGPT chat from the
+   collection page (`conversation.projectUrl`). Its `session.url` starts empty;
+   never borrow another local session's chat URL.
 3. Different workspace → different Project and different connector.
 
-**Open a chat in this Codex thread**
+**Open a chat for this local Codex session**
 
-- If you already saved a ChatGPT chat URL earlier in THIS Codex conversation:
+- If `conversation.reuseSavedChat` and `conversation.chatUrl` are set:
   `goto` that URL. Continue. No new chat. No HANDOFF.
 - Else if `conversation.projectReady`: `goto` `conversation.projectUrl`.
   On that page, use the on-page composer (「{项目名}中的新聊天」 / "New chat
   in …"). Do not use the sidebar and do not `goto` `https://chatgpt.com/`.
   Confirm Chat mode (**In-app browser** §7). Boot prompt, then workspace_info
   with the **exact** `connectorName`. After the reply names this workspace,
-  `c2c session set -w <ws> --mode project --project-url <collection> --url <chat> --connector-name "<connectorName>" --title "C2C <workspace name>"`.
-  If this Codex thread is continuing a previous C2C task, send HANDOFF right
-  after the boot prompt.
+  `c2c session set -w <ws> --local-session <localSessionId> --mode project --project-url <collection> --url <chat> --connector-name "<connectorName>" --title "C2C <workspace name>"`.
+  Re-read the route. If this local Codex session is continuing a previous C2C
+  task, send HANDOFF only after the route is `resume-chat`. Include the active
+  mailbox request id and phase when the checkpoint is waiting for a result.
 - Else: **Bind Project** first.
 
-**Update it**: same `c2c session set --task / --iteration / --state` as long-chat.
+**Update it**: same `c2c session set --local-session <localSessionId>
+--task / --iteration / --state` as long-chat.
 
 **Wrong collection**: do not guess another Project. Tell the user the expected
 workspace name, ask them to open the right collection, then say「已找到」.
 Also offer「继续用长对话」. If they pick long-chat:
-`c2c session set -w <ws> --mode long-chat` and use the long-chat path.
+`c2c session set -w <ws> --local-session <localSessionId> --mode long-chat`
+and use the long-chat path.
 If the collection 404s or the new chat is not inside the Project, same choice.
 
-**Saved chat 404s** (this thread): `goto` the collection, open a new chat
-there, boot + HANDOFF from `session.checkpoint` (no logs) + workspace_info,
-then save the new chat URL. Keep `--project-url`.
+**Saved chat 404s** (this local session): `goto` the collection, open a new chat
+there, boot + workspace_info, then save the new chat URL for
+`<localSessionId>` and re-read the route. Only after `resume-chat` is confirmed,
+send HANDOFF from `session.checkpoint` (including an active mailbox request
+id/phase, but no logs). Keep `--project-url`.
 
 ### Bind Project (user creates the collection once)
 
@@ -438,7 +578,7 @@ Project. Do **not** click the ChatGPT sidebar to create the Project
 2. Wait for「好了」/ the collection page. Same iab tab: read the address bar.
    It must look like `https://chatgpt.com/g/g-p-…/project`. If it does not,
    ask them to open that project until it does. Then:
-   `c2c session set -w <ws> --mode project --project-url <url> --connector-name "<connectorName>"`.
+   `c2c session set -w <ws> --local-session <localSessionId> --mode project --project-url <url> --connector-name "<connectorName>"`.
 
 3. On that same collection page only, open 右上角 **… → 项目设置**.
    Do not click 分享. Do not add 来源 / files.
@@ -467,9 +607,32 @@ workspace, stop. Do not plan. Do not use this Project's memory.
 
 Read code, git, diffs, and any released command output through that
 connector. Never ask anyone to paste file bodies, diffs, or logs. After
-EXECUTED, call execution_output (list, then read) when a readable item
-exists; if status is restricted, review from git instead. Never upload
+EXECUTED, call execution_summary, test_status, and execution_output with the
+exact local_session_id, task_id, and iteration from that control message.
+For execution_output, list then read with the same correlation fields. If an
+item is restricted, review from git instead. Never upload
 the repo into this Project's files or sources.
+
+Own the expensive reasoning work: search and read the relevant code through the
+connector, analyze architecture and debugging evidence, and use ChatGPT web
+research when the task depends on current external facts. Wait for research to
+finish before submitting. A RESEARCH request must return a standalone RESEARCH
+payload with the question, summary, conclusions, source title/URL/publication
+date/key evidence, and open questions. Do not duplicate those fields inside a
+PLAN or REVIEW. Codex will apply edits and run local verification.
+
+When Codex provides RESULT_REQUEST_ID, you may call report_control_progress
+with the exact requestId, localSessionId, taskId, iteration, and phase from the
+newest Codex control question. Progress may move forward only through
+SEARCHING, READING_CODE, and SYNTHESIZING; report each state at most once and
+do not use progress messages for substantive results. Then call
+submit_control_result exactly once with that same correlation tuple. Never
+reuse identifiers from an earlier turn. The
+result is advisory only. Do not include patches, shell commands, diffs, logs,
+file bodies, credentials, or absolute / traversal paths. After the tool
+succeeds, keep the visible reply to a short receipt that echoes
+RESULT_REQUEST_ID, LOCAL_SESSION_ID, TASK_ID, ITERATION, RESULT_PHASE, and the
+returned RESULT_ID.
 
 When facts conflict, trust this order:
 1. Current code from the connector
@@ -486,12 +649,14 @@ no 40-step epics. Use C2C control messages.
 
 ## Workflow: coding task（"使用 Codex with ChatGPT 完成 XXX"）
 
-Protocol states sent to ChatGPT: INIT → PLAN → EXECUTING → EXECUTED → REVIEW → (PLAN | DONE | BLOCKED).
+Protocol states sent to ChatGPT: optional RESEARCH → INIT → PLAN → EXECUTING → EXECUTED → (REVIEW | DONE | BLOCKED).
 Local checkpoint states (session only, never a ChatGPT `STATE:` line):
-`INIT`, `PLAN_RECEIVED`, `EXECUTING`, `EXECUTED_LOCAL`, `EXECUTED_SENT`, `DONE`, `BLOCKED`.
+`RESEARCH_SENT`, `RESEARCH_RECEIVED`, `INIT`, `PLAN_RECEIVED`, `EXECUTING`,
+`EXECUTED_LOCAL`, `EXECUTED_SENT`, `DONE`, `BLOCKED`.
 Do not invent `STATE: RESUME`. If the original chat is gone, send HANDOFF.
 All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 KB.
-ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
+ChatGPT's structured results are expected to be substantive (see step 3).
+Docs: `docs/protocol.md`.
 
 0. `c2c tunnel status -w <workspace> --json`. If `needsChoice`, follow
    **Connection choice** first (existing installs: ask once, then remember).
@@ -500,15 +665,16 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    `namedRepair.needed` is true, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json` (their browser; Cloudflare exception), then doctor
    again. If `chatgptRepair.needed` is true, tell the user `chatgptRepair.userMessage`
-   (one paragraph, no internals), run **Workflow: reconnect after address
-   reclaim**, then doctor again and only continue when the gate is green.
-   Generate task id: `c2c_` + 4 random hex chars — unless a checkpoint already
+   (one paragraph, no internals), run **Workflow: connector or authorization
+   repair**, then doctor again and only continue when the gate is green.
+   Generate task id: `c2c_` + 16 random hex chars — unless a checkpoint already
    has one (reuse that id; do not mint a second task).
-1. `c2c session -w <workspace> --json`. Open ChatGPT on the same iab tab
-   per **Conversation management** for `conversation.mode` (foreground +
-   markHandoff). long-chat: saved chat, or `https://chatgpt.com/` if none.
-   project: this thread's chat URL, or the collection page for a new chat,
-   or **Bind Project** if `projectReady` is false. On a NEW conversation
+1. Run `c2c session -w <workspace> --json`. Capture
+   `sessionIdentity.id` as `<localSessionId>` and keep its `resultTransport`
+   value for this loop (`auto` by default; never invent another value). Use
+   `route` to open ChatGPT on the same iab tab and enforce the **Routing gate**
+   (foreground + markHandoff). Never infer the destination from the visible
+   page. On a NEW conversation
    confirm Chat mode (**In-app browser** §7), then send the boot prompt from
    `docs/protocol.md` §Boot Prompt and the workspace_info check (name the
    exact `connectorName`). Confirm the reply names the current workspace
@@ -516,12 +682,30 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    already provides. After sending a control message, wait per
    **In-app browser** §8.
 
-   **Resume from `session.checkpoint` before any INIT.** Missing checkpoint
-   (legacy session): continue as a normal new/continued loop. A browser/js
+   **Resume from `session.checkpoint` before any INIT.** With no active
+   checkpoint, continue as a normal new/continued loop. A browser/js
    timeout is not a lost task — claim the original tab; do not INIT, re-run,
    or resend EXECUTED just because a wait timed out.
+   - When `resultTransport` is not `browser`, `waitingFor` is `GPT_RESEARCH`,
+     `GPT_PLAN`, or `GPT_REVIEW`, and the checkpoint has a matching `mailboxRequestId` /
+     `mailboxPhase`, run
+     `c2c control status -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration <n> --phase <RESEARCH|PLAN|REVIEW> --json`,
+     then
+     `c2c control wait -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration <n> --phase <RESEARCH|PLAN|REVIEW> --json`
+     if still pending. Consume that request before inspecting the page or sending
+     anything again. `control open` is idempotent for the same local session,
+     task, iteration, and phase until its result is acknowledged, so call it
+     again to recover the id if the checkpoint write was interrupted. Because
+     opening local state and sending a browser message cannot be one atomic
+     operation, recover the turn before sending: run `control status` for the
+     returned id. Consume a received result immediately. If it is pending,
+     inspect only this routed chat for an outbound user message containing that
+     exact `RESULT_REQUEST_ID`. When found, rebuild the matching checkpoint and
+     wait without resending. Only when the exact outbound message is absent may
+     the pending request be sent once and checkpointed. Never decide from the
+     latest assistant answer.
    - `EXECUTED_SENT` + `waitingFor=GPT_REVIEW`: do not INIT, do not re-run,
-     do not resend EXECUTED. Stay on the saved chat and wait for review. If
+     do not resend EXECUTED. Stay on the saved chat and wait for the result. If
      that chat 404s: HANDOFF from checkpoint fields (no logs), then wait.
    - `EXECUTED_LOCAL`: local work is done; only send EXECUTED (record first
      if this iteration has no record yet). Do not re-run.
@@ -529,44 +713,128 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
      it; otherwise HANDOFF and ask ChatGPT to restate the last PLAN. Do not
      treat it as done and do not INIT a new task.
    - `PLAN_RECEIVED`: execute that plan. Do not INIT.
-   - `INIT` / `waitingFor=GPT_PLAN`: claim the tab and wait. Do not resend INIT.
-   - `DONE`: summarize to the user if needed; `c2c session set --clear-checkpoint`.
+   - `RESEARCH_SENT` / `waitingFor=GPT_RESEARCH`: claim the tab and wait for
+     the exact RESEARCH request. Do not resend it. After receipt and ack, save
+     `RESEARCH_RECEIVED`, then continue with INIT in the same chat.
+   - `RESEARCH_RECEIVED`: the research turn is complete; send INIT in the same
+     chat and tell ChatGPT to plan from that research. Do not repeat research.
+   - `INIT` / `waitingFor=GPT_PLAN`: claim the tab and wait locally when a
+     mailbox request exists; otherwise use the browser path. Do not resend INIT.
+   - `DONE`: summarize to the user if needed;
+     `c2c session set --local-session <localSessionId> --clear-checkpoint`.
    - `BLOCKED`: surface ChatGPT's reason; do not INIT.
    Never re-pair, never recreate the connector, and never rewrite Project
    instructions just to resume.
-2. Send INIT with the user's goal (skip when the checkpoint says not to):
+2. If the task depends on current external facts, the user asked for web
+   research, or a prior result identifies an unresolved external question,
+   complete one formal RESEARCH turn before INIT. Do not open a RESEARCH turn
+   for repository-only work. In `browser` transport, skip the separate turn and
+   ask ChatGPT to research inside INIT. Otherwise run:
+
+   `c2c control open -w <ws> --local-session <localSessionId> --task <id> --iteration 0 --phase RESEARCH --json`
+
+   Immediately enforce the routing gate, then send:
+
+```
+[C2C]
+STATE: RESEARCH
+LOCAL_SESSION_ID: <localSessionId>
+TASK_ID: c2c_f81a0c9e72ab43d1
+ITERATION: 0
+RESULT_REQUEST_ID: <request.requestId>
+RESULT_PHASE: RESEARCH
+
+QUESTION:
+<the external question that must be settled, one paragraph>
+
+INSTRUCTION:
+Research current public sources and inspect relevant workspace code through the
+connector. As work advances, call report_control_progress with this exact
+correlation tuple, moving only forward through SEARCHING, READING_CODE, and
+SYNTHESIZING. Submit one RESEARCH or BLOCKED result with
+submit_control_result. A RESEARCH result must include conclusions and source
+title, URL, publication date (null only when unavailable), key evidence, and
+open questions. After success, reply only with the correlation receipt.
+```
+
+   Save the checkpoint:
+   `c2c session set -w <ws> --local-session <localSessionId> --task <id> --iteration 0 --state RESEARCH --protocol-state RESEARCH_SENT --waiting-for GPT_RESEARCH --goal "<short goal>" --next-step "wait for RESEARCH" --mailbox-request <id> --mailbox-phase RESEARCH`
+   Wait with the exact RESEARCH correlation. `control status` and `control wait`
+   expose only the latest validated progress state; progress never counts as an
+   answer. Require `RESEARCH` or `BLOCKED`. For RESEARCH, require at least one
+   source and read the substantive payload locally, then acknowledge it:
+   `c2c control ack -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration 0 --phase RESEARCH --json`.
+   Save `RESEARCH_RECEIVED` with `waitingFor=none`, `next-step="send INIT"`, and
+   `--clear-mailbox`. Only then open the PLAN request. A BLOCKED result follows
+   the terminal path below.
+3. Prepare and send INIT (skip when the checkpoint says not to). Unless
+   `resultTransport` is `browser`, first run:
+
+   `c2c control open -w <ws> --local-session <localSessionId> --task <id> --iteration 0 --phase PLAN --json`
+
+   Keep the returned `request.requestId`. `control open` binds it to this local
+   Codex session. Include it in INIT; in `browser` mode omit the
+   `RESULT_REQUEST_ID` line and use the legacy instruction.
+   Immediately before sending, re-read
+   `c2c session -w <ws> --local-session <localSessionId> --json` and enforce
+   `route.action=resume-chat`, `route.controlReady=true`, and the exact expected
+   chat URL.
 
 ```
 [C2C]
 STATE: INIT
-TASK_ID: c2c_f81a
+LOCAL_SESSION_ID: <localSessionId>
+TASK_ID: c2c_f81a0c9e72ab43d1
 ITERATION: 0
+RESULT_REQUEST_ID: <request.requestId>
+RESULT_PHASE: PLAN
 
 GOAL:
 <user's goal, one paragraph>
 
 INSTRUCTION:
 Inspect the connected workspace through the Codex with ChatGPT MCP connector.
-Produce a C2C PLAN message.
+Use any completed RESEARCH turn in this chat; do not repeat it. Perform the
+repository analysis yourself. You may report forward-only progress with
+report_control_progress using this exact correlation tuple.
+Submit one substantive PLAN or BLOCKED result with submit_control_result using
+the exact RESULT_REQUEST_ID, LOCAL_SESSION_ID, TASK_ID, ITERATION, and
+RESULT_PHASE above. After success, reply only with a correlation receipt
+containing those five values and the returned RESULT_ID.
 ```
 
    Then:
-   `c2c session set -w <ws> --task <id> --iteration 0 --state INIT --protocol-state INIT --waiting-for GPT_PLAN --goal "<short goal>" --next-step "wait for PLAN"`
-3. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
-   checks, same tab; do not treat a 5-minute browser timeout as failure).
-   Read GOAL/ACTIONS/TESTS/SUCCESS_CRITERIA.
-   A good PLAN also carries RATIONALE and concrete natural-language edit
-   suggestions (which file, what to change, why). If the reply is a bare
-   one-liner with no rationale or file-level guidance, ask once:
-   "Please expand the plan with rationale and concrete per-file suggestions."
+   `c2c session set -w <ws> --local-session <localSessionId> --task <id> --iteration 0 --state INIT --protocol-state INIT --waiting-for GPT_PLAN --goal "<short goal>" --next-step "wait for PLAN" --mailbox-request <id> --mailbox-phase PLAN`
+   Omit mailbox flags in `browser` mode.
+4. Wait per **In-app browser** §8. For `mailbox` / `auto`, run:
+
+   `c2c control wait -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration 0 --phase PLAN --json`
+
+   The CLI rejects any request/result file that does not match this exact
+   request, local session, task, iteration, phase, and integrity hash. Require
+   kind `PLAN` or `BLOCKED`, and read the substantive `payload` locally. Then run
+   `c2c control ack -w <ws> --local-session <localSessionId> --request <id> --task <taskId> --iteration 0 --phase PLAN --json`. Never scrape the short
+   receipt. In `auto`, the browser
+   reply is a fallback only under §8; `mailbox` never falls back to parsing.
+   A PLAN must carry goal, rationale, concrete actions, tests, and success
+   criteria. The schema enforces this for mailbox results; apply the same
+   standard to a browser result and ask once for expansion if it is too thin.
+   The first accepted PLAN schedules execution iteration 1. A REVIEW accepted
+   for iteration `<n>` schedules iteration `<n + 1>`; never record or send two
+   executions under the same iteration number. Once a non-terminal result is
+   acknowledged, clear its mailbox pointer from the active checkpoint before
+   advancing the iteration; the immutable mailbox files remain the audit log.
    Then:
-   `c2c session set -w <ws> --protocol-state PLAN_RECEIVED --waiting-for none --next-step "execute PLAN"`
-4. Execute the plan yourself with your own harness (your tools, your judgment;
-   ChatGPT does not micro-manage tool calls).
+   `c2c session set -w <ws> --local-session <localSessionId> --iteration 1 --protocol-state PLAN_RECEIVED --waiting-for none --next-step "execute PLAN" --clear-mailbox`
+   For BLOCKED, use the terminal path in step 11 instead of executing.
+5. Execute the plan yourself with your own harness (your tools, your judgment;
+   ChatGPT does not micro-manage tool calls). Use iteration 1 after INIT; after
+   a REVIEW for iteration `<n>`, increment to `<n + 1>` before changing the
+   checkpoint or recording any evidence.
    Before you start:
-   `c2c session set -w <ws> --protocol-state EXECUTING --waiting-for none --next-step "finish PLAN then record"`
-5. Record the execution so ChatGPT can read it via MCP. Metadata always:
-   `c2c record -w <ws> --task c2c_f81a --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
+   `c2c session set -w <ws> --local-session <localSessionId> --protocol-state EXECUTING --waiting-for none --next-step "finish PLAN then record"`
+6. Record the execution so ChatGPT can read it via MCP. Metadata always:
+   `c2c record -w <ws> --local-session <localSessionId> --task c2c_f81a0c9e72ab43d1 --iteration 1 --changed-files "src/a.ts,src/b.ts" --tests "27 passed" --exit-status ok`
    If this iteration ran a **test / build / lint / typecheck** command, also
    pass that command's output. Write stdout/stderr to a local temp file first,
    then:
@@ -575,15 +843,25 @@ Produce a C2C PLAN message.
    keys, or unrelated dumps. Never paste that file (or any log) into ChatGPT.
    If the CLI says the output was not released, still send EXECUTED; ChatGPT
    reviews from git. Then:
-   `c2c session set -w <ws> --iteration 1 --state EXECUTED --protocol-state EXECUTED_LOCAL --waiting-for none --next-step "send EXECUTED"`
-6. Send EXECUTED (no diffs, no logs). Tell ChatGPT to use MCP, including
+   `c2c session set -w <ws> --local-session <localSessionId> --iteration 1 --state EXECUTED --protocol-state EXECUTED_LOCAL --waiting-for none --next-step "send EXECUTED"`
+7. Prepare and send EXECUTED (no diffs, no logs). Unless `resultTransport` is
+   `browser`, first run:
+
+   `c2c control open -w <ws> --local-session <localSessionId> --task <id> --iteration <n> --phase REVIEW --json`
+
+   Immediately before sending, re-read the session with
+   `--local-session <localSessionId>` and enforce the same `resume-chat` route.
+   Include the returned request id and tell ChatGPT to use MCP, including
    `execution_output` when a readable item exists:
 
 ```
 [C2C]
 STATE: EXECUTED
-TASK_ID: c2c_f81a
+LOCAL_SESSION_ID: <localSessionId>
+TASK_ID: c2c_f81a0c9e72ab43d1
 ITERATION: 1
+RESULT_REQUEST_ID: <request.requestId>
+RESULT_PHASE: REVIEW
 
 RESULT:
 Execution finished.
@@ -595,21 +873,43 @@ TESTS:
 27 passed
 
 Please independently inspect the workspace and current git diff through MCP.
-If execution_output lists a readable item for this iteration, list then read it.
+Call execution_summary, test_status, and execution_output with the exact
+LOCAL_SESSION_ID, TASK_ID, and ITERATION above. If execution_output lists a
+readable item for this iteration, list then read it using the same values.
 If status is restricted, ignore it and review from git_diff.
+You may call report_control_progress with the exact correlation tuple while
+working, moving only forward through the supported states.
+Submit REVIEW, DONE, or BLOCKED with submit_control_result using the exact
+RESULT_REQUEST_ID, LOCAL_SESSION_ID, TASK_ID, ITERATION, and RESULT_PHASE above.
+After success, reply only with a correlation receipt containing those five
+values and the returned RESULT_ID.
 ```
 
    Then:
-   `c2c session set -w <ws> --protocol-state EXECUTED_SENT --waiting-for GPT_REVIEW --next-step "wait for PLAN or DONE"`
-7. ChatGPT reviews via MCP (`git_diff`, `read_file`, `test_status`,
-   `execution_output`) and replies DONE / PLAN (next iteration) / BLOCKED.
-8. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
+   `c2c session set -w <ws> --local-session <localSessionId> --protocol-state EXECUTED_SENT --waiting-for GPT_REVIEW --next-step "wait for REVIEW, DONE, or BLOCKED" --mailbox-request <id> --mailbox-phase REVIEW`
+   In `browser` mode omit the request header, mailbox flags, and submit-tool
+   instruction.
+8. Wait through the same transport as step 4, passing `--task <taskId>
+   --iteration <n> --phase REVIEW` to both `control wait` and `control ack`.
+   For mailbox results, let the CLI validate and acknowledge the exact request
+   before acting. ChatGPT reviews via MCP (`git_diff`,
+   `read_file`, `test_status`, `execution_output`) and returns:
+   - `REVIEW`: findings and actions for the next iteration. Save
+     `PLAN_RECEIVED` with `--iteration <n + 1> --clear-mailbox`, then execute
+     those actions. The acknowledged result remains in the mailbox audit log
+     correlated to reviewed iteration `<n>`; the checkpoint's incremented
+     iteration identifies the next execution. In legacy `browser` mode, accept an equivalent visible
+     `STATE: PLAN` result. In an `auto` browser fallback, save it with
+     `--clear-mailbox` instead of mailbox metadata.
+   - `DONE`: success criteria met; continue to step 10.
+   - `BLOCKED`: continue to step 11.
+9. Loop. Respect maxIterations (`.c2c.json`, default 12). At the limit, pause and ask
    the user: "已完成 12 轮协作，仍有未解决问题，是否继续？"
-9. On DONE: summarize the result to the user in plain language.
-   `c2c session set -w <ws> --state DONE --clear-checkpoint`
-10. On BLOCKED: read ChatGPT's reason, fix what you can, or surface the single
-    decision the user must make.
-    `c2c session set -w <ws> --protocol-state BLOCKED --waiting-for USER --known-issues "<short reason>"`
+10. On DONE: summarize the result to the user in plain language.
+   `c2c session set -w <ws> --local-session <localSessionId> --state DONE --clear-checkpoint`
+11. On BLOCKED: read the structured reason, fix what you can, or surface the
+    single decision the user must make.
+    `c2c session set -w <ws> --local-session <localSessionId> --protocol-state BLOCKED --waiting-for USER --known-issues "<short reason>" --mailbox-request <id> --mailbox-phase <RESEARCH|PLAN|REVIEW> --mailbox-result <resultId>`
 
 ## Workflow: disconnect（"断开 ChatGPT"）
 
@@ -619,10 +919,12 @@ If status is restricted, ignore it and review from git_diff.
    this workspace's `connectorName`.
 3. Tell the user: "已断开 ChatGPT 对该项目的访问。"
 
-## Workflow: reconnect after address reclaim（全关掉以后地址失效）
+## Workflow: connector or authorization repair（连接地址失效或权限升级）
 
-This is the normal case when the user quit Codex / the terminal / the machine:
-the previous public address is gone. Doctor already started a new one.
+This covers either a reclaimed public address or an existing connector whose
+OAuth grant predates `c2c.result.write`. Doctor has already repaired local
+services and generated a new pairing code. Both cases require a fresh grant;
+never try to extend an existing token locally.
 `connectorAction: "update"` means Delete + create again — not Reconnect.
 
 `c2c doctor --json` will look like:
@@ -645,8 +947,8 @@ the previous public address is gone. Doctor already started a new one.
    workspace's connector.
    - If that exact name exists on the plugins hub: **Delete** it. Confirm the
      delete if ChatGPT asks. **Never click Reconnect, Refresh, Connect, or
-     Edit** on the old card — the old Server URL is dead and the page will
-     hang on "This site cannot be reached".
+     Edit** on the old card: a replaced Server URL may hang, and reconnecting
+     cannot add a newly required scope to the old grant.
    - Then `goto` the 加插件 URL and create that **same** `connectorName`
      (do not invent a second name):
       - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
@@ -654,15 +956,16 @@ the previous public address is gone. Doctor already started a new one.
       - Authentication: OAuth
      Then Connect / Authorize and type `chatgptRepair.pairingCode`
      (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
-     do not wait for 8 tools on the settings page.
+     do not wait for a fixed tool count on the settings page.
    - If the name is already gone, skip Delete and only create.
 4. `c2c doctor --json` again. Same tab: only after the Doctor gate is green,
-   reopen the chat this Codex thread was already using (`session.url` /
-   the URL you saved earlier in THIS thread). Do not start a new
+   reopen the chat this local Codex session was already using (`session.url` /
+   the URL saved for THIS local session). Do not start a new
    audit/task chat just because the address changed. Do not rewrite Project
    instructions — they store the connector **name**, which did not change.
 5. If the ChatGPT conversation was lost: long-chat → Conversation
-   management switch. project → collection page, new chat, boot + HANDOFF.
+   management switch. project → collection page, new chat, boot + workspace_info,
+   save its URL for `<localSessionId>`, confirm the `resume-chat` route, then HANDOFF.
    No file re-uploading (the workspace lives in MCP). After recreating the
    same-name connector, the Project still uses that name. If tools point at
    the wrong connector, open 项目设置 and confirm 指令 still names
@@ -674,7 +977,7 @@ the previous public address is gone. Doctor already started a new one.
    `[C2C]` until local is green, except reconnect settings pages.
 2. If `namedRepair.needed`, tell the user `namedRepair.userMessage`, run
    `c2c tunnel login --json`, then doctor again. Do not Delete the connector.
-3. If `chatgptRepair.needed`, follow **reconnect after address reclaim**, then
+3. If `chatgptRepair.needed`, follow **connector or authorization repair**, then
    doctor again.
 4. Otherwise apply the recovery map. Only involve the user for login / 2FA /
    CAPTCHA — one action.
@@ -686,6 +989,7 @@ the previous public address is gone. Doctor already started a new one.
 | Bridge not running | `c2c start` (doctor does this automatically) |
 | Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
+| Doctor reports that the existing ChatGPT authorization lacks result-write access | Delete and recreate only this workspace's connector using `chatgptRepair`; scopes cannot be added to an existing grant locally. |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |
 | Port conflict | handled automatically; never surface to the user |

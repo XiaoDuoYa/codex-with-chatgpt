@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { z } from "zod";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { C2C_ID_PATTERN } from "../control/result-schema.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 
 /**
@@ -20,16 +22,61 @@ export interface RuntimeState {
   startedAt: string;
 }
 
+const safeIdSchema = z.string().regex(C2C_ID_PATTERN);
+const canonicalTimestampSchema = z.string().refine(
+  (value) => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value,
+  "timestamp must be canonical ISO-8601"
+);
+const publicUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+  }, "public URL must be HTTPS")
+  .nullable();
+const runtimeStateSchema = z
+  .object({
+    service: z.literal(SERVICE_NAME),
+    version: z.string().min(1).max(64),
+    workspaceId: safeIdSchema,
+    workspaceRoot: z.string().min(1).max(4_096).refine((value) => path.isAbsolute(value), "workspace root must be absolute"),
+    pid: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    port: z.number().int().min(1).max(65_535),
+    adminToken: z.string().regex(/^c2c_admin_[A-Za-z0-9_-]{16,128}$/),
+    publicUrl: publicUrlSchema,
+    startedAt: canonicalTimestampSchema,
+  })
+  .strict();
+
+function validatedWorkspaceId(workspaceId: string): string {
+  const parsed = safeIdSchema.safeParse(workspaceId);
+  if (!parsed.success || parsed.data !== workspaceId) throw new Error("runtime workspace id is invalid");
+  return parsed.data;
+}
+
 export function runtimeFile(workspaceId: string): string {
-  return path.join(ensureDir(path.join(getStateDir(), "runtime")), `${workspaceId}.json`);
+  return path.join(ensureDir(path.join(getStateDir(), "runtime")), `${validatedWorkspaceId(workspaceId)}.json`);
 }
 
 export function writeRuntimeState(state: RuntimeState): void {
-  writeSecureJson(runtimeFile(state.workspaceId), state);
+  const parsed = runtimeStateSchema.parse(state);
+  writeSecureJson(runtimeFile(parsed.workspaceId), parsed);
 }
 
 export function readRuntimeState(workspaceId: string): RuntimeState | null {
-  return readJsonIfExists<RuntimeState>(runtimeFile(workspaceId));
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const file = runtimeFile(resolvedWorkspaceId);
+  const value = readJsonIfExists<unknown>(file);
+  if (value === null) {
+    if (fs.existsSync(file)) throw new Error("runtime state is unreadable or malformed");
+    return null;
+  }
+  const parsed = runtimeStateSchema.safeParse(value);
+  if (!parsed.success || parsed.data.workspaceId !== resolvedWorkspaceId) {
+    throw new Error("runtime state does not match its workspace or schema");
+  }
+  return parsed.data;
 }
 
 export function clearRuntimeState(workspaceId: string): void {
@@ -52,24 +99,41 @@ export async function probeBridge(
   port: number,
   timeoutMs = 2000
 ): Promise<HealthPayload | null> {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal });
-    clearTimeout(timer);
     if (!response.ok) return null;
-    const body = (await response.json()) as HealthPayload;
-    if (body.service !== SERVICE_NAME) return null;
-    return body;
+    const body = await response.json();
+    if (
+      !body ||
+      typeof body !== "object" ||
+      (body as Partial<HealthPayload>).service !== SERVICE_NAME ||
+      typeof (body as Partial<HealthPayload>).version !== "string" ||
+      typeof (body as Partial<HealthPayload>).workspaceId !== "string" ||
+      !C2C_ID_PATTERN.test((body as Partial<HealthPayload>).workspaceId!) ||
+      (body as Partial<HealthPayload>).status !== "ok"
+    ) {
+      return null;
+    }
+    return body as HealthPayload;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
 export type BridgeObservation =
   | { state: "healthy"; runtime: RuntimeState }
   | { state: "stopped"; runtime: RuntimeState | null; reason: "runtime_missing" | "pid_missing" }
-  | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" };
+  | {
+      state: "unknown";
+      runtime: RuntimeState | null;
+      reason: "runtime_invalid" | "probe_failed" | "pid_unknown" | "workspace_mismatch";
+    };
 
 function observePid(pid: number): "present" | "missing" | "unknown" {
   if (!Number.isInteger(pid) || pid <= 0) return "unknown";
@@ -86,7 +150,12 @@ function observePid(pid: number): "present" | "missing" | "unknown" {
  * Read-only: never starts, stops, or clears runtime.
  */
 export async function findBridgeObservation(workspaceId: string): Promise<BridgeObservation> {
-  const runtime = readRuntimeState(workspaceId);
+  let runtime: RuntimeState | null;
+  try {
+    runtime = readRuntimeState(workspaceId);
+  } catch {
+    return { state: "unknown", runtime: null, reason: "runtime_invalid" };
+  }
   if (!runtime) return { state: "stopped", runtime: null, reason: "runtime_missing" };
 
   const health = await probeBridge(runtime.port);

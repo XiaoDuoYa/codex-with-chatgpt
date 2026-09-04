@@ -67,6 +67,17 @@ describe("PairingManager", () => {
     expect(manager.verify(first.code).ok).toBe(false);
   });
 
+  it("bounds anonymous client registrations to the active pairing session", () => {
+    const manager = new PairingManager("ws1");
+    expect(manager.claimClientRegistration(2)).toBe(false);
+    manager.create();
+    expect(manager.claimClientRegistration(2)).toBe(true);
+    expect(manager.claimClientRegistration(2)).toBe(true);
+    expect(manager.claimClientRegistration(2)).toBe(false);
+    manager.create();
+    expect(manager.claimClientRegistration(2)).toBe(true);
+  });
+
   it("normalizes input", () => {
     expect(normalizePairingCode(" ab2-cd3 e ")).toBe("AB2CD3E");
     expect(formatPairingCode("ABCDEFGH")).toBe("ABCD-EFGH");
