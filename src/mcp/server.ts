@@ -83,6 +83,7 @@ const gitIdentityOutputSchema = z.object({
 
 const workspaceInfoOutputSchema = {
   workspaceId: z.string(),
+  projectId: z.string(),
   workspaceName: z.string(),
   rootAlias: z.string(),
   projectType: z.string(),
@@ -273,6 +274,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
         const git = gitInfo(workspace.root);
         return okStructured({
           workspaceId: workspace.id,
+          projectId: workspace.projectId,
           workspaceName: workspace.name,
           rootAlias: "workspace:/",
           ...project,

@@ -95,7 +95,7 @@ describe("MCP tools over Streamable HTTP", () => {
       expect(names).not.toContain(forbidden);
     }
 
-    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "workspaceName", "projectType", "git"]);
+    expectToolOutputSchema(tools, "workspace_info", ["workspaceId", "projectId", "workspaceName", "projectType", "git"]);
     expectToolOutputSchema(tools, "list_directory", ["path", "entries", "total", "hasMore"]);
     expectToolOutputSchema(tools, "read_file", ["path", "content", "startLine", "endLine", "nextStartLine"]);
     expectToolOutputSchema(tools, "search_workspace", ["matches", "matchCount", "truncated", "engine"]);
@@ -165,8 +165,16 @@ describe("MCP tools over Streamable HTTP", () => {
 
   it("workspace_info returns identity and project detection", async () => {
     const result = await client.callTool({ name: "workspace_info", arguments: {} });
-    const info = structuredJsonOf<{ workspaceId: string; projectType: string; frameworks: string[]; git: { isRepo: boolean; branch: string } }>(result);
+    const info = structuredJsonOf<{
+      workspaceId: string;
+      projectId: string;
+      projectType: string;
+      frameworks: string[];
+      git: { isRepo: boolean; branch: string };
+    }>(result);
     expect(info.workspaceId).toBe(bridge.workspace.id);
+    expect(info.projectId).toBe(bridge.workspace.projectId);
+    expect(info.projectId).toMatch(/^git-[a-f0-9]{32}$/);
     expect(info.projectType).toBe("node");
     expect(info.frameworks).toContain("React");
     expect(info.git.isRepo).toBe(true);

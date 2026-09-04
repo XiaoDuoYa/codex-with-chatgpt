@@ -250,7 +250,8 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you).
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+[security](docs/security.md) · [machine gateway plan](docs/machine-gateway-plan.md) ·
+[troubleshooting](docs/troubleshooting.md)
 
 ## Project layout
 

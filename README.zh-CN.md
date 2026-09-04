@@ -173,7 +173,8 @@ c2c status / doctor / pair / unpair / logs / stop
 （自动检测，Skill 会替你安装）。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
-[安全](docs/security.md) · [故障排查](docs/troubleshooting.md)
+[安全](docs/security.md) · [机器级 Gateway 计划](docs/machine-gateway-plan.md) ·
+[故障排查](docs/troubleshooting.md)
 
 ## 目录结构
 

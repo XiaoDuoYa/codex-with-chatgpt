@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import readline from "node:readline";
 import { IgnoreRules } from "./ignore.js";
 import { readJsonIfExists } from "../config/paths.js";
+import { resolveProjectId } from "./identity.js";
 
 export type WorkspaceErrorCode =
   | "INVALID_CONFIG"
@@ -25,9 +26,6 @@ export class WorkspaceError extends Error {
     this.name = "WorkspaceError";
   }
 }
-
-const CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
-const normCase = (p: string): string => (CASE_INSENSITIVE ? p.toLowerCase() : p);
 
 export interface ReadFileResult {
   path: string;
@@ -72,6 +70,7 @@ const DEFAULT_MAX_BYTES = 256 * 1024;
 export class Workspace {
   readonly root: string;
   readonly id: string;
+  readonly projectId: string;
   readonly name: string;
   readonly ignoreRules: IgnoreRules;
   readonly projectConfig: ProjectConfig;
@@ -89,7 +88,8 @@ export class Workspace {
       throw new WorkspaceError("NOT_A_DIRECTORY", `Workspace root is not a directory: ${rootInput}`);
     }
     this.root = real;
-    this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
+    this.id = createHash("sha256").update(real).digest("hex").slice(0, 12);
+    this.projectId = resolveProjectId(real);
     this.ignoreRules = new IgnoreRules(real);
     this.projectConfig = readJsonIfExists<ProjectConfig>(path.join(real, ".c2c.json")) ?? {};
     const resultTransport = this.projectConfig.resultTransport;
@@ -104,9 +104,7 @@ export class Workspace {
   }
 
   private contains(candidate: string): boolean {
-    const r = normCase(this.root);
-    const c = normCase(candidate);
-    return c === r || c.startsWith(r + path.sep);
+    return candidate === this.root || candidate.startsWith(this.root + path.sep);
   }
 
   /**

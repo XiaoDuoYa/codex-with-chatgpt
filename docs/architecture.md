@@ -1,5 +1,11 @@
 # Architecture
 
+This document describes the currently shipped per-workspace bridge. The
+machine-scoped connector, trusted turn routing, and managed conversation
+surface evolution is specified in the
+[Machine Gateway Plan](machine-gateway-plan.md). New foundation modules may
+land behind that plan's phase gates before the transport is switched.
+
 ```
              ┌───────────────────────────┐
              │    ChatGPT Web / Sol      │

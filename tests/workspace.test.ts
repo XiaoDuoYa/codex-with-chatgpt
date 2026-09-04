@@ -1,8 +1,42 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Workspace, WorkspaceError } from "../src/workspace/manager.js";
-import { makeTmpDir, cleanup, write } from "./helpers.js";
+import { makeTmpDir, cleanup, write, git, makeGitRepo } from "./helpers.js";
+import { projectIdMetadataPath } from "../src/workspace/identity.js";
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function resolveProjectIdInChild(
+  root: string,
+  extraEnv: Record<string, string> = {}
+): Promise<string> {
+  const identityUrl = pathToFileURL(path.join(projectRoot, "src", "workspace", "identity.ts")).href;
+  const script = `import { resolveProjectId } from ${JSON.stringify(identityUrl)}; process.stdout.write(resolveProjectId(process.env.C2C_PROJECT_ROOT));`;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: projectRoot,
+      env: { ...process.env, ...extraEnv, C2C_PROJECT_ROOT: root },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    let error = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      error += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(output.trim());
+      else reject(new Error(`project identity child exited ${code}: ${error}`));
+    });
+  });
+}
 
 let root: string;
 let outside: string;
@@ -171,6 +205,152 @@ describe("workspace identity", () => {
     expect(again.id).toBe(ws.id);
     expect(ws.id).toMatch(/^[a-f0-9]{12}$/);
     expect(ws.name).toBe(path.basename(root));
+  });
+
+  it("persists a high-entropy project id in the git common dir", () => {
+    const repo = makeTmpDir("project-id");
+    try {
+      makeGitRepo(repo);
+      const first = new Workspace(repo);
+      const second = new Workspace(repo);
+      expect(first.projectId).toBe(second.projectId);
+      expect(first.projectId).toMatch(/^git-[a-f0-9]{32}$/);
+      const metadata = projectIdMetadataPath(repo);
+      expect(metadata).not.toBeNull();
+      expect(fs.statSync(metadata!).mode & 0o777).toBe(0o600);
+      expect(fs.lstatSync(metadata!).isFile()).toBe(true);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("does not derive project ids from a shared remote URL", () => {
+    const firstRepo = makeTmpDir("project-clone-a");
+    const secondRepo = makeTmpDir("project-clone-b");
+    try {
+      makeGitRepo(firstRepo);
+      makeGitRepo(secondRepo);
+      const remote = "https://github.com/example/shared.git";
+      git(firstRepo, "remote", "add", "origin", remote);
+      git(secondRepo, "remote", "add", "origin", remote);
+      const first = new Workspace(firstRepo);
+      const second = new Workspace(secondRepo);
+      expect(first.projectId).not.toBe(second.projectId);
+    } finally {
+      cleanup(firstRepo);
+      cleanup(secondRepo);
+    }
+  });
+
+  it("ignores inherited Git repository selectors when resolving identity", async () => {
+    const target = makeTmpDir("project-env-target");
+    const decoy = makeTmpDir("project-env-decoy");
+    try {
+      makeGitRepo(target);
+      makeGitRepo(decoy);
+      const decoyId = new Workspace(decoy).projectId;
+      const targetId = await resolveProjectIdInChild(target, {
+        GIT_DIR: path.join(decoy, ".git"),
+        GIT_COMMON_DIR: path.join(decoy, ".git"),
+        GIT_WORK_TREE: decoy,
+      });
+
+      expect(targetId).toMatch(/^git-[a-f0-9]{32}$/);
+      expect(targetId).not.toBe(decoyId);
+      expect(fs.existsSync(projectIdMetadataPath(target)!)).toBe(true);
+    } finally {
+      cleanup(target);
+      cleanup(decoy);
+    }
+  });
+
+  it("fails closed to path identity when Git metadata is malformed", () => {
+    const repo = makeTmpDir("project-malformed");
+    try {
+      makeGitRepo(repo);
+      const metadata = projectIdMetadataPath(repo);
+      expect(metadata).not.toBeNull();
+      fs.writeFileSync(metadata!, "not-json", { mode: 0o600 });
+
+      expect(new Workspace(repo).projectId).toMatch(/^path-[a-f0-9]{32}$/);
+      expect(fs.readFileSync(metadata!, "utf8")).toBe("not-json");
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("degrades to path identity when atomic Git metadata publication is unavailable", () => {
+    const repo = makeTmpDir("project-no-hardlink");
+    try {
+      makeGitRepo(repo);
+      const link = vi.spyOn(fs, "linkSync").mockImplementationOnce(() => {
+        throw Object.assign(new Error("hard links unavailable"), { code: "ENOTSUP" });
+      });
+      try {
+        expect(new Workspace(repo).projectId).toMatch(/^path-[a-f0-9]{32}$/);
+      } finally {
+        link.mockRestore();
+      }
+      expect(fs.existsSync(projectIdMetadataPath(repo)!)).toBe(false);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("atomically initializes one project id across concurrent processes", async () => {
+    const repo = makeTmpDir("project-concurrent");
+    try {
+      makeGitRepo(repo);
+      const ids = await Promise.all(Array.from({ length: 8 }, () => resolveProjectIdInChild(repo)));
+      expect(new Set(ids)).toHaveLength(1);
+      expect(ids[0]).toMatch(/^git-[a-f0-9]{32}$/);
+    } finally {
+      cleanup(repo);
+    }
+  });
+
+  it("keeps the project id across a directory move", () => {
+    const original = makeTmpDir("project-move");
+    const moved = `${original}-renamed`;
+    try {
+      makeGitRepo(original);
+      const before = new Workspace(original);
+      fs.renameSync(original, moved);
+      const after = new Workspace(moved);
+      expect(after.id).not.toBe(before.id);
+      expect(after.projectId).toBe(before.projectId);
+    } finally {
+      cleanup(original);
+      cleanup(moved);
+    }
+  });
+
+  it("shares the project id across linked worktrees", () => {
+    const repo = makeTmpDir("project-worktree");
+    const linked = `${repo}-linked`;
+    try {
+      makeGitRepo(repo);
+      git(repo, "worktree", "add", "-b", "linked", linked);
+      expect(new Workspace(linked).projectId).toBe(new Workspace(repo).projectId);
+    } finally {
+      try {
+        git(repo, "worktree", "remove", "--force", linked);
+      } catch {
+        // Cleanup below is sufficient if git worktree bookkeeping is unavailable.
+      }
+      cleanup(repo);
+      cleanup(linked);
+    }
+  });
+
+  it("uses a path fallback for non-Git workspaces", () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "c2c-project-fallback-"));
+    try {
+      const plainWorkspace = new Workspace(plain);
+      expect(plainWorkspace.projectId).toMatch(/^path-[a-f0-9]{32}$/);
+    } finally {
+      cleanup(plain);
+    }
   });
 
   it("reads .c2c.json project name", () => {
