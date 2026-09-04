@@ -14,11 +14,12 @@ Success means:
 - the second workspace requires no ChatGPT connector setup;
 - a tool call without a live, locally issued turn capability cannot enumerate
   or read any registered workspace;
-- each local Codex session owns a separate ChatGPT conversation surface;
+- each local Codex session owns a separate, persistent ChatGPT browser page;
 - moving a Git checkout keeps its logical Project mapping while preserving a
   checkout-specific filesystem boundary;
-- at most five active ChatGPT surfaces run concurrently, with later work
-  queued instead of evicting a running surface.
+- any number of session pages may remain parked, while at most five pages are
+  actively submitting or generating by default; later work queues without
+  reusing, navigating, or evicting another session's page.
 
 ## Decisions
 
@@ -32,8 +33,9 @@ Success means:
 4. Require a high-entropy, short-lived turn capability for every data-plane
    tool call. Store only its SHA-256 hash locally.
 5. Retain the existing mailbox correlation and workspace path protections.
-6. Use a dedicated managed ChatGPT surface per active local session. A model or
-   effort change may rotate that surface, but never changes workspace access.
+6. Use a dedicated managed ChatGPT page per local session. A model or effort
+   change may rotate that page, but never changes workspace access or transfers
+   ownership to another session.
 7. Replace obsolete per-workspace transport and authorization paths after the
    global path passes its end-to-end gate. Do not maintain two permanent stacks.
 
@@ -117,6 +119,33 @@ Lifecycle:
    never evicted while a lease is live; the overall capability bound limits
    them until they drain.
 
+## Browser Page Ownership
+
+Page ownership and execution concurrency are separate limits:
+
+```text
+localSessionId
+  -> browser surface id + tab id
+  -> ChatGPT Project URL
+  -> ChatGPT chat URL
+  -> ownership generation + lease
+```
+
+- Every local Codex session gets its own persistent in-app browser page and
+  ChatGPT chat. An idle page is parked for that session; it is not returned to
+  a shared page pool or claimed by another session.
+- The default concurrency of five counts only pages actively submitting a
+  message, waiting for generation, or collecting the correlated result. It is
+  configurable and is not a limit on local sessions, saved chats, or parked
+  pages.
+- Browser automation targets the owned tab directly by id, so active sessions
+  do not depend on the globally focused page. Screenshot/coordinate Computer
+  Use is reserved for UI that cannot be addressed through the tab DOM and is
+  serialized behind one machine-wide input lock.
+- Login, CAPTCHA, 2FA, and consent screens remain foreground, user-controlled
+  operations. Ordinary ChatGPT pages that are not registered to a local C2C
+  session are never claimed or navigated.
+
 ## Delivery Plan
 
 ### Phase 0: Tunnel eligibility spike
@@ -168,10 +197,11 @@ does not open ChatGPT settings or create another connector.
 
 ### Phase 4: Surface ownership
 
-- allocate a dedicated managed ChatGPT chat/tab per local session and ownership
-  generation;
+- allocate one persistent managed ChatGPT page and chat per local session,
+  identified by browser surface id, tab id, and ownership generation;
 - keep Project URL and chat URL mapping for navigation and memory only;
 - rotate on model/effort changes or compaction when required;
+- park an idle session's page without making it available to another session;
 - never claim or navigate a user's ordinary ChatGPT tab.
 
 Gate: concurrent sessions retain distinct URLs, cancellation releases exactly
@@ -179,10 +209,13 @@ one owner, and the user's previously active ordinary chat remains unchanged.
 
 ### Phase 5: Bounded concurrency
 
-- allow at most five running surfaces;
+- allow at most five actively automated or generating pages by default while
+  retaining any number of parked session-owned pages;
 - serialize work within one task;
 - queue a sixth task and wake it when a completed or cancelled surface releases;
 - never evict a running surface;
+- target ordinary browser operations by tab id; serialize the rare global-input
+  Computer Use fallback;
 - recover leases and ownership safely after browser or daemon failure.
 
 Gate: five unique owners run, the sixth waits, and release wakes one correct
