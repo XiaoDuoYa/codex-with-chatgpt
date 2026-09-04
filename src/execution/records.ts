@@ -56,7 +56,7 @@ const changedFileSchema = z
       !UNSAFE_TEXT.test(value),
     "changed file path must be workspace-relative"
   );
-const executionRecordSchema = z
+export const executionRecordSchema = z
   .object({
     workspaceId: safeIdSchema,
     localSessionId: safeIdSchema,

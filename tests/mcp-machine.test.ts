@@ -6,6 +6,7 @@ import {
   getControlResultStatus,
   openControlResultRequest,
 } from "../src/control/mailbox.js";
+import { appendExecutionRecord } from "../src/execution/records.js";
 import { MachineGateway } from "../src/gateway/machine-gateway.js";
 import { nullLogger } from "../src/logger/index.js";
 import { createMcpServer } from "../src/mcp/server.js";
@@ -58,6 +59,79 @@ afterEach(() => {
 });
 
 describe("machine MCP capability correlation", () => {
+  it("documents git_diff pagination with its output field names", async () => {
+    cleanups.push(isolateStateDir());
+    const gateway = new MachineGateway();
+    const connection = await connectedClient(gateway);
+    try {
+      const { tools } = await connection.client.listTools();
+      const description = tools.find((tool) => tool.name === "git_diff")?.description;
+      expect(description).toContain("hasMore");
+      expect(description).toContain("nextOffset");
+      expect(description).not.toContain("has_more");
+      expect(description).not.toContain("next_offset");
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("returns a schema-valid execution summary for the exact session and task", async () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("mcp-execution-summary");
+    cleanups.push(root);
+    const gateway = new MachineGateway();
+    const registration = gateway.registerWorkspace(root);
+    const request = openControlResultRequest(registration.workspaceId, {
+      ...correlation(),
+      ttlMs: 60_000,
+    });
+    const grant = gateway.issueTurn({
+      ...registration,
+      ...correlation(),
+      requestId: request.requestId,
+      scopes: ["execution.read"],
+      compactionEpoch: 0,
+      generation: 1,
+      ttlMs: 60_000,
+    });
+    appendExecutionRecord(registration.workspaceId, {
+      localSessionId: correlation().localSessionId,
+      taskId: correlation().taskId,
+      iteration: correlation().iteration,
+      changedFiles: ["src/index.ts"],
+      tests: "436 passed",
+      exitStatus: "ok",
+      timestamp: new Date().toISOString(),
+      outputAvailable: false,
+    });
+
+    const connection = await connectedClient(gateway);
+    try {
+      const result = await connection.client.callTool({
+        name: "execution_summary",
+        arguments: {
+          context_id: grant.token,
+          local_session_id: correlation().localSessionId,
+          task_id: correlation().taskId,
+          limit: 1,
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toEqual({
+        records: [expect.objectContaining({
+          workspaceId: registration.workspaceId,
+          localSessionId: correlation().localSessionId,
+          taskId: correlation().taskId,
+          iteration: correlation().iteration,
+          changedFiles: ["src/index.ts"],
+          exitStatus: "ok",
+        })],
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("rejects a historical request id even when every other correlation field matches", async () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("mcp-request-replay");

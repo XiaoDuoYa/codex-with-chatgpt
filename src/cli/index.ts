@@ -217,6 +217,14 @@ function parseScopes(value?: string): string[] {
   return [...new Set(scopes)];
 }
 
+function parseChangedFiles(value: string): string[] | number {
+  const normalized = value.trim();
+  if (/^-?\d+$/.test(normalized)) {
+    return parseIntegerOption(normalized, "changed-files count", 0, 1_000_000);
+  }
+  return value.split(",").map((file) => file.trim()).filter(Boolean);
+}
+
 function readCappedUtf8(filePath: string, maxBytes: number): string {
   const fd = fs.openSync(filePath, "r");
   try {
@@ -1695,15 +1703,15 @@ program
   .description("Record one local execution iteration for ChatGPT review")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
+  .requiredOption("--iteration <n>", "non-negative execution iteration")
   .option("--changed-files <filesOrCount>", "comma-separated files or a count", "0")
   .option("--tests <summary>")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
   .option("--notes <text>")
-  .option("--command <text>")
-  .option("--output <text>")
-  .option("--output-file <path>")
-  .option("--exit-code <n>")
+  .option("--command <text>", "command whose output may be offered to ChatGPT")
+  .option("--output <text>", "command output (prefer --output-file for long logs)")
+  .option("--output-file <path>", "read command output from a local file")
+  .option("--exit-code <n>", "numeric exit code of that command")
   .option("--local-session <id>")
   .option("--json", "machine-readable output", false)
   .action((opts: {
@@ -1726,9 +1734,7 @@ program
       const localSessionId = resolveLocalSession(opts.localSession);
       const taskId = validateControlId(opts.task, "task id");
       const iteration = parseControlIteration(opts.iteration);
-      const changedFiles = /^(0|[1-9][0-9]*)$/.test(opts.changedFiles)
-        ? parseIntegerOption(opts.changedFiles, "changed-files count", 0, 1_000_000)
-        : opts.changedFiles.split(",").map((file) => file.trim()).filter(Boolean);
+      const changedFiles = parseChangedFiles(opts.changedFiles);
       const base = validateExecutionRecordInput(workspace.id, {
         localSessionId,
         taskId,

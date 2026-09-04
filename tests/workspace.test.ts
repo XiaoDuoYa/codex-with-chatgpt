@@ -491,4 +491,34 @@ describe("workspace identity", () => {
     expect(namedWs.projectConfig.maxIterations).toBe(12);
     cleanup(named);
   });
+
+  it("falls back to the directory name when .c2c.json has invalid types", () => {
+    const invalid = makeTmpDir("invalid-project-config");
+    write(invalid, ".c2c.json", JSON.stringify({ name: 42, maxIterations: "many" }));
+
+    const invalidWs = new Workspace(invalid);
+
+    expect(invalidWs.name).toBe(path.basename(invalid));
+    expect(invalidWs.projectConfig).toEqual({});
+    cleanup(invalid);
+  });
+
+  it("filters invalid package script values during project detection", () => {
+    const projectRoot = makeTmpDir("invalid-package-scripts");
+    write(
+      projectRoot,
+      "package.json",
+      JSON.stringify({
+        name: "demo",
+        scripts: { test: "vitest run", invalid: 42 },
+        dependencies: { react: "^19.0.0" },
+      })
+    );
+
+    const project = new Workspace(projectRoot).detectProject();
+
+    expect(project.scripts).toEqual({ test: "vitest run" });
+    expect(project.frameworks).toContain("React");
+    cleanup(projectRoot);
+  });
 });

@@ -9,6 +9,7 @@ import {
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
 import {
   EXECUTION_EXIT_STATUSES,
+  executionRecordSchema,
   latestExecutionRecord,
   readExecutionRecords,
 } from "../execution/records.js";
@@ -253,22 +254,8 @@ const testStatusOutputSchema = {
   outputId: z.number().int().positive().nullable().optional(),
 };
 
-const executionRecordOutputSchema = z.object({
-  workspaceId: c2cIdSchema,
-  localSessionId: c2cIdSchema,
-  taskId: c2cIdSchema,
-  iteration: c2cIterationSchema,
-  changedFiles: z.union([z.array(z.string()), z.number().int().nonnegative()]),
-  tests: z.string().nullable(),
-  exitStatus: z.enum(EXECUTION_EXIT_STATUSES),
-  timestamp: timestampOutputSchema,
-  notes: z.string().optional(),
-  outputId: z.number().int().positive().optional(),
-  outputAvailable: z.boolean().optional(),
-});
-
 const executionSummaryOutputSchema = {
-  records: z.array(executionRecordOutputSchema),
+  records: z.array(executionRecordSchema),
 };
 
 const executionOutputItemOutputSchema = z.object({
@@ -498,7 +485,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       title: "Git diff",
       description:
         `Git diff with byte-offset pagination. mode: 'unstaged' (default), 'staged', or 'head' ` +
-        `(working tree vs HEAD). When has_more is true, call again with offset=next_offset. ${UNTRUSTED_NOTE}`,
+        `(working tree vs HEAD). When hasMore is true, call again with offset=nextOffset. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         context_id: contextIdSchema,
         mode: z.enum(["unstaged", "staged", "head"]).default("unstaged"),
