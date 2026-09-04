@@ -183,15 +183,27 @@ export class WorkspaceRegistry {
     return registration;
   }
 
+  /**
+   * Validate an owner-control-plane registration and return its immutable
+   * record. The checkout is revalidated before the record is released so a
+   * replaced root or changed project identity cannot be reused.
+   */
+  lookup(
+    workspaceId: string,
+    projectId: string,
+    registrationId: string
+  ): WorkspaceRegistration {
+    return this.requireCurrentEntry(workspaceId, projectId, registrationId).registration;
+  }
+
   /** Resolve a live, broker-issued lease without accepting a path or raw ids. */
   resolve(lease: TurnLease): Workspace {
     const verified = this.broker.validateLease(lease);
-    const entry = this.requireCurrentEntry(
+    return this.lookup(
       verified.binding.workspaceId,
       verified.binding.projectId,
       verified.binding.registrationId
-    );
-    return entry.registration.workspace;
+    ).workspace;
   }
 
   /** Remove only the exact registered checkout incarnation. */

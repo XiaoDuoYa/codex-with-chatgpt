@@ -305,6 +305,36 @@ export class TurnCapabilityBroker {
   }
 
   issue(input: IssueTurnCapabilityInput): TurnCapabilityGrant {
+    const { binding, ttlMs } = this.prepareIssue(input);
+    const now = this.now();
+    this.prune(now);
+    return this.issueNormalized(binding, ttlMs, now);
+  }
+
+  /**
+   * Atomically supersede all live capabilities belonging to one local
+   * session, then issue the replacement capability. Validation and a pure
+   * capacity preflight happen before any prior capability is revoked.
+   */
+  issueReplacingSession(input: IssueTurnCapabilityInput): TurnCapabilityGrant {
+    const { binding, ttlMs } = this.prepareIssue(input);
+    const now = this.now();
+    if (!this.canIssueAfterReplacing(binding, now)) {
+      throw new TurnCapabilityError(
+        "CAPABILITY_CAPACITY_EXCEEDED",
+        "turn capability capacity is exhausted"
+      );
+    }
+    this.prune(now);
+    for (const record of this.records.values()) {
+      if (this.isTombstone(record.state) || !this.sameSession(record.binding, binding)) continue;
+      this.terminate(record, "revoked", now);
+    }
+    this.trimTombstones();
+    return this.issueNormalized(binding, ttlMs, now);
+  }
+
+  private prepareIssue(input: IssueTurnCapabilityInput): { binding: TurnCapabilityBinding; ttlMs: number } {
     const binding = normalizeBinding(input);
     const ttlMs = assertTtl(
       input.ttlMs ?? DEFAULT_CAPABILITY_TTL_MS,
@@ -312,8 +342,10 @@ export class TurnCapabilityBroker {
       MAX_CAPABILITY_TTL_MS,
       "INVALID_TTL"
     );
-    const now = this.now();
-    this.prune(now);
+    return { binding, ttlMs };
+  }
+
+  private issueNormalized(binding: TurnCapabilityBinding, ttlMs: number, now: number): TurnCapabilityGrant {
     this.makeCapacityForCapability();
     if (this.records.size >= this.maxCapabilities) {
       throw new TurnCapabilityError(
@@ -504,6 +536,45 @@ export class TurnCapabilityBroker {
     this.trimTombstones();
   }
 
+  /** Revoke every live capability for one exact turn binding without a token. */
+  revokeBinding(binding: TurnCapabilityBinding): number {
+    const expected = normalizeBinding(binding);
+    const now = this.now();
+    this.prune(now);
+    let revokedCount = 0;
+    for (const record of this.records.values()) {
+      if (this.isTombstone(record.state) || !sameBinding(record.binding, expected)) continue;
+      this.terminate(record, "revoked", now);
+      revokedCount += 1;
+    }
+    this.trimTombstones();
+    return revokedCount;
+  }
+
+  /** Revoke every live capability registered by one exact workspace identity. */
+  revokeRegistration(workspaceId: string, projectId: string, registrationId: string): number {
+    const expectedWorkspaceId = safeString(workspaceId, "workspaceId");
+    const expectedProjectId = safeString(projectId, "projectId");
+    const expectedRegistrationId = safeString(registrationId, "registrationId");
+    const now = this.now();
+    this.prune(now);
+    let revokedCount = 0;
+    for (const record of this.records.values()) {
+      if (
+        this.isTombstone(record.state) ||
+        record.binding.workspaceId !== expectedWorkspaceId ||
+        record.binding.projectId !== expectedProjectId ||
+        record.binding.registrationId !== expectedRegistrationId
+      ) {
+        continue;
+      }
+      this.terminate(record, "revoked", now);
+      revokedCount += 1;
+    }
+    this.trimTombstones();
+    return revokedCount;
+  }
+
   status(token: string): TurnCapabilityStatus {
     if (!isValidSecret(token, TOKEN_PREFIX)) return { status: "unknown", activeLeaseCount: 0, completionReady: false };
     const tokenHash = sha256(token);
@@ -682,6 +753,27 @@ export class TurnCapabilityBroker {
       if (!oldest) return;
       this.records.delete(oldest.tokenHash);
     }
+  }
+
+  private canIssueAfterReplacing(binding: TurnCapabilityBinding, now: number): boolean {
+    if (this.records.size < this.maxCapabilities) return true;
+    let reclaimable = 0;
+    for (const record of this.records.values()) {
+      const hasLiveLease = [...record.leases.values()].some((leaseExpiresAt) => leaseExpiresAt > now);
+      if (!hasLiveLease && (this.isTombstone(record.state) || now >= record.expiresAt || this.sameSession(record.binding, binding))) {
+        reclaimable += 1;
+      }
+    }
+    return this.records.size - reclaimable < this.maxCapabilities;
+  }
+
+  private sameSession(left: TurnCapabilityBinding, right: TurnCapabilityBinding): boolean {
+    return (
+      left.workspaceId === right.workspaceId &&
+      left.projectId === right.projectId &&
+      left.registrationId === right.registrationId &&
+      left.localSessionId === right.localSessionId
+    );
   }
 
   private isTombstone(state: TurnCapabilityState): boolean {

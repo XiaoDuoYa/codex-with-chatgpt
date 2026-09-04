@@ -145,6 +145,38 @@ describe("workspace registry", () => {
     }
   });
 
+  it("looks up the exact frozen registration and rejects mismatched identities", () => {
+    const root = makeTmpDir("registry-lookup");
+    try {
+      const broker = new TurnCapabilityBroker();
+      const registry = new WorkspaceRegistry(broker);
+      const registration = registry.register(root);
+      const lookedUp = registry.lookup(
+        registration.workspaceId,
+        registration.projectId,
+        registration.registrationId
+      );
+
+      expect(lookedUp).toBe(registration);
+      expect(Object.isFrozen(lookedUp)).toBe(true);
+      expect(Object.isFrozen(lookedUp.workspace)).toBe(true);
+      expectRegistryCode(
+        () => registry.lookup(registration.workspaceId, "wrong-project", registration.registrationId),
+        "PROJECT_ID_MISMATCH"
+      );
+      expectRegistryCode(
+        () => registry.lookup(registration.workspaceId, registration.projectId, "wrong-registration"),
+        "REGISTRATION_ID_MISMATCH"
+      );
+      expectRegistryCode(
+        () => registry.lookup(root, registration.projectId, registration.registrationId),
+        "WORKSPACE_NOT_FOUND"
+      );
+    } finally {
+      cleanup(root);
+    }
+  });
+
   it("keeps project identity across repeated Git checkout moves and retires stale roots", () => {
     const parent = makeTmpDir("registry-move");
     const original = path.join(parent, "original");
@@ -240,6 +272,10 @@ describe("workspace registry", () => {
       expectRegistryCode(() => registry.resolve(oldClaim.lease), "WORKSPACE_STALE");
 
       const after = registry.register(root);
+      expectRegistryCode(
+        () => registry.lookup(before.workspaceId, before.projectId, before.registrationId),
+        "REGISTRATION_ID_MISMATCH"
+      );
       expect(after.workspaceId).toBe(before.workspaceId);
       expect(after.projectId).toBe(before.projectId);
       expect(after.registrationId).not.toBe(before.registrationId);

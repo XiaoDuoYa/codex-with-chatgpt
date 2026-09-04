@@ -225,6 +225,145 @@ describe("turn capability broker", () => {
     expect(broker.claim(waiting.token, binding({ taskId: "waiting" }))).toBeTruthy();
   });
 
+  it("revokes all exact-binding capabilities without receiving a token", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const first = broker.issue(binding({ taskId: "rotate" }));
+    const second = broker.issue(binding({ taskId: "rotate" }));
+    const unrelated = broker.issue(binding({ taskId: "other" }));
+    const lease = broker.claim(first.token, binding({ taskId: "rotate" }));
+
+    const revokedCount = broker.revokeBinding(binding({ taskId: "rotate" }));
+    expect(revokedCount).toBe(2);
+    expect(broker.status(first.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
+    expect(broker.status(second.token).status).toBe("revoked");
+    expect(broker.status(unrelated.token).status).toBe("issued");
+    expect(broker.stats().activeTurnCount).toBe(1);
+
+    expect(broker.revokeBinding(binding({ taskId: "rotate" }))).toBe(0);
+    expect(broker.release(first.token, lease.leaseId)).toEqual({ released: true });
+    expect(broker.stats().activeTurnCount).toBe(0);
+  });
+
+  it("replaces every nonterminal capability for the exact session key", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const old = broker.issue(binding({ taskId: "old", generation: 1, compactionEpoch: 1 }));
+    const oldLease = broker.claim(old.token, binding({ taskId: "old", generation: 1, compactionEpoch: 1 }));
+    const oldIssued = broker.issue(binding({ taskId: "old-issued", generation: 1, compactionEpoch: 1 }));
+    const unrelatedSession = broker.issue(
+      binding({ taskId: "other-session", localSessionId: "session-other", generation: 1 })
+    );
+    const replacementBinding = binding({
+      taskId: "new-task",
+      iteration: 8,
+      phase: "REVIEW",
+      scopes: ["workspace.read"],
+      modelId: "gpt-5-mini",
+      effort: "low",
+      compactionEpoch: 7,
+      generation: 9,
+    });
+
+    const replacement = broker.issueReplacingSession({ ...replacementBinding, ttlMs: 30_000 });
+    expect(broker.status(old.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
+    expect(broker.status(oldIssued.token).status).toBe("revoked");
+    expect(broker.status(unrelatedSession.token).status).toBe("issued");
+    expect(broker.stats().activeTurnCount).toBe(1);
+    expectCode(() => broker.claim(replacement.token, replacementBinding), "ACTIVE_TURN_LIMIT");
+
+    broker.release(old.token, oldLease.leaseId);
+    expect(broker.claim(replacement.token, replacementBinding)).toBeTruthy();
+  });
+
+  it("does not supersede a different local session", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const existing = broker.issue(binding({ taskId: "existing" }));
+    const replacement = broker.issueReplacingSession({
+      ...binding({ localSessionId: "session-new", taskId: "new" }),
+      ttlMs: 30_000,
+    });
+
+    expect(broker.status(existing.token).status).toBe("issued");
+    expect(broker.status(replacement.token).status).toBe("issued");
+  });
+
+  it("revokes every session under one registration while preserving draining leases", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const first = broker.issue(binding({ localSessionId: "session-one", taskId: "task-one" }));
+    const second = broker.issue(binding({ localSessionId: "session-two", taskId: "task-two" }));
+    const foreignRegistration = broker.issue(
+      binding({ localSessionId: "session-three", taskId: "task-three", registrationId: "registration-other" })
+    );
+    const lease = broker.claim(first.token, binding({ localSessionId: "session-one", taskId: "task-one" }));
+
+    expect(broker.revokeRegistration("workspace-a", "project-a", "registration-a")).toBe(2);
+    expect(broker.status(first.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
+    expect(broker.status(second.token).status).toBe("revoked");
+    expect(broker.status(foreignRegistration.token).status).toBe("issued");
+    expect(broker.stats().activeTurnCount).toBe(1);
+    expect(broker.revokeRegistration("workspace-a", "project-a", "registration-a")).toBe(0);
+
+    expect(broker.release(first.token, lease.leaseId)).toEqual({ released: true });
+    expect(broker.stats().activeTurnCount).toBe(0);
+  });
+
+  it("validates registration identity before mutating any capability", () => {
+    const broker = new TurnCapabilityBroker();
+    const existing = broker.issue(binding());
+    const lease = broker.claim(existing.token, binding());
+
+    for (const ids of [
+      ["", "project-a", "registration-a"],
+      ["workspace-a", "project-a\n", "registration-a"],
+      ["workspace-a", "project-a", ""],
+    ]) {
+      expectCode(() => broker.revokeRegistration(...ids), "INVALID_BINDING");
+      expect(broker.status(existing.token)).toMatchObject({ status: "active", activeLeaseCount: 1 });
+    }
+    expect(broker.validateLease(lease)).toBe(lease);
+  });
+
+  it("preflights binding, TTL, and capacity before supersession", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 1 });
+    const existing = broker.issue(binding({ taskId: "existing" }));
+
+    expectCode(
+      () => broker.issueReplacingSession({ ...binding({ taskId: "invalid-ttl" }), ttlMs: 0 }),
+      "INVALID_TTL"
+    );
+    expect(broker.status(existing.token).status).toBe("issued");
+
+    expectCode(
+      () =>
+        broker.issueReplacingSession({
+          ...binding({ taskId: "invalid-binding", workspaceId: "" }),
+          ttlMs: 30_000,
+        }),
+      "INVALID_BINDING"
+    );
+    expect(broker.status(existing.token).status).toBe("issued");
+
+    const lease = broker.claim(existing.token, binding({ taskId: "existing" }));
+    expectCode(
+      () => broker.issueReplacingSession({ ...binding({ taskId: "replacement" }), ttlMs: 30_000 }),
+      "CAPABILITY_CAPACITY_EXCEEDED"
+    );
+    expect(broker.status(existing.token)).toMatchObject({ status: "active", activeLeaseCount: 1 });
+    broker.release(existing.token, lease.leaseId);
+  });
+
+  it("reclaims a full same-session issued record during replacement", () => {
+    const broker = new TurnCapabilityBroker({ maxCapabilities: 1 });
+    const existing = broker.issue(binding({ taskId: "old-issued" }));
+    const replacement = broker.issueReplacingSession({
+      ...binding({ taskId: "new-issued", generation: 5 }),
+      ttlMs: 30_000,
+    });
+
+    expect(broker.status(existing.token).status).toBe("unknown");
+    expect(broker.status(replacement.token).status).toBe("issued");
+    expect(broker.stats().capabilityCount).toBe(1);
+  });
+
   it("bounds retained tombstones while cancelled and revoked turns drain", () => {
     let now = 30_000;
     const broker = new TurnCapabilityBroker({
