@@ -1,150 +1,271 @@
-# Architecture
+# Machine-Wide Architecture
 
-This document describes the currently shipped per-workspace bridge. The
-machine-scoped connector, trusted turn routing, and managed conversation
-surface evolution is specified in the
-[Machine Gateway Plan](machine-gateway-plan.md). New foundation modules may
-land behind that plan's phase gates before the transport is switched.
+## Goal
 
+C2C connects any number of local Codex workspaces to ChatGPT with one machine
+configuration. The transport is shared, while workspace data and conversation
+state remain isolated.
+
+The key distinction is:
+
+- **Machine scope:** one OpenAI Secure MCP Tunnel, one connector, one gateway
+  process and one machine identity.
+- **Workspace scope:** one trusted local root, one stable Project identity and
+  one registration in the machine gateway.
+- **Session scope:** one local Codex session, one ChatGPT Project chat and one
+  owned browser page.
+- **Turn scope:** one short-lived capability, one mailbox request and one
+  ordered control message.
+
+## Components
+
+```text
+                ChatGPT web
+       Project A       Project B
+       chat/page       chat/page
+           |               |
+           +-------+-------+
+                   |
+      Connector: Codex with ChatGPT
+           Authentication: None
+                   |
+       OpenAI Secure MCP Tunnel
+                   |
+   tunnel-owned `serve-machine --stdio`
+                   |
+     Machine Gateway (loopback admin API)
+       |          |             |
+  registry   capability      MCP server
+             broker             |
+        protected mailbox       |
+                   +------------+
+                   |
+            local workspace roots
+             execution records
 ```
-             ┌───────────────────────────┐
-             │    ChatGPT Web / Sol      │
-             │  Reason / Plan / Review   │
-             └──────────┬──────────▲─────┘
-                        │          │ browser control messages
-              MCP reads │          │ RESEARCH / INIT / EXECUTED (< 1 KB)
-      + progress/result submit     │
-                        ▼          │
-             ┌─────────────────────┐
-             │      C2C Bridge     │
-             │ MCP + OAuth/Pairing │
-             │   Tunnel Manager    │
-             └──────┬────────┬─────┘
-          read-only │        │ bounded advisory result
-                   ▼        ▼
-       ┌────────────────┐  ┌─────────────────────┐
-       │Local Workspace │  │Local Control Mailbox│
-       └───────▲────────┘  └──────────▲──────────┘
-               │                      │ read / acknowledge
-               │ edit / shell / git   │
-               └──────────┬───────────┘
-                    ┌─────┴───────┐
-                    │Codex Harness│
-                    └─────────────┘
+
+### OpenAI Secure MCP Tunnel
+
+The official pinned tunnel client is installed into protected machine state.
+Its runtime key is supplied by file reference and is never placed in a command
+line argument, connector instruction, repository file, or normal output.
+
+The tunnel supervises exactly:
+
+```text
+node <checkout>/bin/c2c.js serve-machine --stdio --port 0
 ```
 
-## Principles
+The `stdio` stream is the MCP data transport. The child also exposes a
+loopback-only admin API on an ephemeral port for local registration and turn
+issuance. C2C reuses the pair only when the 0.0.14 status payload reports a
+healthy runtime whose alias, `tunnel_id`, `profile_path`, target kind and
+`target_value` match the configured profile and exact `serve-machine` command,
+and whose gateway association and health checks match. When the status payload
+includes a child PID, it must also match the gateway runtime PID. The pinned
+0.0.14 client may omit that PID, so exact target, association and health checks
+remain the primary proof. This is still a status-backed local configuration
+match rather than a cryptographic process identity proof. A healthy standalone
+gateway is not adopted as a second broker.
 
-- **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
-- **Browser UI = outbound control plane**: tiny `[C2C]` state messages (< 1 KB).
-- **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
-- **Local mailbox = return plane**: ChatGPT reports bounded forward-only
-  progress and submits a one-shot, schema-bound advisory result; Codex reads
-  both locally instead of scraping page text.
-- **Capability separation**: ChatGPT cannot write the workspace or run commands.
-  Its only write capabilities target C2C progress/result state and require both
-  a dedicated OAuth scope and an active, expiring request id.
-- **Workspace is the security boundary**: one bridge = one workspace = one token audience.
-- **Local session is the concurrency boundary**: one Project is shared by the
-  workspace, while each local Codex session owns its chat URL, checkpoint, and
-  mailbox requests.
+ChatGPT selects the Secure Tunnel configured for this connector. There is no
+public Server URL for the user to copy into project or workspace settings.
 
-## Work allocation and model boundary
+### Machine autostart
 
-ChatGPT performs repository discovery through MCP, architecture/debug analysis,
-planning, review, and web research that needs browsing or waiting. Research that
-materially affects a decision uses its own request and returns conclusions,
-source URLs, publication dates, key evidence, and open questions before
-planning begins. Codex keeps the local
-harness: exact conversation routing, request correlation, edits, commands,
-tests, git, recovery, and final verification.
+On macOS, one LaunchAgent may be enabled for the whole machine after setup:
 
-C2C does not control the model assigned to the current Codex task. A user or
-host may choose a low-cost local model to apply ChatGPT's structured guidance,
-but the Skill cannot switch models and never reports that it did. This keeps
-cost policy outside the protocol while preserving a verifiable execution
-boundary.
+```sh
+c2c autostart enable --json
+c2c autostart status --json
+```
 
-## Components (src/)
+launchd runs hidden `c2c autostart run --quiet`. That entry point only invokes
+`ensureMachineGateway`, which reuses the official Tunnel-owned child. It does
+not start a per-workspace process, create another Tunnel, or schedule browser
+pages. Disable it with `c2c autostart disable --json`.
 
-| Module | Responsibility |
-| --- | --- |
-| `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | McpServer with 9 read-only workspace/data tools plus `report_control_progress` and `submit_control_result`; stateless Streamable HTTP transport (fresh server per request, JSON responses) |
-| `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
-| `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
-| `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
-| `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and workspace-configured Named Tunnel implementations; business logic is vendor-agnostic |
-| `execution/` | JSONL execution records plus optional sanitized command output (`execution_output`) |
-| `control/` | Research/result/progress schemas and one-shot mailbox lifecycle: open, report, submit, wait, acknowledge, cancel, prune |
-| `session/` | Workspace-level Project binding plus per-local-session chat URLs and checkpoints |
-| `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
-| `cli/` | `c2c` commands; `--json` everywhere for the Skill |
-| `config/`, `logger/` | OS-convention state dir, secret-redacting logger |
+### Machine Gateway
 
-## Request lifecycles
+The gateway owns the in-memory capability broker and workspace registry. A
+machine lifetime record contains `machineId`, `bootEpoch`, `pid`, port and an
+admin secret. Startup is exclusive; cleanup is allowed only when all of those
+owner fields still match.
 
-**MCP call**: ChatGPT → tunnel (https) → bridge `/mcp` → bearer middleware
-(401/403) → stateless StreamableHTTP transport → tool handler → workspace layer
-(path containment → ignore rules → pagination) → JSON result.
+The MCP server does not infer a workspace from a global “active project” or
+from a ChatGPT URL. It accepts only a valid `context_id`, resolves the context
+to a registered workspace, and performs the requested read within that root.
 
-**Control result**: Codex opens a request bound to workspace, local session,
-task, iteration, phase and expiry → sends its `RESULT_REQUEST_ID`,
-`LOCAL_SESSION_ID`, and `RESULT_PHASE` in RESEARCH, INIT, or EXECUTED → ChatGPT
-may call `report_control_progress` and then calls `submit_control_result` with
-the exact correlation tuple and
-`c2c.result.write` → the bridge validates the
-kind-specific schema, size, request binding and one-shot semantics → writes
-under the C2C state directory → Codex waits and acknowledges locally with the
-same tuple. A local session permits only one unfinished question. Stored result
-metadata and its canonical content hash are verified again on every read, so a
-stale, swapped, or modified file is never returned as the current answer.
-Identical retries are idempotent; conflicting retries are rejected. Progress
-can only advance through SEARCHING, READING_CODE, and SYNTHESIZING, so it is
-bounded to three transitions and cannot become an arbitrary logging channel.
+Machine state is split by privilege. Mutable project state stays inside the
+repository boundary: Git checkouts use `<git-common-dir>/codex-with-chatgpt`,
+while non-Git workspaces use `<workspace-root>/.codex-with-chatgpt`. Linked
+worktrees share project metadata and a non-authoritative page recovery mirror;
+session routes and execution records are isolated below
+`workspaces/<workspaceId>/`. Runtime installations, the authoritative mailbox,
+Tunnel configuration and keys, the authoritative cross-workspace Project URL,
+physical-tab and generation ownership index, gateway ownership records,
+machine identity, locks and logs remain in protected machine state.
+`sandbox-clean` removes obsolete global write grants and does not expose a
+machine-wide state directory to Codex.
 
-**Conversation mapping**: one workspace-level record holds Project URL and
-connector name. A separate record keyed by the resolved local session identity
-holds each local session's canonical ChatGPT chat URL and checkpoint. Identity
-prefers `CODEX_THREAD_ID` / `CODEX_SESSION_ID`, then derives a runtime-stable ID
-from the Codex or terminal context; callers can always override it with
-`--local-session`. `c2c session --json` returns an explicit browser route, and
-the Skill verifies that route before every control message. Workspace and
-thread state updates share one workspace-level cross-process lock, so a local
-session update cannot write back stale Project or connector metadata.
-Concurrent local sessions therefore share workspace context without sharing a
-ChatGPT chat or result queue, even when the visible browser page was changed.
+### Workspace registry
 
-**Execution evidence**: Codex records each run with the same local session,
-high-entropy task id, and iteration. `execution_summary`, `test_status`, and
-`execution_output` require those correlation fields; output body reads verify
-them again. A cross-process lock serializes the shared output index, while JSON
-state replacement is atomic, so concurrent local sessions cannot reuse an
-output id or expose a partial state file. Execution JSONL readers ignore only
-an unterminated final fragment left by an interrupted append; the next append
-repairs that tail under the same lock. Any malformed newline-terminated record
-still fails closed.
+Registration canonicalizes the root and records:
 
-**Authorization**: 401 with `WWW-Authenticate: resource_metadata=…` →
-`/.well-known/oauth-protected-resource/mcp` → AS metadata → DCR →
-`/oauth/authorize` (HTML pairing page) → pairing code verified → 302 with
-authorization code → `/oauth/token` (PKCE S256) → access + refresh tokens. The
-authorization code is consumed only after its client, redirect URI, and PKCE
-verifier all match; rejected exchanges do not destroy an otherwise valid code.
+```text
+workspaceId     checkout-specific identity
+projectId       stable project identity
+registrationId  current registration generation
+root            trusted local filesystem root
+workspace name  display metadata
+```
 
-**Ports**: prefer 48765, bind 127.0.0.1 only. On conflict, `/health` identifies
-whether the occupant is a c2c bridge for the same workspace (reuse) or not
-(fall back to an ephemeral port). Configuration follows automatically via the
-runtime state file; users never see ports.
+The registry verifies the current root on every data-plane claim. Re-registering
+after a checkout move or replacement creates a new registration and revokes
+capabilities issued to the old registration. A path or Project name supplied by
+ChatGPT cannot create or select a registration.
 
-**Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
-The URL changes per start, so `c2c doctor` can restart it and tell the Skill to
-Delete + recreate that workspace's ChatGPT connector. A workspace may instead
-choose a named hostname once (`c2c tunnel choose --mode named`). The Skill asks
-before the first public URL exists; `cloudflared tunnel login` is the only extra
-user step. Tunnel name, hostname and preference live under the OS state dir
-(`tunnels/<workspaceId>.json`), never in the project. Named starts use
-`cloudflared tunnel --url … run <name>` so the public URL stays stable. If named
-provisioning fails, C2C falls back to Quick Tunnel. If a named tunnel later
-drops, doctor asks for a Cloudflare re-login (`namedRepair`) instead of
-rotating the ChatGPT connector.
+Every explicit or stale-registration removal uses the same lifecycle path. It
+revokes capabilities for the exact registration, then removes machine surface
+ownership only when no valid checkout for that stable `projectId` remains.
+
+## Browser and conversation ownership
+
+Each Project has one C2C connector association, but each local session has its
+own conversation. The protected machine index stores the Project association
+independently:
+
+```text
+projectId -> normalized projectUrl
+```
+
+That association remains after the last session is retired, so a new session
+or linked worktree can discover and reuse the existing Project. It is removed
+only when the last registered checkout for the project is unregistered. A
+surface lease maps:
+
+```text
+projectId + localSessionId
+  -> browserId + surfaceId + tabId + projectUrl + chatUrl
+  -> generation + ownerProcessEpoch + expiresAt
+```
+
+The mapping is persistent. A new session creates a new Project chat and a new
+owned page even if another C2C page is open. A page rotation must present the
+exact current generation, so a stale session cannot steal a replacement.
+The Gateway serializes updates under one machine lock and enforces one local
+project per normalized ChatGPT Project URL plus one owner per physical page.
+Workspace mirrors are never imported into this authority. A machine-wide
+allocator keeps generations monotonic across release, expiry, and session
+retirement while inactive per-session entries are pruned.
+
+There is deliberately no global page or session semaphore. Five pages may be
+visible in one example, but five is not a product limit. Ten, one hundred, or
+more independent local sessions are valid when the browser and ChatGPT account
+can handle them. Only messages belonging to the same `localSessionId` are
+serialized; independent sessions are never queued behind one another.
+
+The Skill keeps the owned pages in the built-in browser. Computer Use targets
+the exact `tabId` and uses stable URLs plus semantic DOM operations. The CUA
+host runtime executes the browser calls; TypeScript persists and validates the
+lease but cannot invoke the host CUA APIs directly. For a saved route, it first
+executes `cua.getTab(tabId, { browser: "iab" })` and validates the returned
+Project/chat URL. If that exact tab is unavailable or its URL is wrong, it
+executes `cua.createBrowserTab("iab", targetUrl, { visible: false })`, where
+`targetUrl` is the saved chat URL or Project URL, and replaces the lease only
+for the same `localSessionId` using the exact current generation and tab id.
+A saved route without a `tabId` is invalid and follows this same replacement
+branch; it never authorizes choosing an existing tab by URL.
+With no saved route, it creates a hidden Project candidate the same way. It
+never selects another tab by URL, title, recency, or foreground state, and it
+never reuses the user's ordinary ChatGPT page.
+
+Normal control stays in the background: immediately before sending and after
+sending, the Skill re-reads the same exact `tabId` and verifies the Project/chat
+URL. It uses semantic DOM operations and does not focus or activate the page.
+It never passes `visible: true` for a normal control turn.
+Only login, CAPTCHA, 2FA, or explicit consent may temporarily require a
+visible page; after that user action the page returns to the background and
+the exact-tab and URL checks run again.
+
+## Turn capability lifecycle
+
+Before a control message, the local harness:
+
+1. Confirms the session route and surface generation.
+2. Opens one mailbox request for `(workspaceId, localSessionId, taskId,
+   iteration, phase)`.
+3. Issues a capability bound to the same correlation, current registration,
+   exact mailbox `requestId`, compaction epoch, surface generation and
+   requested scopes. BOOT alone has no mailbox request.
+4. Places `CONTEXT_ID` and `RESULT_REQUEST_ID` in the prompt sent to the owned
+   chat.
+
+ChatGPT passes `context_id` to every MCP call. The gateway claims a lease,
+renews it during a long operation and releases it in a `finally` path. On
+completion, the broker creates a fence and waits for all leases to drain before
+the mailbox is written. If mailbox persistence fails, the fence aborts rather
+than claiming the result was delivered.
+
+Completion or cancellation revokes the capability. Gateway restart changes the
+boot epoch and invalidates all prior capabilities. Compaction or a page
+generation change invalidates a stale turn even when its token has not expired.
+
+## Concurrency model
+
+The system has two independent ordering rules:
+
+```text
+Session A: turn 1 -> turn 2 -> turn 3
+Session B: turn 1 -> turn 2
+Session C: turn 1 -> turn 2 -> ...
+
+A, B, and C execute independently.
+```
+
+The mailbox has no global active-request quota. Capability storage has no
+cross-session capacity limit; bounded terminal tombstones and per-turn leases
+are cleanup protections, not a page-concurrency policy. Backoff, retry, and
+browser recovery are scoped to the affected session only.
+
+Normal mailbox `open`, `ack`, `cancel`, and result operations use a lifecycle
+lock for the specific `localSessionId`; they do not scan or serialize the whole
+workspace. Pruning uses a separate short maintenance lock and processes
+sessions independently. The surface metadata ownership lock is only a brief
+atomic uniqueness guard for lease commits/replacements; it never limits or
+queues browser turns.
+
+## Data boundaries
+
+ChatGPT receives no pasted repository dump. It uses read-only MCP tools for
+directory listing, bounded file reads, search, Git state/diff, and execution
+records. Codex keeps write operations and command execution local.
+
+The Project URL and chat URL provide continuity and navigation. They are not
+trusted authorization values. Authorization comes from the machine gateway's
+capability binding and the trusted local root.
+
+## Recovery ownership
+
+`machine start` and `machine doctor` operate on the one machine runtime. They
+check the status-matched tunnel runtime target, gateway health, owner record and
+bound admin port.
+`machine stop` stops the tunnel supervisor first; the child exits through its
+stdio owner. C2C does not send a child shutdown request while the supervisor is
+still responsible for it.
+
+If one browser page fails, only that session renews or replaces its surface
+lease. Other sessions, pages, workspace registrations and their conversations
+continue unaffected.
+
+## Design decisions
+
+- One connector reduces user configuration to one machine-level action.
+- `Authentication: None` keeps connector setup independent of workspace
+  credentials; the official Tunnel handles its runtime association.
+- `serve-machine --stdio` makes the MCP child lifecycle unambiguous and avoids
+  split-brain brokers.
+- Explicit context capabilities prevent a Project, URL, path, or visible tab
+  from becoming an accidental security principal.
+- Persistent session pages preserve independent ChatGPT histories without
+  taking over the user's ordinary conversations.

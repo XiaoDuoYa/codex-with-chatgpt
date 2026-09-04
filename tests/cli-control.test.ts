@@ -4,13 +4,21 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { reportControlProgress, submitControlResult } from "../src/control/mailbox.js";
-import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
+import {
+  cleanup,
+  isolateStateDir,
+  makeTmpDir,
+  startManagedMachineFixture,
+  type ManagedMachineFixture,
+  write,
+} from "./helpers.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliEntry = path.join(projectRoot, "src", "cli", "index.ts");
 
 let stateDir: string;
 let workspace: string;
+let machine: ManagedMachineFixture;
 
 interface CliResult {
   status: number | null;
@@ -18,12 +26,12 @@ interface CliResult {
   stderr: string;
 }
 
-function runCli(args: string[]): CliResult {
+function runCli(args: string[], cwd = workspace): CliResult {
   const result = spawnSync(process.execPath, ["--import", "tsx/esm", cliEntry, ...args], {
-    cwd: projectRoot,
+    cwd,
     encoding: "utf8",
     timeout: 10_000,
-    env: { ...process.env, C2C_STATE_DIR: stateDir },
+    env: { ...process.env, ...machine.environment, C2C_STATE_DIR: stateDir },
   });
   return {
     status: result.status,
@@ -32,8 +40,11 @@ function runCli(args: string[]): CliResult {
   };
 }
 
-function runJson(args: string[]): { command: CliResult; body: Record<string, unknown> } {
-  const command = runCli([...args, "--json"]);
+function runJson(
+  args: string[],
+  cwd = workspace,
+): { command: CliResult; body: Record<string, unknown> } {
+  const command = runCli([...args, "--json"], cwd);
   const lines = command.stdout.trim().split("\n").filter(Boolean);
   return { command, body: JSON.parse(lines.at(-1) ?? "{}") as Record<string, unknown> };
 }
@@ -56,19 +67,188 @@ function planResult(requestId: string) {
   } as const;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   stateDir = isolateStateDir();
   workspace = makeTmpDir("cli-control-workspace");
+  machine = await startManagedMachineFixture(stateDir);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await machine.close();
   cleanup(workspace);
   cleanup(stateDir);
   delete process.env.C2C_STATE_DIR;
 });
 
+function claimSurface(localSessionId: string, tabId = `tab-${localSessionId}`): void {
+  const claimed = runJson([
+    "surface",
+    "claim",
+    "-w",
+    workspace,
+    "--local-session",
+    localSessionId,
+    "--tab-id",
+    tabId,
+    "--project-url",
+    "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
+    "--chat-url",
+    `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/${localSessionId}`,
+  ]);
+  expect(claimed.command.status).toBe(0);
+  const lease = claimed.body.lease as { generation: number; tabId: string };
+  const committed = runJson([
+    "surface",
+    "commit",
+    "-w",
+    workspace,
+    "--local-session",
+    localSessionId,
+    "--generation",
+    String(lease.generation),
+    "--tab-id",
+    lease.tabId,
+    "--chat-url",
+    `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/${localSessionId}`,
+  ]);
+  expect(committed.command.status).toBe(0);
+}
+
 describe("control CLI correlation", () => {
+  it("supports a Project-only candidate until the first chat URL is observed", () => {
+    const claimed = runJson([
+      "surface",
+      "claim",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-project-candidate",
+      "--tab-id",
+      "tab-project-candidate",
+      "--project-url",
+      "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
+    ]);
+    expect(claimed.command.status).toBe(0);
+    expect((claimed.body.lease as Record<string, unknown>).chatUrl).toBeUndefined();
+
+    const generation = (claimed.body.lease as { generation: number }).generation;
+    const committed = runJson([
+      "surface",
+      "commit",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-project-candidate",
+      "--generation",
+      String(generation),
+      "--tab-id",
+      "tab-project-candidate",
+      "--chat-url",
+      "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/project-first-chat",
+    ]);
+    expect(committed.command.status).toBe(0);
+    expect(committed.body.binding).toMatchObject({
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/project-first-chat",
+      lastGeneration: generation,
+    });
+    expect((committed.body.session as Record<string, unknown>).url).toBe(
+      "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/project-first-chat",
+    );
+  });
+
+  it("binds control cancellation to the capability's exact correlation", () => {
+    claimSurface("session-cancel-binding");
+    const opened = runJson([
+      "control",
+      "open",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-binding",
+      "--task",
+      "c2c_cancel_binding",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(opened.command.status).toBe(0);
+    const requestId = String((opened.body.request as { requestId: string }).requestId);
+
+    const wrong = runJson([
+      "control",
+      "cancel",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-binding",
+      "--request",
+      requestId,
+      "--task",
+      "c2c_wrong_cancel_binding",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(wrong.command.status).toBe(1);
+    expect(wrong.body.error).toMatch(/match|binding|correlation/i);
+    const stillPending = runJson([
+      "control",
+      "status",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-binding",
+      "--request",
+      requestId,
+      "--task",
+      "c2c_cancel_binding",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(stillPending.body.status).toBe("pending");
+
+    const cancelled = runJson([
+      "control",
+      "cancel",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-binding",
+      "--request",
+      requestId,
+      "--task",
+      "c2c_cancel_binding",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(cancelled.command.status).toBe(0);
+    const cancelledStatus = runJson([
+      "control",
+      "status",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-binding",
+      "--request",
+      requestId,
+      "--task",
+      "c2c_cancel_binding",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(cancelledStatus.body.status).toBe("cancelled");
+  });
+
   it("opens RESEARCH requests and exposes their current progress", () => {
+    claimSurface("session-research");
     const opened = runJson([
       "control",
       "open",
@@ -83,12 +263,35 @@ describe("control CLI correlation", () => {
       "--phase",
       "RESEARCH",
     ]);
-    expect(opened.command.status).toBe(0);
+    expect(opened.command.status, JSON.stringify(opened)).toBe(0);
+    expect(opened.body.contextId).toMatch(/^c2c_ctx_[A-Za-z0-9_-]{43}$/);
+    expect(opened.body.surface).toMatchObject({
+      tabId: "tab-session-research",
+      generation: 1,
+    });
+    expect(opened.body.contextExpiresAt).toEqual(expect.any(String));
     const request = opened.body.request as {
       requestId: string;
       workspaceId: string;
       allowedKinds: string[];
     };
+    const pending = runJson([
+      "control",
+      "status",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-research",
+      "--request",
+      request.requestId,
+      "--task",
+      "c2c_research1",
+      "--iteration",
+      "0",
+      "--phase",
+      "RESEARCH",
+    ]);
+    expect(pending.body.status).toBe("pending");
     expect(request.allowedKinds).toEqual(["RESEARCH", "BLOCKED"]);
 
     reportControlProgress(request.workspaceId, {
@@ -117,11 +320,11 @@ describe("control CLI correlation", () => {
       "RESEARCH",
     ]);
     expect(status.command.status).toBe(0);
-    expect(status.body.status).toBe("pending");
     expect(status.body.progress).toMatchObject({ status: "SEARCHING" });
   });
 
   it("keeps one question and answer bound through open, wait, and acknowledge", () => {
+    claimSurface("session-a");
     const opened = runJson([
       "control",
       "open",
@@ -136,7 +339,7 @@ describe("control CLI correlation", () => {
       "--phase",
       "PLAN",
     ]);
-    expect(opened.command.status).toBe(0);
+    expect(opened.command.status, JSON.stringify(opened)).toBe(0);
     const request = opened.body.request as { requestId: string; workspaceId: string };
 
     const overlapping = runJson([
@@ -262,6 +465,126 @@ describe("control CLI correlation", () => {
     expect((next.body.request as { requestId: string }).requestId).not.toBe(request.requestId);
   }, 60_000);
 
+  it("cancels the exact mailbox request after a gateway restart invalidates its context", async () => {
+    claimSurface("session-cancel");
+    const opened = runJson([
+      "control",
+      "open",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel",
+      "--task",
+      "c2c_cancel1",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(opened.command.status, JSON.stringify(opened)).toBe(0);
+    const request = opened.body.request as { requestId: string };
+
+    await machine.close();
+    machine = await startManagedMachineFixture(stateDir);
+    const recovered = runJson([
+      "control",
+      "cancel",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel",
+      "--request",
+      request.requestId,
+      "--task",
+      "c2c_cancel1",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(recovered.command.status).toBe(0);
+    expect(recovered.body.contextCancelled).toBe(false);
+    expect(recovered.body.contextInvalidated).toBe(true);
+
+    const status = runJson([
+      "control",
+      "status",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel",
+      "--request",
+      request.requestId,
+      "--task",
+      "c2c_cancel1",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(status.command.status).toBe(0);
+    expect(status.body.status).toBe("cancelled");
+  });
+
+  it("does not cancel the mailbox while gateway ownership is uncertain", () => {
+    claimSurface("session-cancel-uncertain");
+    const opened = runJson([
+      "control",
+      "open",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-uncertain",
+      "--task",
+      "c2c_cancel_uncertain",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(opened.command.status).toBe(0);
+    const request = opened.body.request as { requestId: string };
+    write(stateDir, "runtime/machine.json", "{broken runtime");
+
+    const cancelled = runJson([
+      "control",
+      "cancel",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-uncertain",
+      "--request",
+      request.requestId,
+      "--task",
+      "c2c_cancel_uncertain",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(cancelled.command.status).toBe(1);
+    expect(cancelled.body.error).toMatch(/uncertain/i);
+
+    const status = runJson([
+      "control",
+      "status",
+      "-w",
+      workspace,
+      "--local-session",
+      "session-cancel-uncertain",
+      "--request",
+      request.requestId,
+      "--task",
+      "c2c_cancel_uncertain",
+      "--iteration",
+      "0",
+      "--phase",
+      "PLAN",
+    ]);
+    expect(status.command.status).toBe(1);
+    expect(status.body.error).toMatch(/runtime|gateway|machine/i);
+  });
+
   it("rejects partially numeric timing and command exit-code options", () => {
     const ttl = runJson([
       "control",
@@ -302,6 +625,70 @@ describe("control CLI correlation", () => {
     ]);
     expect(record.status).toBe(1);
     expect(`${record.stdout}\n${record.stderr}`).toMatch(/exit-code must be an integer/);
-    expect(fs.existsSync(path.join(stateDir, "executions"))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, "workspace-data", "executions"))).toBe(false);
+  });
+
+  it("keeps Project/chat routing behind surface commit", () => {
+    const otherWorkspace = makeTmpDir("cli-route-lockdown-other");
+    try {
+      const routeOptions = [
+        [
+          "--project-url",
+          "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
+        ],
+        [
+          "--url",
+          "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/route-bypass",
+        ],
+        ["--connector-name", "route-bypass"],
+        ["--mode", "project"],
+      ];
+      for (const root of [workspace, otherWorkspace]) {
+        for (const options of routeOptions) {
+          const result = runCli([
+            "session",
+            "set",
+            "-w",
+            root,
+            "--local-session",
+            "route-lockdown",
+            ...options,
+            "--json",
+          ], root);
+          expect(result.status).toBe(1);
+          expect(`${result.stdout}\n${result.stderr}`).toMatch(/unknown option|unknown command/);
+        }
+        const saved = runJson(["session", "get", "-w", root, "--local-session", "route-lockdown"], root);
+        expect(saved.command.status).toBe(0);
+        expect(saved.body.session).toBeNull();
+      }
+
+      claimSurface("route-lockdown");
+      const before = runJson(["session", "get", "-w", workspace, "--local-session", "route-lockdown"]);
+      const updated = runJson([
+        "session",
+        "set",
+        "-w",
+        workspace,
+        "--local-session",
+        "route-lockdown",
+        "--task",
+        "c2c_route_lockdown",
+        "--iteration",
+        "0",
+        "--protocol-state",
+        "PLAN_RECEIVED",
+        "--waiting-for",
+        "GPT_REVIEW",
+      ]);
+      expect(updated.command.status).toBe(0);
+      expect(updated.body.session).toMatchObject({
+        projectUrl: before.body.session.projectUrl,
+        url: before.body.session.url,
+        checkpoint: { protocolState: "PLAN_RECEIVED" },
+      });
+    } finally {
+      cleanup(otherWorkspace);
+    }
   });
 });

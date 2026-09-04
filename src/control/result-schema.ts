@@ -33,7 +33,6 @@ export type ControlMailboxErrorCode =
   | "MAILBOX_PROGRESS_NOT_ALLOWED"
   | "MAILBOX_PROGRESS_OUT_OF_ORDER"
   | "RESULT_ALREADY_SUBMITTED"
-  | "MAILBOX_QUOTA_EXCEEDED"
   | "INVALID_RESULT";
 
 export class ControlMailboxError extends Error {

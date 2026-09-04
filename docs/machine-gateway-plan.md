@@ -1,255 +1,249 @@
-# Machine Gateway Plan
+# Machine Gateway Implementation Plan
 
-Status: Phase 1 safety foundation complete; account-side tunnel E2E and Phase 2
-integration remain pending, and the shipped transport is still per-workspace
+This is the implementation contract for the machine-wide architecture. It is
+intentionally written as an end-state plan: no workspace-specific service or
+second connection path is required.
 
-## Outcome
+## Product requirements
 
-Configure ChatGPT once per machine, then let any local Codex workspace use the
-same connector without exposing one workspace to another or taking ownership
-of the user's normal ChatGPT conversations.
+1. Configure one ChatGPT connector per machine:
+   `Codex with ChatGPT`, `Authentication: None`.
+2. Use one official OpenAI Secure MCP Tunnel.
+3. Let that Tunnel own one `serve-machine --stdio` process.
+4. Route any registered workspace from trusted local `cwd` state.
+5. Give every workspace one ChatGPT Project.
+6. Give every local Codex session one persistent Project chat and one owned
+   browser page.
+7. Target the exact page `tabId`; never infer ownership from visibility.
+8. Allow unlimited cross-session pages and turns. Serialize only a single
+   session's ordered control turns.
+9. Scope backoff, retry and browser recovery to the affected session.
+10. Require `context_id` on every MCP call and `CONTEXT_ID` in every control
+    prompt.
+11. On macOS, enable one LaunchAgent after setup and verify it with
+    `c2c autostart status --json`.
 
-Success means:
+## Delivery layers
 
-- the second workspace requires no ChatGPT connector setup;
-- a tool call without a live, locally issued turn capability cannot enumerate
-  or read any registered workspace;
-- each local Codex session owns a separate, persistent ChatGPT browser page;
-- moving a Git checkout keeps its logical Project mapping while preserving a
-  checkout-specific filesystem boundary;
-- any number of session pages may remain parked, while at most five pages are
-  actively submitting or generating by default; later work queues without
-  reusing, navigating, or evicting another session's page.
+### Layer 1: Machine identity and state
 
-## Decisions
+- Resolve a stable machine identity and create a unique `bootEpoch` per gateway
+  lifetime.
+- Store tunnel configuration, runtime key, admin token, lifetime record and
+  workspace registrations in protected machine state.
+- Store mutable workspace data inside the repository boundary: Git checkouts
+  use `<git-common-dir>/codex-with-chatgpt`; non-Git workspaces use
+  `<workspace-root>/.codex-with-chatgpt`.
+- Keep the authoritative Project URL, physical-tab and generation ownership
+  index in protected machine state. Workspace page files are recovery mirrors
+  only and are never imported into that authority.
+- Make state writes atomic and owner-checked.
+- Never include runtime keys or raw capabilities in status output.
 
-1. Use one machine daemon, one OpenAI Secure MCP Tunnel runtime, and one
-   ChatGPT connector.
-2. Keep ChatGPT Projects and chats as organization and continuity metadata.
-   They are never authorization inputs.
-3. Resolve the workspace only from trusted local registration. A model-provided
-   workspace name, Project id, conversation id, current tab, cwd, or absolute
-   path cannot select a filesystem root.
-4. Require a high-entropy, short-lived turn capability for every data-plane
-   tool call. Store only its SHA-256 hash locally.
-5. Retain the existing mailbox correlation and workspace path protections.
-6. Use a dedicated managed ChatGPT page per local session. A model or effort
-   change may rotate that page, but never changes workspace access or transfers
-   ownership to another session.
-7. Replace obsolete per-workspace transport and authorization paths after the
-   global path passes its end-to-end gate. Do not maintain two permanent stacks.
+Acceptance: a second process cannot publish over a healthy runtime; a stopped
+process only clears its own exact record.
 
-## Target Architecture
+### Layer 2: Official Tunnel runtime
+
+- Install and checksum-verify the pinned official tunnel client.
+- Start it with the configured tunnel id and file-based runtime key.
+- Pass the child command as:
+
+  ```text
+  node <checkout>/bin/c2c.js serve-machine --stdio --port 0
+  ```
+
+- Report ready only when the Tunnel, child process and gateway health endpoint
+  all agree.
+- Stop the supervisor first so child ownership remains unambiguous.
+
+Acceptance: `machine status` exposes configured/healthy/ready state and the
+actual admin port without exposing secrets.
+
+### Layer 3: Machine autostart
+
+- Install one machine-wide LaunchAgent only on macOS.
+- Its `ProgramArguments` must be the hidden command
+  `c2c autostart run --quiet`.
+- The wake command only invokes `ensureMachineGateway`; it reuses the official
+  Tunnel-owned child and never starts a workspace-specific process.
+- Enable and verify it once after machine setup:
+
+  ```sh
+  c2c autostart enable --json
+  c2c autostart status --json
+  ```
+
+- Disable it with `c2c autostart disable --json`.
+
+Acceptance: a login or wake event can recover the one managed machine runtime,
+while no second Tunnel, gateway, or browser-page scheduler is created.
+
+### Layer 4: Workspace registry
+
+- Register a trusted canonical root and derive `workspaceId` and `projectId`.
+- Keep a current `registrationId` and revoke old registrations.
+- Validate containment and root identity on every claim.
+- Route explicit and automatically detected stale registration removal through
+  the same capability-revocation and last-checkout cleanup lifecycle.
+- Never use a Project or conversation id as filesystem authorization.
+
+Acceptance: two workspaces can be registered at once; moving or replacing a
+checkout requires a fresh registration; traversal and symlink escapes fail.
+
+### Layer 5: Capability broker
+
+- Issue random short-lived `CONTEXT_ID` values.
+- Bind each capability to machine boot, workspace registration, Project,
+  local session, task, iteration, phase, compaction epoch, page generation and
+  scopes.
+- Track claims with activity leases and renew them during long MCP calls.
+- Revoke on expiry, cancellation, registration change, page rotation,
+  compaction or gateway restart.
+- Fence completion until leases drain, then write the mailbox result.
+
+Acceptance: a token copied between sessions, tasks, phases, page generations or
+machine boots is rejected; mailbox failure never becomes a false completion.
+
+### Layer 6: Surface ownership
+
+- Persist `projectId + localSessionId -> browserId + surfaceId + tabId` in the
+  protected machine ownership index.
+- Persist `projectId -> normalized projectUrl` independently of session leases
+  so new sessions and linked worktrees reuse the existing ChatGPT Project.
+- Require exact Project/chat URL matching.
+- Enforce one local project per normalized ChatGPT Project URL and one owner
+  per physical browser/surface/tab tuple across all registered workspaces.
+- Give each surface a generation and owner process epoch.
+- Keep a machine-wide generation allocator monotonic across release, expiry,
+  and session retirement while pruning inactive per-session entries.
+- Permit live replacement only with the exact current generation.
+- Do not impose a machine-wide tab or session count.
+
+Acceptance: two local sessions in one Project own different tabs and can submit
+independently; another workspace cannot reuse that Project or either tab; a
+stale session or edited workspace mirror cannot rotate or replay ownership.
+
+### Layer 7: Mailbox correlation
+
+- Open one request for one question/answer pair.
+- Refuse to replace an existing open request with a new context.
+- Validate exact request, session, task, iteration, phase and payload schema.
+- Use `pending -> received -> acknowledged` with explicit cancellation and
+  expiry states.
+- Accept results only through the protected machine mailbox. Browser text is
+  never a result transport.
+
+Acceptance: a late result for a different request is rejected, and a wait
+timeout never causes an implicit resend.
+
+### Layer 8: ChatGPT workflow
+
+- Have `machine setup` install or update one global Skill automatically rather
+  than copying a project-specific setup.
+- For a new workspace, create one Project and set project-only memory if the
+  user chooses that ChatGPT mode.
+- Start every new local session from the workspace Project collection page.
+- Claim the new chat's exact `tabId` and save its URL only after
+  `workspace_info` verifies the workspace.
+- Use only the built-in browser, stable URLs and DOM APIs. Do not use
+  screenshot-coordinate control for normal operations.
+- Put `RESULT_REQUEST_ID`, `CONTEXT_ID`, `LOCAL_SESSION_ID`, `TASK_ID`,
+  `ITERATION` and `RESULT_PHASE` in every control prompt.
+- Send the next control message only after the current request is terminal.
+
+Acceptance: a user's ordinary ChatGPT tabs remain untouched; each local session
+has a visibly independent Project chat; ChatGPT passes `context_id` to every
+MCP call.
+
+## CLI surface
+
+Machine lifecycle:
 
 ```text
-ChatGPT Project A / chats A1, A2 ----+
-ChatGPT Project B / chats B1, B2 ----+--> one machine connector
-                                             |
-                                      OpenAI Secure MCP Tunnel
-                                             |
-                                      machine gateway daemon
-                                             |
-                                      turn capability broker
-                                      /                    \
-                              Workspace A              Workspace B
-                                      \                    /
-                                  correlated local mailbox
+c2c machine setup --tunnel-id ... --runtime-key-file ...
+c2c skill status [--json]
+c2c machine start
+c2c machine status [--json]
+c2c machine doctor [--no-fix] [--json]
+c2c machine stop
+c2c sandbox-clean [--json]
+c2c update-check -w <workspace-root> [--json]
+c2c autostart enable [--json]
+c2c autostart status [--json]
+c2c autostart disable [--json]
 ```
 
-The tunnel runtime credential authenticates the machine runtime to the tunnel
-control plane. It is not a model API key and it is never sent to ChatGPT. The
-connector may use `Authentication: None` only because every workspace tool is
-separately gated by a turn capability.
-
-## Identity Model
-
-Identity is deliberately split instead of overloading a path hash:
+Workspace and context:
 
 ```text
-projectId
-  workspaceId + registrationId
-    localSessionId
-      taskId + iteration + phase
-        compactionEpoch + generation
+c2c machine workspace register   # run from the workspace root
+c2c machine workspace unregister --workspace-id ... --project-id ... --registration-id ...
+c2c machine context issue ...
+c2c machine context cancel --context-id ...
 ```
 
-- `projectId` identifies the logical local repository. For Git repositories it
-  is random local metadata stored in the Git common directory, so a directory
-  move preserves it and linked worktrees share it. Independent clones receive
-  different ids. If that metadata is malformed, read-only, or cannot be
-  atomically created, identity explicitly degrades to a path-based id; move and
-  linked-worktree continuity are then unavailable until the metadata is fixed.
-- `workspaceId` identifies one canonical checkout root and remains the
-  filesystem security boundary.
-- `registrationId` identifies the current incarnation of that checkout root.
-  The gateway records the root filesystem identity and Git project identity,
-  then revalidates both before every lease-based resolution. Replacing a
-  directory at the same path retires the old registration.
-- `localSessionId` identifies one Codex task/conversation route.
-- `taskId`, `iteration`, and `phase` bind one protocol turn and mailbox result.
-- `compactionEpoch` invalidates context from before a compaction.
-- `generation` invalidates an old page owner after refresh, reconnect, handoff,
-  cancellation, or surface replacement.
-- `modelId` and `effort` are surface scheduling attributes and optional
-  capability constraints. They never authorize a workspace.
-
-## Turn Capability Lifecycle
-
-A capability binds:
+Session and page:
 
 ```text
-workspaceId + projectId + registrationId + localSessionId + taskId + iteration + phase
-+ scopes + compactionEpoch + generation + bootEpoch + absoluteExpiry
+c2c workspace                 # run from the workspace root
+c2c surface get|claim|commit|renew|release|retire ...
+c2c session get|set|clear ...  # set updates task/checkpoint metadata only
 ```
 
-Lifecycle:
-
-1. The local Codex skill registers the canonical workspace and turn over an
-   owner-only local control channel.
-2. The gateway returns a random capability to that turn only.
-3. Each MCP invocation claims the capability and creates an activity lease.
-4. Completion closes the claim gate, waits for all leases to release, verifies
-   the completion fence, and only then commits the result. Existing leases may
-   renew while the gate is closed so long-running calls cannot be mistaken for
-   completed work.
-5. Completion, cancellation, expiry, ownership rotation, checkout replacement,
-   or gateway restart
-   rejects all later claims. A bounded tombstone distinguishes a replay from an
-   unknown token without retaining the raw token. Draining terminal turns are
-   never evicted while a lease is live; the overall capability bound limits
-   them until they drain.
-
-## Browser Page Ownership
-
-Page ownership and execution concurrency are separate limits:
+Control mailbox:
 
 ```text
-localSessionId
-  -> browser surface id + tab id
-  -> ChatGPT Project URL
-  -> ChatGPT chat URL
-  -> ownership generation + lease
+c2c control open ...
+c2c control status ...
+c2c control wait ...
+c2c control ack ...
+c2c control cancel ...
 ```
 
-- Every local Codex session gets its own persistent in-app browser page and
-  ChatGPT chat. An idle page is parked for that session; it is not returned to
-  a shared page pool or claimed by another session.
-- The default concurrency of five counts only pages actively submitting a
-  message, waiting for generation, or collecting the correlated result. It is
-  configurable and is not a limit on local sessions, saved chats, or parked
-  pages.
-- Browser automation targets the owned tab directly by id, so active sessions
-  do not depend on the globally focused page. Screenshot/coordinate Computer
-  Use is reserved for UI that cannot be addressed through the tab DOM and is
-  serialized behind one machine-wide input lock.
-- Login, CAPTCHA, 2FA, and consent screens remain foreground, user-controlled
-  operations. Ordinary ChatGPT pages that are not registered to a local C2C
-  session are never claimed or navigated.
+`control cancel` is keyed by the exact request correlation and does not require
+the capability token. Healthy gateways revoke matching live contexts by
+request; a zero-match result is valid after a pre-issue crash or gateway
+restart. A stopped gateway is restarted before the protected mailbox is
+changed, while an uncertain gateway state fails closed.
 
-## Delivery Plan
+## Non-goals
 
-### Phase 0: Tunnel eligibility spike
+- A fixed five-page or any global concurrency limit.
+- A single global “active workspace” selected by whichever page is visible.
+- User-provided absolute paths as ChatGPT authorization.
+- A second MCP broker per workspace.
+- Pasting repository content, diffs or logs into prompts.
+- Browser screenshot coordinates as the routine automation API.
+- Treating Project ids, chat ids, or model output as security credentials.
+- Recreating the connection for every turn.
 
-Validate the target ChatGPT account and supported operating systems against the
-official tunnel runtime. Confirm stdio transport, connector `Auth=None`, health,
-reconnect, and whether per-chat MCP session metadata is stable and distinct.
+## Verification matrix
 
-Gate: proceed with the official tunnel only when reconnect works and no runtime
-credential reaches prompts, process arguments, or logs. Otherwise keep the
-machine gateway design and select one different transport before Phase 3.
+| Area | Required check |
+| --- | --- |
+| Build | `corepack pnpm typecheck` and `corepack pnpm build` |
+| Tests | Full Vitest suite, including machine, tunnel, gateway, mailbox and surface tests |
+| Tunnel | Official client checksum/version and child `serve-machine --stdio` |
+| Isolation | Two or more workspaces and sessions route to their own roots/pages |
+| Capacity | More than five session/page owners execute without scheduler rejection |
+| Stale state | Old boot, registration, generation, epoch and context are rejected |
+| Mailbox | Duplicate open, late result, cancellation and write failure are covered |
+| Browser | Exact `tabId` targeting; ordinary user tabs are untouched |
+| Secrets | Runtime key, admin token and raw context absent from normal output |
+| Docs | README, protocol, security and Skill agree on one connector and `None` auth |
 
-### Phase 1: Safety foundation
+## Rollout order
 
-- add stable `projectId` while retaining checkout-specific `workspaceId` and a
-  root-incarnation `registrationId`;
-- add the in-memory turn capability broker, activity leases, completion fence,
-  cancellation, expiry, boot epoch, and bounded tombstones;
-- start with one active turn;
-- add replay, cross-workspace, cross-session, expiry, and completion-race tests.
+1. Build and test the machine gateway, registry and broker locally.
+2. Install and verify the official Tunnel runtime.
+3. On macOS, enable autostart once and verify its status.
+4. Register one workspace and claim one Project chat.
+5. Run a read-only boot check and a mailbox control turn.
+6. Add a second workspace and multiple sessions; verify independent tabs and
+   affected-session-only recovery.
+7. Install the global Skill and verify a fresh Codex session.
+8. Run the full suite, doctor, secret scan, diff check and documentation review.
 
-Gate: all mismatched or stale claims fail closed, directory moves retain the
-Git project id when its common metadata is healthy and writable, degraded
-identity is explicit, and existing workspace behavior remains green.
-
-### Phase 2: Machine gateway
-
-- replace the bridge's constructor-bound Workspace with a machine registry;
-- expose an owner-only local registration/control API;
-- resolve an immutable `TurnContext` from the capability for every MCP call;
-- bind mailbox submission to the same capability without reusing request ids as
-  general-purpose capabilities;
-- run one daemon and one health/doctor lifecycle per machine.
-
-Gate: two workspaces and two local sessions can run in either order without
-cross-reading, and a prompt-supplied root never changes routing.
-
-### Phase 3: One connector and tunnel
-
-- connect the gateway's stdio MCP server to one Secure MCP Tunnel runtime;
-- store the runtime credential in the OS credential store or an owner-only
-  state file;
-- make setup idempotent and machine-scoped;
-- remove the per-workspace Cloudflare tunnel, connector, OAuth, and pairing
-  paths after the end-to-end gate passes.
-
-Gate: initial machine setup creates one connector; adding a second repository
-does not open ChatGPT settings or create another connector.
-
-### Phase 4: Surface ownership
-
-- allocate one persistent managed ChatGPT page and chat per local session,
-  identified by browser surface id, tab id, and ownership generation;
-- keep Project URL and chat URL mapping for navigation and memory only;
-- rotate on model/effort changes or compaction when required;
-- park an idle session's page without making it available to another session;
-- never claim or navigate a user's ordinary ChatGPT tab.
-
-Gate: concurrent sessions retain distinct URLs, cancellation releases exactly
-one owner, and the user's previously active ordinary chat remains unchanged.
-
-### Phase 5: Bounded concurrency
-
-- allow at most five actively automated or generating pages by default while
-  retaining any number of parked session-owned pages;
-- serialize work within one task;
-- queue a sixth task and wake it when a completed or cancelled surface releases;
-- never evict a running surface;
-- target ordinary browser operations by tab id; serialize the rare global-input
-  Computer Use fallback;
-- recover leases and ownership safely after browser or daemon failure.
-
-Gate: five unique owners run, the sixth waits, and release wakes one correct
-waiter without reviving an old capability.
-
-## Security Invariants
-
-- No active capability means no workspace discovery.
-- Only trusted local registration can bind a canonical root.
-- A capability is exact to workspace, registration incarnation, session, task,
-  iteration, phase, scope, epoch, generation, boot, and expiry.
-- Root filesystem and project identity are revalidated before lease routing.
-- All leases release in `finally`; completion cannot pass with live activity.
-- Project/chat ids and model output are never filesystem authorization.
-- Mailbox results remain exactly-once and correlation-bound.
-- Realpath containment, symlink escape prevention, and sensitive-file filtering
-  cannot regress.
-- Runtime credentials and raw capabilities never appear in logs.
-
-## Explicitly Out Of Scope
-
-- Using a ChatGPT Project or conversation id as a security principal.
-- A mutable global `activeWorkspace`.
-- Letting the model submit an absolute local path.
-- Scraping the last visible assistant response as task completion.
-- Creating a new tunnel or connector for every turn or workspace.
-- Avoiding all ChatGPT Web sessions. That requires a separately billed model
-  API and is a different product mode.
-
-## References
-
-- `miuuyy/codex-chatgpt-web` at `985e0d9`: global connector, Secure Tunnel,
-  turn broker, leases, completion fence, and managed conversation surfaces.
-- `Zhenyu98/codex-chatgpt-bridge` at `351c66f`: desired-state lifecycle,
-  health gates, recoverable restart, and ownership checks.
-- This project: canonical workspace containment, per-session Project/chat
-  mapping, and correlated result mailbox.
+The rollout is complete only when the one-machine setup works for multiple
+workspaces and sessions without any hard-coded page or session cap.

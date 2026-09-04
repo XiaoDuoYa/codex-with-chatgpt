@@ -6,6 +6,7 @@ import { writeSecureJsonExclusive } from "../config/paths.js";
 
 const GIT_PROJECT_ID_PATTERN = /^git-[a-f0-9]{32}$/;
 const PROJECT_ID_METADATA = "c2c-project-id";
+const PROJECT_DATA_DIRECTORY = "codex-with-chatgpt";
 
 interface ProjectIdMetadata {
   version: 1;
@@ -30,6 +31,18 @@ export function projectIdMetadataPath(root: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Keep mutable control state inside the workspace's own sandbox boundary.
+ * Git worktrees share their common metadata directory; non-Git directories
+ * use a hidden directory that moves with the workspace.
+ */
+export function projectDataDirectory(root: string): string {
+  const metadataFile = projectIdMetadataPath(root);
+  return metadataFile
+    ? path.join(path.dirname(metadataFile), PROJECT_DATA_DIRECTORY)
+    : path.join(fs.realpathSync.native(root), ".codex-with-chatgpt");
 }
 
 function readMetadata(file: string): string | null {

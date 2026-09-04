@@ -32,8 +32,7 @@ import {
 
 const REQUEST_TTL_MS = 30 * 60 * 1000;
 const MIN_REQUEST_TTL_MS = 1_000;
-const MAX_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_ACTIVE_REQUESTS = 8;
+const MAX_REQUEST_TTL_MS = 60 * 60_000;
 const RETAIN_TERMINAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type ControlRequestStatus =
@@ -57,8 +56,21 @@ export interface ControlStatus {
   progress: ControlProgressEnvelope | null;
 }
 
+/**
+ * Resolve the machine-owned mailbox root.
+ *
+ * Control results are security-sensitive coordination state. They must not be
+ * stored below a checkout or any other workspace-writable directory: a local
+ * process in that workspace could otherwise forge a request, result, or
+ * terminal marker. The machine gateway is the production owner of this path.
+ */
+export function getControlMailboxDir(workspaceId: string): string {
+  const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
+  return ensureDir(path.join(getStateDir(), "control-mailbox", resolvedWorkspaceId));
+}
+
 function workspaceDir(workspaceId: string): string {
-  return ensureDir(path.join(getStateDir(), "control-mailbox", validateControlId(workspaceId, "workspace id")));
+  return getControlMailboxDir(workspaceId);
 }
 
 function requestsDir(workspaceId: string): string {
@@ -117,8 +129,15 @@ function requestLockFile(workspaceId: string, requestId: string): string {
   return path.join(locksDir(workspaceId), `${validateControlId(requestId, "request id")}.lock`);
 }
 
-function lifecycleLockFile(workspaceId: string): string {
-  return path.join(locksDir(workspaceId), "lifecycle.lock");
+function sessionLifecycleLockFile(workspaceId: string, localSessionId: string): string {
+  return path.join(
+    ensureDir(path.join(locksDir(workspaceId), "sessions")),
+    `${validateLocalSessionId(localSessionId)}.lock`
+  );
+}
+
+function pruneLockFile(workspaceId: string): string {
+  return path.join(locksDir(workspaceId), "prune.lock");
 }
 
 function integrityError(message: string): never {
@@ -609,6 +628,19 @@ export function openControlResultRequest(
   workspaceId: string,
   input: OpenControlResultRequestInput
 ): ControlResultRequest {
+  return openControlResultRequestWithStatus(workspaceId, input).request;
+}
+
+export interface OpenControlResultRequestStatus {
+  request: ControlResultRequest;
+  created: boolean;
+}
+
+/** Open a request and report whether this call created it or recovered it. */
+export function openControlResultRequestWithStatus(
+  workspaceId: string,
+  input: OpenControlResultRequestInput
+): OpenControlResultRequestStatus {
   const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
   const localSessionId = validateLocalSessionId(input.localSessionId);
   const correlation = normalizeCorrelation(input);
@@ -619,65 +651,40 @@ export function openControlResultRequest(
       `request lifetime must be an integer between ${MIN_REQUEST_TTL_MS} and ${MAX_REQUEST_TTL_MS} milliseconds`
     );
   }
-  return withFileLock(lifecycleLockFile(resolvedWorkspaceId), () => {
-    pruneControlMailboxUnlocked(resolvedWorkspaceId, Date.now());
-    for (let attempt = 0; attempt < 4; attempt++) {
-      const activeRequest = readActiveRequest(resolvedWorkspaceId, localSessionId);
-      if (activeRequest) {
-        if (isUnfinished(resolvedWorkspaceId, activeRequest)) {
-          if (!matchesCorrelation(activeRequest, correlation)) turnInProgress(activeRequest);
-          ensureRequestFile(resolvedWorkspaceId, activeRequest);
-          return activeRequest;
-        }
-        clearActiveRequest(resolvedWorkspaceId, localSessionId, activeRequest.requestId);
-        continue;
+  return withFileLock(sessionLifecycleLockFile(resolvedWorkspaceId, localSessionId), () => {
+    const activeRequest = readActiveRequest(resolvedWorkspaceId, localSessionId);
+    if (activeRequest) {
+      if (isUnfinished(resolvedWorkspaceId, activeRequest)) {
+        if (!matchesCorrelation(activeRequest, correlation)) turnInProgress(activeRequest);
+        ensureRequestFile(resolvedWorkspaceId, activeRequest);
+        return { request: activeRequest, created: false };
       }
-
-      const requests = listRequests(resolvedWorkspaceId);
-      const unfinishedForSession = requests
-        .filter(
-          (request) => request.localSessionId === localSessionId && isUnfinished(resolvedWorkspaceId, request)
-        )
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      if (unfinishedForSession.length > 1) {
-        integrityError("local session has multiple unfinished control requests");
-      }
-      const existing = unfinishedForSession[0];
-      if (existing && !matchesCorrelation(existing, correlation)) turnInProgress(existing);
-
-      if (
-        !existing &&
-        requests.filter((request) => isUnfinished(resolvedWorkspaceId, request)).length >= MAX_ACTIVE_REQUESTS
-      ) {
-        throw new ControlMailboxError("MAILBOX_QUOTA_EXCEEDED", "too many active control result requests");
-      }
-
-      const now = Date.now();
-      const request: ControlResultRequest =
-        existing ??
-        {
-          schemaVersion: 1,
-          requestId: randomBytes(24).toString("hex"),
-          workspaceId: resolvedWorkspaceId,
-          localSessionId,
-          taskId: correlation.taskId,
-          iteration: correlation.iteration,
-          phase: correlation.phase,
-          allowedKinds: allowedKindsForPhase(correlation.phase),
-          createdAt: new Date(now).toISOString(),
-          expiresAt: new Date(now + ttlMs).toISOString(),
-        };
-      if (!claimActiveRequest(resolvedWorkspaceId, request)) continue;
-      if (existing) return existing;
-      try {
-        ensureRequestFile(resolvedWorkspaceId, request);
-        return request;
-      } catch (error) {
-        clearActiveRequest(resolvedWorkspaceId, localSessionId, request.requestId);
-        throw error;
-      }
+      clearActiveRequest(resolvedWorkspaceId, localSessionId, activeRequest.requestId);
     }
-    throw new ControlMailboxError("MAILBOX_TURN_IN_PROGRESS", "control request changed concurrently; retry");
+
+    const now = Date.now();
+    const request: ControlResultRequest = {
+      schemaVersion: 1,
+      requestId: randomBytes(24).toString("hex"),
+      workspaceId: resolvedWorkspaceId,
+      localSessionId,
+      taskId: correlation.taskId,
+      iteration: correlation.iteration,
+      phase: correlation.phase,
+      allowedKinds: allowedKindsForPhase(correlation.phase),
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + ttlMs).toISOString(),
+    };
+    if (!claimActiveRequest(resolvedWorkspaceId, request)) {
+      integrityError("local session active request changed while its lifecycle lock was held");
+    }
+    try {
+      ensureRequestFile(resolvedWorkspaceId, request);
+      return { request, created: true };
+    } catch (error) {
+      clearActiveRequest(resolvedWorkspaceId, localSessionId, request.requestId);
+      throw error;
+    }
   });
 }
 
@@ -903,14 +910,45 @@ export async function waitForControlResult(
   requestId: string,
   timeoutMs: number,
   localSessionId: string,
-  expected: ControlResultCorrelation
+  expected: ControlResultCorrelation,
+  signal?: AbortSignal,
 ): Promise<ControlStatus> {
+  const throwIfAborted = (): void => {
+    if (signal?.aborted) {
+      throw signal.reason ?? Object.assign(new Error("control result wait aborted"), { name: "AbortError" });
+    }
+  };
+  const waitForPoll = (delayMs: number): Promise<void> => {
+    throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const cleanup = (): void => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onTimer = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = (): void => {
+        cleanup();
+        reject(signal?.reason ?? Object.assign(new Error("control result wait aborted"), { name: "AbortError" }));
+      };
+      timer = setTimeout(onTimer, delayMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  };
   const deadline = Date.now() + Math.max(0, timeoutMs);
   for (;;) {
+    throwIfAborted();
     const status = getControlResultStatus(workspaceId, requestId, localSessionId, expected);
     if (status.status !== "pending") return status;
     if (Date.now() >= deadline) return status;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(250, deadline - Date.now())));
+    await waitForPoll(Math.min(250, deadline - Date.now()));
   }
 }
 
@@ -922,12 +960,13 @@ export function acknowledgeControlResult(
 ): ControlStatus {
   const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
   const resolvedRequestId = validateControlId(requestId, "request id");
-  return withFileLock(lifecycleLockFile(resolvedWorkspaceId), () =>
+  const resolvedLocalSessionId = validateLocalSessionId(localSessionId);
+  return withFileLock(sessionLifecycleLockFile(resolvedWorkspaceId, resolvedLocalSessionId), () =>
     withFileLock(requestLockFile(resolvedWorkspaceId, resolvedRequestId), () => {
       const status = getControlResultStatus(
         resolvedWorkspaceId,
         resolvedRequestId,
-        localSessionId,
+        resolvedLocalSessionId,
         expected
       );
       if (status.status === "not_found") {
@@ -942,7 +981,7 @@ export function acknowledgeControlResult(
       return getControlResultStatus(
         resolvedWorkspaceId,
         resolvedRequestId,
-        localSessionId,
+        resolvedLocalSessionId,
         expected
       );
     })
@@ -957,12 +996,13 @@ export function cancelControlResultRequest(
 ): ControlStatus {
   const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
   const resolvedRequestId = validateControlId(requestId, "request id");
-  return withFileLock(lifecycleLockFile(resolvedWorkspaceId), () =>
+  const resolvedLocalSessionId = validateLocalSessionId(localSessionId);
+  return withFileLock(sessionLifecycleLockFile(resolvedWorkspaceId, resolvedLocalSessionId), () =>
     withFileLock(requestLockFile(resolvedWorkspaceId, resolvedRequestId), () => {
       const status = getControlResultStatus(
         resolvedWorkspaceId,
         resolvedRequestId,
-        localSessionId,
+        resolvedLocalSessionId,
         expected
       );
       if (status.status === "not_found") {
@@ -977,44 +1017,116 @@ export function cancelControlResultRequest(
       return getControlResultStatus(
         resolvedWorkspaceId,
         resolvedRequestId,
-        localSessionId,
+        resolvedLocalSessionId,
         expected
       );
     })
   );
 }
 
+export interface RetireControlResultSessionSummary {
+  localSessionId: string;
+  pendingCancelled: number;
+  receivedAcknowledged: number;
+  activeRequestCleared: boolean;
+}
+
+/**
+ * Retire every mailbox request owned by one local session. The session
+ * lifecycle lock is acquired before each request lock, matching open,
+ * acknowledge, and cancel operations. Received results are acknowledged as
+ * discarded so a later session can open a fresh request without consuming the
+ * old result; expired and already-terminal requests only lose the active
+ * pointer.
+ */
+export function retireControlResultSession(
+  workspaceId: string,
+  localSessionId: string,
+): RetireControlResultSessionSummary {
+  const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
+  const resolvedLocalSessionId = validateLocalSessionId(localSessionId);
+  return withFileLock(sessionLifecycleLockFile(resolvedWorkspaceId, resolvedLocalSessionId), () => {
+    let pendingCancelled = 0;
+    let receivedAcknowledged = 0;
+
+    for (const listedRequest of listRequests(resolvedWorkspaceId)) {
+      if (listedRequest.localSessionId !== resolvedLocalSessionId) continue;
+      withFileLock(requestLockFile(resolvedWorkspaceId, listedRequest.requestId), () => {
+        const request = readRequest(resolvedWorkspaceId, listedRequest.requestId);
+        if (!request || request.localSessionId !== resolvedLocalSessionId) return;
+        const status = getControlResultStatus(
+          resolvedWorkspaceId,
+          request.requestId,
+          resolvedLocalSessionId,
+          {
+            taskId: request.taskId,
+            iteration: request.iteration,
+            phase: request.phase,
+          },
+        );
+        if (status.status === "pending") {
+          writeTerminalMarker(resolvedWorkspaceId, request, "cancelled");
+          pendingCancelled += 1;
+        } else if (status.status === "received") {
+          writeTerminalMarker(resolvedWorkspaceId, request, "acknowledged");
+          receivedAcknowledged += 1;
+        }
+      });
+    }
+
+    const activeRequestCleared = readActiveRequest(resolvedWorkspaceId, resolvedLocalSessionId) !== null;
+    if (activeRequestCleared) {
+      const activeRequest = readActiveRequest(resolvedWorkspaceId, resolvedLocalSessionId);
+      if (activeRequest) clearActiveRequest(resolvedWorkspaceId, resolvedLocalSessionId, activeRequest.requestId);
+    }
+    return {
+      localSessionId: resolvedLocalSessionId,
+      pendingCancelled,
+      receivedAcknowledged,
+      activeRequestCleared,
+    };
+  });
+}
+
 function pruneControlMailboxUnlocked(resolvedWorkspaceId: string, now: number): number {
   let removed = 0;
   for (const listedRequest of listRequests(resolvedWorkspaceId)) {
-    removed += withFileLock(requestLockFile(resolvedWorkspaceId, listedRequest.requestId), () => {
-      const request = readRequest(resolvedWorkspaceId, listedRequest.requestId);
-      if (!request) return 0;
-      const terminal = readTerminalState(resolvedWorkspaceId, request);
-      const expiredAt = isExpired(request, now) ? Date.parse(request.expiresAt) : null;
-      const terminalAt = terminal ? Date.parse(terminal.timestamp) : expiredAt;
-      if (terminalAt === null || !Number.isFinite(terminalAt) || now - terminalAt <= RETAIN_TERMINAL_MS) {
-        return 0;
-      }
-      clearActiveRequest(resolvedWorkspaceId, request.localSessionId, request.requestId);
-      for (const file of [
-        requestFile(resolvedWorkspaceId, request.requestId),
-        resultFile(resolvedWorkspaceId, request.requestId),
-        progressFile(resolvedWorkspaceId, request.requestId),
-        ackFile(resolvedWorkspaceId, request.requestId),
-        cancelledFile(resolvedWorkspaceId, request.requestId),
-      ]) {
-        fs.rmSync(file, { force: true });
-      }
-      return 1;
-    });
+    removed += withFileLock(
+      sessionLifecycleLockFile(resolvedWorkspaceId, listedRequest.localSessionId),
+      () =>
+        withFileLock(requestLockFile(resolvedWorkspaceId, listedRequest.requestId), () => {
+          const request = readRequest(resolvedWorkspaceId, listedRequest.requestId);
+          if (!request) return 0;
+          const terminal = readTerminalState(resolvedWorkspaceId, request);
+          const expiredAt = isExpired(request, now) ? Date.parse(request.expiresAt) : null;
+          const terminalAt = terminal ? Date.parse(terminal.timestamp) : expiredAt;
+          if (
+            terminalAt === null ||
+            !Number.isFinite(terminalAt) ||
+            now - terminalAt <= RETAIN_TERMINAL_MS
+          ) {
+            return 0;
+          }
+          clearActiveRequest(resolvedWorkspaceId, request.localSessionId, request.requestId);
+          for (const file of [
+            requestFile(resolvedWorkspaceId, request.requestId),
+            resultFile(resolvedWorkspaceId, request.requestId),
+            progressFile(resolvedWorkspaceId, request.requestId),
+            ackFile(resolvedWorkspaceId, request.requestId),
+            cancelledFile(resolvedWorkspaceId, request.requestId),
+          ]) {
+            fs.rmSync(file, { force: true });
+          }
+          return 1;
+        })
+    );
   }
   return removed;
 }
 
 export function pruneControlMailbox(workspaceId: string, now = Date.now()): number {
   const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
-  return withFileLock(lifecycleLockFile(resolvedWorkspaceId), () =>
+  return withFileLock(pruneLockFile(resolvedWorkspaceId), () =>
     pruneControlMailboxUnlocked(resolvedWorkspaceId, now)
   );
 }

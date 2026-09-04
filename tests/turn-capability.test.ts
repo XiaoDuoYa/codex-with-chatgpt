@@ -15,6 +15,7 @@ function binding(overrides: Partial<TurnCapabilityBinding> = {}): TurnCapability
     taskId: "task-a",
     iteration: 2,
     phase: "EXECUTING",
+    requestId: "request-a",
     scopes: ["workspace.read", "workspace.write"],
     modelId: "gpt-5",
     effort: "high",
@@ -41,6 +42,7 @@ describe("turn capability broker", () => {
 
     expect(grant.token).toMatch(/^c2c_ctx_[A-Za-z0-9_-]{43}$/);
     expect(grant.token.length).toBeGreaterThan(40);
+    expect(broker.assertLive(grant.token)).toEqual(grant.binding);
     expect(JSON.stringify(broker)).not.toContain(grant.token);
     expect(JSON.stringify(broker.status(grant.token))).not.toContain(grant.token);
     expect(broker.status("c2c_ctx_invalid")).toEqual({
@@ -60,6 +62,7 @@ describe("turn capability broker", () => {
       { registrationId: "registration-b" },
       { localSessionId: "session-b" },
       { taskId: "other-task" },
+      { requestId: "other-request" },
       { compactionEpoch: 2 },
       { generation: 5 },
     ]) {
@@ -73,6 +76,17 @@ describe("turn capability broker", () => {
     const lease = broker.claim(grant.token, binding(), { requiredScopes: ["workspace.write"] });
     expect(lease.binding).toEqual({ ...binding(), scopes: ["workspace.read", "workspace.write"] });
     expect(lease.leaseId).toMatch(/^c2c_lease_[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("requires an exact mailbox request outside BOOT and forbids one during BOOT", () => {
+    const broker = new TurnCapabilityBroker();
+
+    expectCode(() => broker.issue(binding({ requestId: undefined })), "INVALID_BINDING");
+    expectCode(
+      () => broker.issue(binding({ phase: "BOOT", requestId: "request-a" })),
+      "INVALID_BINDING"
+    );
+    expect(() => broker.issue(binding({ phase: "BOOT", requestId: undefined }))).not.toThrow();
   });
 
   it("accepts only frozen lease objects issued by the same broker instance", () => {
@@ -91,26 +105,36 @@ describe("turn capability broker", () => {
     expectCode(() => broker.validateLease(lease), "LEASE_NOT_FOUND");
   });
 
-  it("enforces one active turn while allowing parallel and sequential leases", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 4, maxLeasesPerTurn: 2 });
-    const first = broker.issue(binding({ taskId: "first" }));
-    const second = broker.issue(binding({ taskId: "second" }));
-    const firstLease = broker.claim(first.token, binding({ taskId: "first" }));
-    const parallelLease = broker.claim(first.token, binding({ taskId: "first" }));
+  it("does not impose a default cross-session turn limit", () => {
+    const broker = new TurnCapabilityBroker();
+    const grants = Array.from({ length: 140 }, (_, index) => {
+      const turnBinding = binding({
+        localSessionId: `session-${index}`,
+        taskId: `task-${index}`,
+      });
+      return { grant: broker.issue(turnBinding), turnBinding };
+    });
+    const leases = grants.map(({ grant, turnBinding }) => broker.claim(grant.token, turnBinding));
+    const parallelLeases = Array.from({ length: 32 }, () =>
+      broker.claim(grants[0].grant.token, grants[0].turnBinding)
+    );
 
-    expect(parallelLease.leaseId).not.toBe(firstLease.leaseId);
-    expect(broker.status(first.token).activeLeaseCount).toBe(2);
-    expectCode(() => broker.claim(second.token, binding({ taskId: "second" })), "ACTIVE_TURN_LIMIT");
+    expect(new Set(leases.map((lease) => lease.leaseId)).size).toBe(140);
+    expect(new Set(parallelLeases.map((lease) => lease.leaseId)).size).toBe(32);
+    expect(broker.stats().activeTurnCount).toBe(140);
+    expect(broker.status(grants[0].grant.token).activeLeaseCount).toBe(33);
 
-    expect(broker.release(first.token, firstLease.leaseId)).toEqual({ released: true });
-    const sequentialLease = broker.claim(first.token, binding({ taskId: "first" }));
-    expect(sequentialLease.leaseId).not.toBe(firstLease.leaseId);
-    expect(broker.status(first.token).activeLeaseCount).toBe(2);
-    expectCode(() => broker.claim(first.token, binding({ taskId: "first" })), "LEASE_CAPACITY_EXCEEDED");
-
-    broker.release(first.token, parallelLease.leaseId);
-    broker.release(first.token, sequentialLease.leaseId);
-    expect(broker.stats().activeTurnCount).toBe(1);
+    broker.release(grants[0].grant.token, leases[0].leaseId);
+    const sequentialLease = broker.claim(grants[0].grant.token, grants[0].turnBinding);
+    expect(sequentialLease.leaseId).not.toBe(leases[0].leaseId);
+    expect(broker.status(grants[0].grant.token).activeLeaseCount).toBe(33);
+    for (const lease of parallelLeases) broker.release(grants[0].grant.token, lease.leaseId);
+    broker.release(grants[0].grant.token, sequentialLease.leaseId);
+    for (let index = 1; index < grants.length; index += 1) {
+      broker.release(grants[index].grant.token, leases[index].leaseId);
+    }
+    for (const { grant } of grants) broker.cancel(grant.token);
+    expect(broker.stats().activeTurnCount).toBe(0);
   });
 
   it("makes release idempotent and fences completion until the lease is gone", () => {
@@ -133,6 +157,23 @@ describe("turn capability broker", () => {
     expectCode(() => broker.complete(fence.fence), "COMPLETION_FENCE_REPLAYED");
     expectCode(() => broker.claim(grant.token, binding()), "TOKEN_COMPLETED");
     expect(broker.status(grant.token).status).toBe("completed");
+  });
+
+  it("can abandon a failed external commit and retry with a fresh fence", () => {
+    const broker = new TurnCapabilityBroker();
+    const expected = binding({ taskId: "retry-commit" });
+    const grant = broker.issue(expected);
+    const lease = broker.claim(grant.token, expected);
+    const firstFence = broker.beginCompletion(grant.token, expected);
+
+    broker.release(grant.token, lease.leaseId);
+    expect(broker.abortCompletion(firstFence.fence)).toEqual({ status: "active" });
+    expectCode(() => broker.complete(firstFence.fence), "COMPLETION_FENCE_REPLAYED");
+
+    const retryLease = broker.claim(grant.token, expected);
+    const retryFence = broker.beginCompletion(grant.token, expected);
+    broker.release(grant.token, retryLease.leaseId);
+    expect(broker.complete(retryFence.fence)).toMatchObject({ status: "completed" });
   });
 
   it("allows an existing lease to renew while completion blocks new claims", () => {
@@ -183,7 +224,7 @@ describe("turn capability broker", () => {
   });
 
   it("cancels and revokes fail closed while retaining bounded tombstones", () => {
-    const broker = new TurnCapabilityBroker({ maxTombstones: 2, maxCapabilities: 4 });
+    const broker = new TurnCapabilityBroker({ maxTombstones: 2 });
     const cancelled = broker.issue(binding({ taskId: "cancelled" }));
     broker.cancel(cancelled.token);
     expect(broker.status(cancelled.token).status).toBe("cancelled");
@@ -207,8 +248,8 @@ describe("turn capability broker", () => {
     expectCode(() => broker.claim(cancelled.token, binding({ taskId: "cancelled" })), "TOKEN_NOT_FOUND");
   });
 
-  it("drains leases after cancellation and keeps the active slot occupied", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 4 });
+  it("drains leases after cancellation without blocking another turn", () => {
+    const broker = new TurnCapabilityBroker();
     const cancelled = broker.issue(binding({ taskId: "draining" }));
     const lease = broker.claim(cancelled.token, binding({ taskId: "draining" }));
     broker.cancel(cancelled.token);
@@ -216,17 +257,19 @@ describe("turn capability broker", () => {
     expect(broker.status(cancelled.token)).toMatchObject({ status: "cancelled", activeLeaseCount: 1 });
     expect(broker.stats().activeTurnCount).toBe(1);
     const waiting = broker.issue(binding({ taskId: "waiting" }));
-    expectCode(() => broker.claim(waiting.token, binding({ taskId: "waiting" })), "ACTIVE_TURN_LIMIT");
+    const waitingLease = broker.claim(waiting.token, binding({ taskId: "waiting" }));
     expect(broker.validateLease(lease)).toBe(lease);
     expect(broker.release(cancelled.token, lease.leaseId)).toEqual({ released: true });
     expectCode(() => broker.validateLease(lease), "LEASE_NOT_FOUND");
     expect(broker.status(cancelled.token)).toMatchObject({ status: "cancelled", activeLeaseCount: 0 });
+    expect(broker.stats().activeTurnCount).toBe(1);
+    broker.release(waiting.token, waitingLease.leaseId);
+    broker.cancel(waiting.token);
     expect(broker.stats().activeTurnCount).toBe(0);
-    expect(broker.claim(waiting.token, binding({ taskId: "waiting" }))).toBeTruthy();
   });
 
   it("revokes all exact-binding capabilities without receiving a token", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const broker = new TurnCapabilityBroker();
     const first = broker.issue(binding({ taskId: "rotate" }));
     const second = broker.issue(binding({ taskId: "rotate" }));
     const unrelated = broker.issue(binding({ taskId: "other" }));
@@ -244,8 +287,55 @@ describe("turn capability broker", () => {
     expect(broker.stats().activeTurnCount).toBe(0);
   });
 
+  it("revokes every live capability for an exact control request without a context id", () => {
+    const broker = new TurnCapabilityBroker();
+    const expected = binding({ taskId: "request", requestId: "request-a" });
+    const first = broker.issue(expected);
+    const second = broker.issue({
+      ...expected,
+      modelId: "gpt-5-mini",
+      effort: "low",
+      generation: 9,
+    });
+    const foreignRequest = broker.issue({ ...expected, requestId: "request-b" });
+    const lease = broker.claim(first.token, expected);
+
+    const revoked = broker.revokeRequest({
+      workspaceId: expected.workspaceId,
+      projectId: expected.projectId,
+      localSessionId: expected.localSessionId,
+      taskId: expected.taskId,
+      iteration: expected.iteration,
+      phase: expected.phase,
+      requestId: expected.requestId!,
+    });
+    expect(revoked).toBe(2);
+    expect(broker.status(first.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
+    expect(broker.status(second.token).status).toBe("revoked");
+    expect(broker.status(foreignRequest.token).status).toBe("issued");
+    broker.release(first.token, lease.leaseId);
+  });
+
+  it("retires one local session without revoking independent sessions", () => {
+    const broker = new TurnCapabilityBroker();
+    const first = broker.issue(binding({ taskId: "first" }));
+    const second = broker.issue(binding({ taskId: "second" }));
+    const unrelated = broker.issue(
+      binding({ localSessionId: "session-other", taskId: "unrelated" })
+    );
+    const draining = broker.claim(first.token, binding({ taskId: "first" }));
+
+    expect(broker.revokeSession("workspace-a", "project-a", "session-a")).toBe(2);
+    expect(broker.status(first.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
+    expect(broker.status(second.token).status).toBe("revoked");
+    expect(broker.status(unrelated.token).status).toBe("issued");
+    expect(broker.revokeSession("workspace-a", "project-a", "session-a")).toBe(0);
+
+    broker.release(first.token, draining.leaseId);
+  });
+
   it("replaces every nonterminal capability for the exact session key", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const broker = new TurnCapabilityBroker();
     const old = broker.issue(binding({ taskId: "old", generation: 1, compactionEpoch: 1 }));
     const oldLease = broker.claim(old.token, binding({ taskId: "old", generation: 1, compactionEpoch: 1 }));
     const oldIssued = broker.issue(binding({ taskId: "old-issued", generation: 1, compactionEpoch: 1 }));
@@ -263,19 +353,26 @@ describe("turn capability broker", () => {
       generation: 9,
     });
 
-    const replacement = broker.issueReplacingSession({ ...replacementBinding, ttlMs: 30_000 });
-    expect(broker.status(old.token)).toMatchObject({ status: "revoked", activeLeaseCount: 1 });
-    expect(broker.status(oldIssued.token).status).toBe("revoked");
+    expectCode(
+      () => broker.issueReplacingSession({ ...replacementBinding, ttlMs: 30_000 }),
+      "ACTIVE_LEASES_REMAIN"
+    );
+    expect(broker.status(old.token)).toMatchObject({ status: "active", activeLeaseCount: 1 });
+    expect(broker.status(oldIssued.token).status).toBe("issued");
     expect(broker.status(unrelatedSession.token).status).toBe("issued");
     expect(broker.stats().activeTurnCount).toBe(1);
-    expectCode(() => broker.claim(replacement.token, replacementBinding), "ACTIVE_TURN_LIMIT");
-
     broker.release(old.token, oldLease.leaseId);
-    expect(broker.claim(replacement.token, replacementBinding)).toBeTruthy();
+
+    const replacement = broker.issueReplacingSession({ ...replacementBinding, ttlMs: 30_000 });
+    expect(broker.status(old.token).status).toBe("revoked");
+    expect(broker.status(oldIssued.token).status).toBe("revoked");
+    const replacementLease = broker.claim(replacement.token, replacementBinding);
+    broker.release(replacement.token, replacementLease.leaseId);
+    broker.cancel(replacement.token);
   });
 
   it("does not supersede a different local session", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const broker = new TurnCapabilityBroker();
     const existing = broker.issue(binding({ taskId: "existing" }));
     const replacement = broker.issueReplacingSession({
       ...binding({ localSessionId: "session-new", taskId: "new" }),
@@ -286,8 +383,34 @@ describe("turn capability broker", () => {
     expect(broker.status(replacement.token).status).toBe("issued");
   });
 
+  it("rejects delayed page or compaction epochs without revoking the current session token", () => {
+    const broker = new TurnCapabilityBroker();
+    const current = broker.issueReplacingSession({
+      ...binding({ taskId: "current", compactionEpoch: 4, generation: 7 }),
+      ttlMs: 30_000,
+    });
+
+    expectCode(
+      () =>
+        broker.issueReplacingSession({
+          ...binding({ taskId: "stale-page", compactionEpoch: 4, generation: 6 }),
+          ttlMs: 30_000,
+        }),
+      "STALE_BINDING_EPOCH"
+    );
+    expectCode(
+      () =>
+        broker.issueReplacingSession({
+          ...binding({ taskId: "stale-compaction", compactionEpoch: 3, generation: 7 }),
+          ttlMs: 30_000,
+        }),
+      "STALE_BINDING_EPOCH"
+    );
+    expect(broker.status(current.token).status).toBe("issued");
+  });
+
   it("revokes every session under one registration while preserving draining leases", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 8 });
+    const broker = new TurnCapabilityBroker();
     const first = broker.issue(binding({ localSessionId: "session-one", taskId: "task-one" }));
     const second = broker.issue(binding({ localSessionId: "session-two", taskId: "task-two" }));
     const foreignRegistration = broker.issue(
@@ -322,8 +445,8 @@ describe("turn capability broker", () => {
     expect(broker.validateLease(lease)).toBe(lease);
   });
 
-  it("preflights binding, TTL, and capacity before supersession", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 1 });
+  it("preflights binding and TTL before supersession", () => {
+    const broker = new TurnCapabilityBroker();
     const existing = broker.issue(binding({ taskId: "existing" }));
 
     expectCode(
@@ -345,31 +468,29 @@ describe("turn capability broker", () => {
     const lease = broker.claim(existing.token, binding({ taskId: "existing" }));
     expectCode(
       () => broker.issueReplacingSession({ ...binding({ taskId: "replacement" }), ttlMs: 30_000 }),
-      "CAPABILITY_CAPACITY_EXCEEDED"
+      "ACTIVE_LEASES_REMAIN"
     );
     expect(broker.status(existing.token)).toMatchObject({ status: "active", activeLeaseCount: 1 });
     broker.release(existing.token, lease.leaseId);
   });
 
   it("reclaims a full same-session issued record during replacement", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 1 });
+    const broker = new TurnCapabilityBroker();
     const existing = broker.issue(binding({ taskId: "old-issued" }));
     const replacement = broker.issueReplacingSession({
       ...binding({ taskId: "new-issued", generation: 5 }),
       ttlMs: 30_000,
     });
 
-    expect(broker.status(existing.token).status).toBe("unknown");
+    expect(broker.status(existing.token).status).toBe("revoked");
     expect(broker.status(replacement.token).status).toBe("issued");
-    expect(broker.stats().capabilityCount).toBe(1);
+    expect(broker.stats().capabilityCount).toBe(2);
   });
 
   it("bounds retained tombstones while cancelled and revoked turns drain", () => {
     let now = 30_000;
     const broker = new TurnCapabilityBroker({
       now: () => now,
-      maxActiveTurns: 2,
-      maxCapabilities: 3,
       maxTombstones: 0,
     });
     const cancelled = broker.issue(binding({ taskId: "cancelled-drain" }));
@@ -404,11 +525,12 @@ describe("turn capability broker", () => {
     });
   });
 
-  it("bounds live capability storage and fences broker restarts by boot epoch", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 2 });
+  it("does not impose a live capability cap and fences broker restarts by boot epoch", () => {
+    const broker = new TurnCapabilityBroker();
     const first = broker.issue(binding({ taskId: "one" }));
     broker.issue(binding({ taskId: "two" }));
-    expectCode(() => broker.issue(binding({ taskId: "three" })), "CAPABILITY_CAPACITY_EXCEEDED");
+    broker.issue(binding({ taskId: "three" }));
+    expect(broker.stats().capabilityCount).toBe(3);
 
     const restarted = new TurnCapabilityBroker();
     expect(restarted.bootEpoch).not.toBe(broker.bootEpoch);
@@ -416,8 +538,8 @@ describe("turn capability broker", () => {
     expectCode(() => restarted.claim(first.token, binding({ taskId: "one" })), "TOKEN_NOT_FOUND");
   });
 
-  it("reuses capacity by evicting only old tombstones", () => {
-    const broker = new TurnCapabilityBroker({ maxCapabilities: 2, maxTombstones: 2 });
+  it("retains only bounded tombstones while issuing new capabilities", () => {
+    const broker = new TurnCapabilityBroker({ maxTombstones: 2 });
 
     for (let index = 0; index < 6; index += 1) {
       const grant = broker.issue(binding({ taskId: `cycle-${index}` }));
@@ -425,7 +547,7 @@ describe("turn capability broker", () => {
       const fence = broker.beginCompletion(grant.token, binding({ taskId: `cycle-${index}` }));
       broker.release(grant.token, lease.leaseId);
       broker.complete(fence.fence);
-      expect(broker.stats().capabilityCount).toBeLessThanOrEqual(2);
+      expect(broker.stats().tombstoneCount).toBeLessThanOrEqual(2);
     }
 
     expect(broker.stats().tombstoneCount).toBeLessThanOrEqual(2);

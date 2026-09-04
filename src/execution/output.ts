@@ -2,7 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { ensureDir, getStateDir, readJsonIfExists, withFileLock, writeSecureJson } from "../config/paths.js";
+import {
+  ensureDir,
+  getWorkspaceDataDir,
+  readJsonIfExists,
+  withFileLock,
+  writeSecureJson,
+} from "../config/paths.js";
 import { C2C_ID_PATTERN, MAX_C2C_ITERATION } from "../control/result-schema.js";
 import { redact } from "../logger/index.js";
 import { MAX_OUTPUT_BYTES, sanitizeExecutionOutput } from "./sanitize.js";
@@ -109,7 +115,8 @@ function validatedWorkspaceId(workspaceId: string): string {
 }
 
 function outputDir(workspaceId: string): string {
-  return ensureDir(path.join(getStateDir(), "execution-outputs", validatedWorkspaceId(workspaceId)));
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  return ensureDir(path.join(getWorkspaceDataDir(resolvedWorkspaceId), "execution-outputs"));
 }
 
 function indexFile(workspaceId: string): string {

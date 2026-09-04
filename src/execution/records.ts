@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { ensureDir, getStateDir, withFileLock } from "../config/paths.js";
+import { ensureDir, getWorkspaceDataDir, withFileLock } from "../config/paths.js";
 import { C2C_ID_PATTERN, MAX_C2C_ITERATION } from "../control/result-schema.js";
 
 export const EXECUTION_EXIT_STATUSES = ["ok", "failed", "blocked"] as const;
@@ -105,8 +105,9 @@ export function validateExecutionRecordInput(
 }
 
 function recordsFile(workspaceId: string): string {
-  const dir = ensureDir(path.join(getStateDir(), "executions"));
-  return path.join(dir, `${validatedWorkspaceId(workspaceId)}.jsonl`);
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const dir = ensureDir(path.join(getWorkspaceDataDir(resolvedWorkspaceId), "executions"));
+  return path.join(dir, "records.jsonl");
 }
 
 function repairInterruptedTail(file: string, workspaceId: string): void {

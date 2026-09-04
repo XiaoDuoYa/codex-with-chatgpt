@@ -3,8 +3,12 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import readline from "node:readline";
 import { IgnoreRules } from "./ignore.js";
-import { readJsonIfExists } from "../config/paths.js";
-import { resolveProjectId } from "./identity.js";
+import {
+  readJsonIfExists,
+  registerProjectDataDir,
+  registerWorkspaceDataDir,
+} from "../config/paths.js";
+import { projectDataDirectory, resolveProjectId } from "./identity.js";
 
 export type WorkspaceErrorCode =
   | "INVALID_CONFIG"
@@ -15,7 +19,9 @@ export type WorkspaceErrorCode =
   | "NOT_A_FILE"
   | "NOT_A_DIRECTORY"
   | "BINARY_FILE"
-  | "FILE_TOO_LARGE";
+  | "FILE_TOO_LARGE"
+  | "SEARCH_QUERY_TOO_LARGE"
+  | "REGEX_ENGINE_UNAVAILABLE";
 
 export class WorkspaceError extends Error {
   constructor(
@@ -54,13 +60,9 @@ export interface ListDirectoryResult {
   hasMore: boolean;
 }
 
-export const RESULT_TRANSPORTS = ["auto", "mailbox", "browser"] as const;
-export type ResultTransport = (typeof RESULT_TRANSPORTS)[number];
-
 export interface ProjectConfig {
   name?: string;
   maxIterations?: number;
-  resultTransport?: ResultTransport;
 }
 
 const DEFAULT_MAX_LINES = 400;
@@ -74,7 +76,6 @@ export class Workspace {
   readonly name: string;
   readonly ignoreRules: IgnoreRules;
   readonly projectConfig: ProjectConfig;
-  readonly resultTransport: ResultTransport;
 
   constructor(rootInput: string) {
     const resolved = path.resolve(rootInput);
@@ -90,16 +91,11 @@ export class Workspace {
     this.root = real;
     this.id = createHash("sha256").update(real).digest("hex").slice(0, 12);
     this.projectId = resolveProjectId(real);
+    const dataDir = projectDataDirectory(real);
+    registerProjectDataDir(this.projectId, dataDir);
+    registerWorkspaceDataDir(this.id, path.join(dataDir, "workspaces", this.id));
     this.ignoreRules = new IgnoreRules(real);
     this.projectConfig = readJsonIfExists<ProjectConfig>(path.join(real, ".c2c.json")) ?? {};
-    const resultTransport = this.projectConfig.resultTransport;
-    if (resultTransport !== undefined && !RESULT_TRANSPORTS.includes(resultTransport)) {
-      throw new WorkspaceError(
-        "INVALID_CONFIG",
-        `.c2c.json resultTransport must be one of ${RESULT_TRANSPORTS.join(", ")}`
-      );
-    }
-    this.resultTransport = resultTransport ?? "auto";
     this.name = this.projectConfig.name ?? path.basename(real);
   }
 

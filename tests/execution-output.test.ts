@@ -154,7 +154,7 @@ describe("execution output store", () => {
       taskId: "c2c_expected",
       iteration: 2,
     });
-    const bodyDir = path.join(stateDir, "execution-outputs", "ws1", "bodies");
+    const bodyDir = path.join(stateDir, "workspace-data", "ws1", "execution-outputs", "bodies");
     const firstBody = path.join(bodyDir, `${first.id}.txt`);
     const secondBody = path.join(bodyDir, `${second.id}.txt`);
     const originalFirst = fs.readFileSync(firstBody);
@@ -172,8 +172,8 @@ describe("execution output store", () => {
       iteration: 1,
     });
     fs.copyFileSync(
-      path.join(stateDir, "execution-outputs", "ws1", "index.json"),
-      path.join(stateDir, "execution-outputs", "ws2", "index.json")
+      path.join(stateDir, "workspace-data", "ws1", "execution-outputs", "index.json"),
+      path.join(stateDir, "workspace-data", "ws2", "execution-outputs", "index.json")
     );
     expect(() => listExecutionOutputs("ws2")).toThrow(/does not match its workspace/);
   });
@@ -197,7 +197,7 @@ describe("execution output store", () => {
       taskId: "c2c_expected",
       iteration: 1,
     });
-    const indexPath = path.join(stateDir, "execution-outputs", "ws1", "index.json");
+    const indexPath = path.join(stateDir, "workspace-data", "ws1", "execution-outputs", "index.json");
     const valid = JSON.parse(fs.readFileSync(indexPath, "utf8")) as {
       nextId: number;
       items: Array<Record<string, unknown>>;
@@ -242,6 +242,8 @@ describe("execution output store", () => {
         iteration: 1,
       })
     ).toThrow();
-    expect(fs.existsSync(path.join(stateDir, "execution-outputs", "ws1", "index.json"))).toBe(false);
+    expect(
+      fs.existsSync(path.join(stateDir, "workspace-data", "ws1", "execution-outputs", "index.json"))
+    ).toBe(false);
   });
 });

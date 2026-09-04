@@ -23,13 +23,97 @@ export function getStateDir(): string {
   }
 }
 
+const projectDataDirs = new Map<string, string>();
+const workspaceDataDirs = new Map<string, string>();
+const WORKSPACE_STORAGE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/;
+
+/** Legacy machine-wide workspace-data root, retained only so setup can remove
+ * older overly broad sandbox grants. New workspace data never lives here. */
+export function getLegacyWorkspaceDataRoot(): string {
+  return path.join(getStateDir(), "workspace-data");
+}
+
+function registerDataDir(
+  registry: Map<string, string>,
+  id: string,
+  dir: string,
+  label: "project" | "workspace",
+): void {
+  if (!WORKSPACE_STORAGE_ID.test(id)) throw new Error(`${label} storage id is invalid`);
+  const resolved = path.resolve(dir);
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(resolved);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("workspace data directory must be a real directory");
+  }
+  const canonical = fs.realpathSync.native(resolved);
+  if (canonical !== resolved) {
+    throw new Error("workspace data directory must not traverse symbolic links");
+  }
+  const existing = registry.get(id);
+  if (existing && existing !== canonical) {
+    if (fs.existsSync(path.dirname(existing))) {
+      throw new Error(`${label} storage id is already bound to another directory`);
+    }
+  }
+  registry.set(id, canonical);
+}
+
+/**
+ * Bind a stable project identity to its shared repository-local data directory.
+ * A project may have multiple linked checkouts, so this directory must not be
+ * reused as a workspace state directory.
+ */
+export function registerProjectDataDir(projectId: string, dir: string): void {
+  registerDataDir(projectDataDirs, projectId, dir, "project");
+}
+
+/** Bind a checkout identity to its isolated repository-local data directory. */
+export function registerWorkspaceDataDir(workspaceId: string, dir: string): void {
+  registerDataDir(workspaceDataDirs, workspaceId, dir, "workspace");
+}
+
+function getRegisteredDataDir(
+  registry: Map<string, string>,
+  id: string,
+  label: "project" | "workspace",
+): string {
+  const registered = registry.get(id);
+  if (!registered) throw new Error(`${label} data directory is not registered for this process`);
+  const stat = fs.lstatSync(registered, { throwIfNoEntry: false });
+  if (!stat || stat.isSymbolicLink() || !stat.isDirectory() || fs.realpathSync.native(registered) !== registered) {
+    throw new Error(`${label} data directory ownership has changed`);
+  }
+  return registered;
+}
+
+/** Resolve shared state owned by one stable project identity. */
+export function getProjectDataDir(projectId: string): string {
+  if (!WORKSPACE_STORAGE_ID.test(projectId)) throw new Error("project storage id is invalid");
+  const isolatedStateRoot = process.env.C2C_STATE_DIR?.trim();
+  if (isolatedStateRoot) {
+    return path.join(path.resolve(isolatedStateRoot), "project-data", projectId);
+  }
+  return getRegisteredDataDir(projectDataDirs, projectId, "project");
+}
+
+/**
+ * Resolve state owned by one checkout. Production callers must first create a
+ * Workspace, which registers its checkout directory. Tests use C2C_STATE_DIR
+ * and receive the same per-id isolation without a checkout.
+ */
+export function getWorkspaceDataDir(workspaceId: string): string {
+  if (!WORKSPACE_STORAGE_ID.test(workspaceId)) throw new Error("workspace storage id is invalid");
+  const isolatedStateRoot = process.env.C2C_STATE_DIR?.trim();
+  if (isolatedStateRoot) {
+    return path.join(path.resolve(isolatedStateRoot), "workspace-data", workspaceId);
+  }
+  return getRegisteredDataDir(workspaceDataDirs, workspaceId, "workspace");
+}
+
 export function ensureDir(dir: string): string {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
-}
-
-export function stateSubdir(name: string): string {
-  return ensureDir(path.join(getStateDir(), name));
 }
 
 /** Atomically replace a JSON file with owner-only permissions. */

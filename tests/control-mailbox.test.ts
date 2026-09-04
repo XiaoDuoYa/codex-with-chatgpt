@@ -7,10 +7,12 @@ import { promisify } from "node:util";
 import {
   acknowledgeControlResult,
   cancelControlResultRequest,
+  getControlMailboxDir,
   getControlResultStatus,
   openControlResultRequest,
   pruneControlMailbox,
   reportControlProgress,
+  retireControlResultSession,
   submitControlResult,
   waitForControlResult,
 } from "../src/control/mailbox.js";
@@ -111,6 +113,44 @@ describe("control result mailbox", () => {
     expect(status.result?.kind).toBe("PLAN");
     expect(status.result?.phase).toBe("PLAN");
     expect(status.result?.localSessionId).toBe("session-a");
+  });
+
+  it("ignores a mailbox forged below the workspace data directory", () => {
+    const request = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-a",
+      ...correlation(),
+    });
+    const workspaceMailbox = path.join(
+      stateDir,
+      "workspace-data",
+      WORKSPACE_A,
+      "control-mailbox",
+      "results",
+    );
+    fs.mkdirSync(workspaceMailbox, { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaceMailbox, `${request.requestId}.json`),
+      JSON.stringify({
+        schemaVersion: 1,
+        requestId: request.requestId,
+        workspaceId: WORKSPACE_A,
+        localSessionId: request.localSessionId,
+        taskId: request.taskId,
+        iteration: request.iteration,
+        phase: request.phase,
+        kind: "PLAN",
+        payload: planInput(request.requestId).payload,
+        receivedAt: new Date().toISOString(),
+        payloadHash: "forged",
+        resultId: "forged",
+      }),
+    );
+
+    expect(getControlResultStatus(WORKSPACE_A, request.requestId, "session-a", correlation())).toMatchObject({
+      status: "pending",
+      result: null,
+    });
+    expect(fs.existsSync(path.join(getControlMailboxDir(WORKSPACE_A), "results", `${request.requestId}.json`))).toBe(false);
   });
 
   it("makes identical retries idempotent and rejects conflicting retries", () => {
@@ -476,9 +516,7 @@ describe("control result mailbox", () => {
     reportControlProgress(WORKSPACE_A, progress);
 
     const progressPath = path.join(
-      stateDir,
-      "control-mailbox",
-      WORKSPACE_A,
+      getControlMailboxDir(WORKSPACE_A),
       "progress",
       `${request.requestId}.json`
     );
@@ -489,7 +527,7 @@ describe("control result mailbox", () => {
     ).toThrow(/integrity hash/);
   });
 
-  it("acknowledges without deleting the result and enforces active request quota", () => {
+  it("acknowledges without deleting the result and allows independent sessions concurrently", () => {
     const request = openControlResultRequest(WORKSPACE_A, {
       localSessionId: "session-a",
       taskId: "c2c_plan",
@@ -501,22 +539,15 @@ describe("control result mailbox", () => {
     expect(acked.status).toBe("acknowledged");
     expect(acked.result?.kind).toBe("PLAN");
 
-    for (let i = 0; i < 8; i++) {
+    const concurrent = Array.from({ length: 12 }, (_, i) =>
       openControlResultRequest(WORKSPACE_A, {
         localSessionId: `quota-${i}`,
         taskId: `c2c_q${i}`,
         iteration: 0,
         phase: "PLAN",
-      });
-    }
-    expect(() =>
-      openControlResultRequest(WORKSPACE_A, {
-        localSessionId: "quota-over",
-        taskId: "c2c_over",
-        iteration: 0,
-        phase: "PLAN",
       })
-    ).toThrow(/too many active/);
+    );
+    expect(new Set(concurrent.map((entry) => entry.requestId)).size).toBe(12);
   });
 
   it("retries a terminal marker if a concurrent entry disappears after EEXIST", () => {
@@ -554,6 +585,27 @@ describe("control result mailbox", () => {
     expect(status.result?.kind).toBe("PLAN");
   });
 
+  it("aborts a local wait without waiting for its deadline", async () => {
+    const request = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-abort",
+      taskId: "c2c_abort",
+      iteration: 0,
+      phase: "PLAN",
+    });
+    const controller = new AbortController();
+    const waiting = waitForControlResult(
+      WORKSPACE_A,
+      request.requestId,
+      86_400_000,
+      "session-abort",
+      { taskId: "c2c_abort", iteration: 0, phase: "PLAN" },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("keeps request lifecycle actions scoped to the owning local session", () => {
     const request = openControlResultRequest(WORKSPACE_A, {
       localSessionId: "session-a",
@@ -582,6 +634,37 @@ describe("control result mailbox", () => {
     );
   });
 
+  it("retires a session mailbox by cancelling pending and discarding received results", () => {
+    const pending = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-retire",
+      taskId: "c2c_pending",
+      iteration: 0,
+      phase: "PLAN",
+    });
+    const received = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-retire-received",
+      taskId: "c2c_received",
+      iteration: 0,
+      phase: "PLAN",
+    });
+    submitControlResult(WORKSPACE_A, planInput(received.requestId, {
+      localSessionId: "session-retire-received",
+      taskId: "c2c_received",
+    }));
+
+    const pendingSummary = retireControlResultSession(WORKSPACE_A, "session-retire");
+    expect(pendingSummary).toMatchObject({ pendingCancelled: 1, receivedAcknowledged: 0, activeRequestCleared: true });
+    expect(getControlResultStatus(WORKSPACE_A, pending.requestId, "session-retire", {
+      taskId: "c2c_pending", iteration: 0, phase: "PLAN",
+    }).status).toBe("cancelled");
+
+    const receivedSummary = retireControlResultSession(WORKSPACE_A, "session-retire-received");
+    expect(receivedSummary).toMatchObject({ pendingCancelled: 0, receivedAcknowledged: 1, activeRequestCleared: true });
+    expect(getControlResultStatus(WORKSPACE_A, received.requestId, "session-retire-received", {
+      taskId: "c2c_received", iteration: 0, phase: "PLAN",
+    }).status).toBe("acknowledged");
+  });
+
   it("prunes old terminal requests", () => {
     const request = openControlResultRequest(WORKSPACE_A, {
       localSessionId: "session-a",
@@ -607,7 +690,11 @@ describe("control result mailbox", () => {
     );
     expect(
       fs.existsSync(
-        path.join(stateDir, "control-mailbox", WORKSPACE_A, "progress", `${request.requestId}.json`)
+        path.join(
+          getControlMailboxDir(WORKSPACE_A),
+          "progress",
+          `${request.requestId}.json`
+        )
       )
     ).toBe(false);
   });
@@ -618,9 +705,7 @@ describe("control result mailbox", () => {
       ...correlation(0),
     });
     const requestFile = path.join(
-      stateDir,
-      "control-mailbox",
-      WORKSPACE_A,
+      getControlMailboxDir(WORKSPACE_A),
       "requests",
       `${first.requestId}.json`
     );
@@ -704,7 +789,7 @@ describe("control result mailbox", () => {
     });
     submitControlResult(WORKSPACE_A, planInput(second.requestId, { iteration: 1 }));
 
-    const resultDir = path.join(stateDir, "control-mailbox", WORKSPACE_A, "results");
+    const resultDir = path.join(getControlMailboxDir(WORKSPACE_A), "results");
     const firstFile = path.join(resultDir, `${first.requestId}.json`);
     const secondFile = path.join(resultDir, `${second.requestId}.json`);
     const originalSecond = fs.readFileSync(secondFile, "utf8");
@@ -736,7 +821,7 @@ describe("control result mailbox", () => {
     });
     submitControlResult(WORKSPACE_A, planInput(second.requestId, { iteration: 1 }));
 
-    const ackDir = path.join(stateDir, "control-mailbox", WORKSPACE_A, "acks");
+    const ackDir = path.join(getControlMailboxDir(WORKSPACE_A), "acks");
     fs.copyFileSync(
       path.join(ackDir, `${first.requestId}.json`),
       path.join(ackDir, `${second.requestId}.json`)
@@ -752,9 +837,7 @@ describe("control result mailbox", () => {
       ...correlation(),
     });
     const requestPath = path.join(
-      stateDir,
-      "control-mailbox",
-      WORKSPACE_A,
+      getControlMailboxDir(WORKSPACE_A),
       "requests",
       `${request.requestId}.json`
     );
@@ -777,7 +860,11 @@ describe("control result mailbox", () => {
     submitControlResult(WORKSPACE_A, planInput(request.requestId));
     acknowledgeControlResult(WORKSPACE_A, request.requestId, "session-a", correlation());
     writeSecureJsonExclusive(
-      path.join(stateDir, "control-mailbox", WORKSPACE_A, "cancelled", `${request.requestId}.json`),
+      path.join(
+        getControlMailboxDir(WORKSPACE_A),
+        "cancelled",
+        `${request.requestId}.json`
+      ),
       {
         schemaVersion: 1,
         requestId: request.requestId,
@@ -804,9 +891,7 @@ describe("control result mailbox", () => {
       planInput(resultRequest.requestId, { localSessionId: "session-result" })
     );
     const resultPath = path.join(
-      stateDir,
-      "control-mailbox",
-      WORKSPACE_A,
+      getControlMailboxDir(WORKSPACE_A),
       "results",
       `${resultRequest.requestId}.json`
     );
@@ -827,9 +912,7 @@ describe("control result mailbox", () => {
       correlation(1)
     );
     const markerPath = path.join(
-      stateDir,
-      "control-mailbox",
-      WORKSPACE_A,
+      getControlMailboxDir(WORKSPACE_A),
       "cancelled",
       `${markerRequest.requestId}.json`
     );
@@ -962,6 +1045,89 @@ describe("control result mailbox", () => {
     expect(openOutcome.ok, openOutcome.message).toBe(true);
     expect(openOutcome.requestId).not.toBe(request.requestId);
   }, 60_000);
+
+  it("does not make another session wait for a paused lifecycle transition", async () => {
+    const request = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-a",
+      ...correlation(0),
+    });
+    submitControlResult(WORKSPACE_A, planInput(request.requestId));
+    const moduleUrl = pathToFileURL(path.resolve("src/control/mailbox.ts")).href;
+    const barrier = path.join(stateDir, "session-a-paused");
+    const completed = path.join(stateDir, "session-a-completed");
+    const acknowledgeScript = `
+      import fs from "node:fs";
+      import path from "node:path";
+      const originalLinkSync = fs.linkSync.bind(fs);
+      fs.linkSync = (source, target) => {
+        if (target.toString().includes(path.sep + "acks" + path.sep)) {
+          fs.writeFileSync(${JSON.stringify(barrier)}, "ready");
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+        }
+        return originalLinkSync(source, target);
+      };
+      const { acknowledgeControlResult } = await import(${JSON.stringify(moduleUrl)});
+      acknowledgeControlResult(
+        ${JSON.stringify(WORKSPACE_A)},
+        ${JSON.stringify(request.requestId)},
+        "session-a",
+        ${JSON.stringify(correlation(0))}
+      );
+      fs.writeFileSync(${JSON.stringify(completed)}, "done");
+      process.stdout.write(JSON.stringify({ ok: true }));
+    `;
+    const openScript = `
+      import fs from "node:fs";
+      const { openControlResultRequest } = await import(${JSON.stringify(moduleUrl)});
+      while (!fs.existsSync(${JSON.stringify(barrier)})) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const value = openControlResultRequest(${JSON.stringify(WORKSPACE_A)}, {
+        localSessionId: "session-b",
+        taskId: "c2c_plan",
+        iteration: 0,
+        phase: "PLAN"
+      });
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        localSessionId: value.localSessionId,
+        sessionACompleted: fs.existsSync(${JSON.stringify(completed)})
+      }));
+    `;
+    const run = (script: string) =>
+      execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+        cwd: path.resolve("."),
+        env: { ...process.env, C2C_STATE_DIR: stateDir },
+      });
+
+    const [acknowledged, opened] = await Promise.all([run(acknowledgeScript), run(openScript)]);
+    expect(JSON.parse(acknowledged.stdout)).toEqual({ ok: true });
+    expect(JSON.parse(opened.stdout)).toEqual({
+      ok: true,
+      localSessionId: "session-b",
+      sessionACompleted: false,
+    });
+  }, 60_000);
+
+  it("does not scan another session's damaged request while opening a turn", () => {
+    const request = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-a",
+      ...correlation(0),
+    });
+    const damagedRequest = path.join(
+      getControlMailboxDir(WORKSPACE_A),
+      "requests",
+      `${request.requestId}.json`
+    );
+    fs.writeFileSync(damagedRequest, "{damaged");
+
+    const independent = openControlResultRequest(WORKSPACE_A, {
+      localSessionId: "session-b",
+      ...correlation(0),
+    });
+
+    expect(independent.localSessionId).toBe("session-b");
+  });
 
   it("serializes progress with submission and cancellation across processes", async () => {
     const moduleUrl = pathToFileURL(path.resolve("src/control/mailbox.ts")).href;

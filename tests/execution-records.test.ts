@@ -64,8 +64,10 @@ describe("execution record store", () => {
       exitStatus: "ok",
       timestamp: "2026-01-01T00:00:00.000Z",
     });
-    const executionsDir = path.join(stateDir, "executions");
-    fs.copyFileSync(path.join(executionsDir, "ws1.jsonl"), path.join(executionsDir, "ws2.jsonl"));
+    const source = path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl");
+    const destination = path.join(stateDir, "workspace-data", "ws2", "executions", "records.jsonl");
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
     expect(() => readExecutionRecords("ws2")).toThrow(/does not match its workspace/);
   });
 
@@ -88,7 +90,7 @@ describe("execution record store", () => {
       outputId: 1,
       outputAvailable: true,
     });
-    const file = path.join(stateDir, "executions", "ws1.jsonl");
+    const file = path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl");
     const valid = JSON.parse(fs.readFileSync(file, "utf8").trim()) as Record<string, unknown>;
     const mutations: Array<(record: Record<string, unknown>) => void> = [
       (record) => { record.localSessionId = "../session"; },
@@ -127,7 +129,7 @@ describe("execution record store", () => {
         timestamp: "2026-01-01T00:00:00.000Z",
       })
     ).toThrow();
-    expect(fs.existsSync(path.join(stateDir, "executions", "ws1.jsonl"))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl"))).toBe(false);
   });
 
   it("ignores and repairs an interrupted trailing JSONL write", () => {
@@ -142,7 +144,7 @@ describe("execution record store", () => {
       timestamp: "2026-01-01T00:00:00.000Z",
     };
     appendExecutionRecord("ws1", first);
-    const file = path.join(stateDir, "executions", "ws1.jsonl");
+    const file = path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl");
     fs.appendFileSync(file, '{"workspaceId":"ws1","localSessionId":');
 
     expect(readExecutionRecords("ws1")).toMatchObject([first]);
@@ -169,7 +171,7 @@ describe("execution record store", () => {
       timestamp: "2026-01-01T00:00:00.000Z",
     };
     appendExecutionRecord("ws1", record);
-    const file = path.join(stateDir, "executions", "ws1.jsonl");
+    const file = path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl");
     fs.truncateSync(file, fs.statSync(file).size - 1);
 
     appendExecutionRecord("ws1", {
@@ -182,7 +184,7 @@ describe("execution record store", () => {
 
   it("still rejects malformed newline-terminated records", () => {
     stateDir = isolateStateDir();
-    const file = path.join(stateDir, "executions", "ws1.jsonl");
+    const file = path.join(stateDir, "workspace-data", "ws1", "executions", "records.jsonl");
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, "not-json\n");
     expect(() => readExecutionRecords("ws1")).toThrow(/unreadable or malformed/);

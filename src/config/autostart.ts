@@ -1,28 +1,26 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { ensureDir, getStateDir } from "./paths.js";
-import { Workspace } from "../workspace/manager.js";
+import { getStateDir } from "./paths.js";
+import { runtimeEntryPath } from "./runtime-install.js";
 
-export const AUTOSTART_LABEL_PREFIX = "dev.codex-with-chatgpt";
+/** The single LaunchAgent supervising the machine-scoped gateway. */
+export const AUTOSTART_LABEL = "dev.codex-with-chatgpt.machine";
 export const DEFAULT_AUTOSTART_INTERVAL_SECONDS = 60;
 const MIN_AUTOSTART_INTERVAL_SECONDS = 30;
 const MAX_AUTOSTART_INTERVAL_SECONDS = 86_400;
 
-const C2C_AUTOSTART_ENV_KEYS = [
-  "C2C_STATE_DIR",
-  "C2C_CLOUDFLARED_PATH",
-  "C2C_NAMED_TUNNEL_START_TIMEOUT_MS",
-  "C2C_QUICK_TUNNEL_START_TIMEOUT_MS",
-  "C2C_TUNNEL_HEALTH_CHECK_TIMEOUT_MS",
-] as const;
+/**
+ * Keep launchd's environment deliberately small. The tunnel configuration is
+ * stored below C2C_STATE_DIR, so arbitrary shell state must not leak into the
+ * long-lived machine process.
+ */
+const AUTOSTART_ENV_KEYS = ["C2C_STATE_DIR"] as const;
 
 export interface AutostartConfig {
-  workspaceRoot: string;
-  workspaceId: string;
-  workspaceName: string;
+  stateDir: string;
   label: string;
   plistPath: string;
   stdoutPath: string;
@@ -35,11 +33,11 @@ export interface AutostartConfig {
 }
 
 export interface BuildAutostartConfigOptions {
-  workspaceRoot: string;
-  intervalSeconds?: number;
+  intervalSeconds?: number | string;
   c2cBinPath?: string;
   nodePath?: string;
   homeDir?: string;
+  stateDir?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -69,10 +67,8 @@ export interface AutostartStatus {
   detail?: string;
 }
 
-const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-
-export function c2cBinPath(): string {
-  return path.resolve(moduleDir, "..", "..", "bin", "c2c.js");
+export function c2cBinPath(stateRoot: string = getStateDir()): string {
+  return runtimeEntryPath(stateRoot);
 }
 
 export function normalizeAutostartIntervalSeconds(value?: number | string): number {
@@ -85,26 +81,10 @@ export function normalizeAutostartIntervalSeconds(value?: number | string): numb
     parsed > MAX_AUTOSTART_INTERVAL_SECONDS
   ) {
     throw new Error(
-      `interval must be between ${MIN_AUTOSTART_INTERVAL_SECONDS} and ${MAX_AUTOSTART_INTERVAL_SECONDS} seconds`
+      `interval must be between ${MIN_AUTOSTART_INTERVAL_SECONDS} and ${MAX_AUTOSTART_INTERVAL_SECONDS} seconds`,
     );
   }
   return parsed;
-}
-
-export function launchdLabelPart(workspaceName: string, workspaceId: string): string {
-  const normalized = workspaceName
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-  const cleaned = normalized
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^[._-]+|[._-]+$/g, "")
-    .slice(0, 64)
-    .replace(/[._-]+$/g, "");
-  const idPart = workspaceId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
-  if (!idPart) throw new Error("workspace id cannot produce a LaunchAgent label");
-  return `${cleaned || "ws"}-${idPart}`;
 }
 
 function defaultPath(env: NodeJS.ProcessEnv, homeDir: string): string {
@@ -128,55 +108,48 @@ function defaultPath(env: NodeJS.ProcessEnv, homeDir: string): string {
     .join(path.delimiter);
 }
 
-function executableIfExists(file: string): string | null {
-  try {
-    const resolved = path.resolve(file);
-    fs.accessSync(resolved, fs.constants.F_OK | fs.constants.X_OK);
-    return resolved;
-  } catch {
-    return null;
-  }
+function configuredStateDir(options: BuildAutostartConfigOptions): string {
+  const value = options.stateDir?.trim() || options.env?.C2C_STATE_DIR?.trim();
+  return path.resolve(value || getStateDir());
 }
 
-function autostartEnvironment(env: NodeJS.ProcessEnv, homeDir: string): Record<string, string> {
+function autostartEnvironment(
+  env: NodeJS.ProcessEnv,
+  homeDir: string,
+  stateDir: string,
+): Record<string, string> {
   const result: Record<string, string> = {
     HOME: homeDir,
     PATH: defaultPath(env, homeDir),
+    C2C_STATE_DIR: stateDir,
   };
-  for (const key of C2C_AUTOSTART_ENV_KEYS) {
+  for (const key of AUTOSTART_ENV_KEYS) {
     const value = env[key]?.trim();
-    if (value) result[key] = value;
-  }
-  if (!result.C2C_CLOUDFLARED_PATH) {
-    const wrappedCloudflared = executableIfExists(path.join(homeDir, ".local", "bin", "c2c-cloudflared"));
-    if (wrappedCloudflared) result.C2C_CLOUDFLARED_PATH = wrappedCloudflared;
+    if (value && key !== "C2C_STATE_DIR" && !result[key]) result[key] = value;
   }
   return result;
 }
 
-export function buildAutostartConfig(opts: BuildAutostartConfigOptions): AutostartConfig {
-  const workspace = new Workspace(opts.workspaceRoot);
-  const homeDir = path.resolve(opts.homeDir ?? os.homedir());
-  const labelPart = launchdLabelPart(workspace.name, workspace.id);
-  const label = `${AUTOSTART_LABEL_PREFIX}.${labelPart}`;
-  const stateDir = getStateDir();
+/** Build the one machine-wide LaunchAgent configuration. */
+export function buildAutostartConfig(opts: BuildAutostartConfigOptions = {}): AutostartConfig {
+  const env = opts.env ?? process.env;
+  const homeDir = path.resolve(opts.homeDir ?? env.HOME ?? os.homedir());
+  const stateDir = configuredStateDir(opts);
   const logDir = path.join(stateDir, "logs");
   const intervalSeconds = normalizeAutostartIntervalSeconds(opts.intervalSeconds);
-  const c2cEntry = path.resolve(opts.c2cBinPath ?? c2cBinPath());
+  const c2cEntry = path.resolve(opts.c2cBinPath ?? runtimeEntryPath(stateDir));
   const nodePath = path.resolve(opts.nodePath ?? process.execPath);
   return {
-    workspaceRoot: workspace.root,
-    workspaceId: workspace.id,
-    workspaceName: workspace.name,
-    label,
-    plistPath: path.join(homeDir, "Library", "LaunchAgents", `${label}.plist`),
-    stdoutPath: path.join(logDir, `autostart-${labelPart}.log`),
-    stderrPath: path.join(logDir, `autostart-${labelPart}.error.log`),
+    stateDir,
+    label: AUTOSTART_LABEL,
+    plistPath: path.join(homeDir, "Library", "LaunchAgents", `${AUTOSTART_LABEL}.plist`),
+    stdoutPath: path.join(logDir, "autostart-machine.log"),
+    stderrPath: path.join(logDir, "autostart-machine.error.log"),
     c2cBinPath: c2cEntry,
     nodePath,
     intervalSeconds,
-    programArguments: [nodePath, c2cEntry, "autostart", "run", "-w", workspace.root, "--quiet"],
-    environment: autostartEnvironment(opts.env ?? process.env, homeDir),
+    programArguments: [nodePath, c2cEntry, "autostart", "run", "--quiet"],
+    environment: autostartEnvironment(env, homeDir, stateDir),
   };
 }
 
@@ -185,7 +158,7 @@ function xmlEscape(value: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
+    .replace(/\"/g, "&quot;")
     .replace(/'/g, "&apos;");
 }
 
@@ -222,7 +195,7 @@ ${environmentDict(config.environment)}
   <key>ProcessType</key>
   <string>Background</string>
   <key>WorkingDirectory</key>
-  <string>${xmlEscape(config.workspaceRoot)}</string>
+  <string>${xmlEscape(config.stateDir)}</string>
   <key>StandardOutPath</key>
   <string>${xmlEscape(config.stdoutPath)}</string>
   <key>StandardErrorPath</key>
@@ -233,13 +206,47 @@ ${environmentDict(config.environment)}
 }
 
 function writeLaunchAgentPlist(config: AutostartConfig): void {
-  ensureDir(path.dirname(config.plistPath));
-  ensureDir(path.dirname(config.stdoutPath));
-  fs.writeFileSync(config.plistPath, renderLaunchAgentPlist(config), { mode: 0o644 });
+  const parent = path.dirname(path.resolve(config.plistPath));
+  ensureSecureDirectoryTree(parent, "LaunchAgent parent directory");
+  assertSecureLaunchAgentTarget(config.plistPath);
+  ensureSecureDirectoryTree(path.dirname(config.stdoutPath), "LaunchAgent stdout parent directory");
+  ensureSecureDirectoryTree(path.dirname(config.stderrPath), "LaunchAgent stderr parent directory");
+  writeAtomicLaunchAgentFile(config.plistPath, renderLaunchAgentPlist(config), 0o644);
+}
+
+function writeAtomicLaunchAgentFile(file: string, contents: string | Buffer, mode: number): void {
+  const absolute = path.resolve(file);
+  const parent = path.dirname(absolute);
+  ensureSecureDirectoryTree(parent, "LaunchAgent parent directory");
+  assertSecureLaunchAgentTarget(absolute);
+  const temporary = path.join(
+    parent,
+    `.${path.basename(absolute)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
+  );
+  let fd: number | null = null;
   try {
-    fs.chmodSync(config.plistPath, 0o644);
-  } catch {
-    // best effort on filesystems without chmod semantics
+    fd = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(fd, contents);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    // Recheck immediately before publication so a replaced target or parent
+    // cannot be followed by the atomic rename.
+    ensureSecureDirectoryTree(parent, "LaunchAgent parent directory");
+    assertSecureLaunchAgentTarget(absolute);
+    fs.renameSync(temporary, absolute);
+    fs.chmodSync(absolute, mode);
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // preserve the original write error
+      }
+    }
+    throw error;
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
 }
 
@@ -248,9 +255,75 @@ interface LaunchAgentSnapshot {
   mode: number;
 }
 
-function readLaunchAgentSnapshot(file: string): LaunchAgentSnapshot | null {
+function lstatIfExists(file: string): fs.Stats | null {
   try {
-    return { contents: fs.readFileSync(file), mode: fs.statSync(file).mode & 0o777 };
+    return fs.lstatSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** Ensure every existing path component is a real directory, creating only real directories. */
+function ensureSecureDirectoryTree(directory: string, label: string): void {
+  const absolute = path.resolve(directory);
+  const root = path.parse(absolute).root;
+  let current = root;
+  for (const segment of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    let stat = lstatIfExists(current);
+    if (!stat) {
+      try {
+        fs.mkdirSync(current, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+      stat = lstatIfExists(current);
+    }
+    if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`${label} must not contain symbolic links or non-directories: ${current}`);
+    }
+    if (fs.realpathSync.native(current) !== current) {
+      throw new Error(`${label} must not traverse symbolic links: ${current}`);
+    }
+  }
+}
+
+function verifySecureDirectoryTree(directory: string, label: string): void {
+  const absolute = path.resolve(directory);
+  const root = path.parse(absolute).root;
+  let current = root;
+  for (const segment of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    const stat = lstatIfExists(current);
+    if (!stat) return;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`${label} must not contain symbolic links or non-directories: ${current}`);
+    }
+    if (fs.realpathSync.native(current) !== current) {
+      throw new Error(`${label} must not traverse symbolic links: ${current}`);
+    }
+  }
+}
+
+function assertSecureLaunchAgentTarget(file: string): void {
+  const absolute = path.resolve(file);
+  verifySecureDirectoryTree(path.dirname(absolute), "LaunchAgent parent directory");
+  const stat = lstatIfExists(absolute);
+  if (!stat) return;
+  if (stat.isSymbolicLink()) {
+    throw new Error(`LaunchAgent plist must not be a symbolic link: ${absolute}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`LaunchAgent plist must be a regular file: ${absolute}`);
+  }
+}
+
+function readLaunchAgentSnapshot(file: string): LaunchAgentSnapshot | null {
+  assertSecureLaunchAgentTarget(file);
+  try {
+    const stat = fs.lstatSync(file);
+    return { contents: fs.readFileSync(file), mode: stat.mode & 0o777 };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
@@ -258,16 +331,12 @@ function readLaunchAgentSnapshot(file: string): LaunchAgentSnapshot | null {
 }
 
 function restoreLaunchAgentSnapshot(file: string, snapshot: LaunchAgentSnapshot | null): void {
+  assertSecureLaunchAgentTarget(file);
   if (!snapshot) {
     fs.rmSync(file, { force: true });
     return;
   }
-  fs.writeFileSync(file, snapshot.contents, { mode: snapshot.mode });
-  try {
-    fs.chmodSync(file, snapshot.mode);
-  } catch {
-    // best effort on filesystems without chmod semantics
-  }
+  writeAtomicLaunchAgentFile(file, snapshot.contents, snapshot.mode);
 }
 
 function validateAutostartExecutables(config: AutostartConfig): void {
@@ -312,37 +381,60 @@ function commandFailed(result: AutostartCommandResult): boolean {
 
 function bootoutIsIgnorable(result: AutostartCommandResult): boolean {
   return /could not find|not found|No such (?:process|file)|service is not loaded/i.test(
-    `${result.stderr}\n${result.stdout}`
+    `${result.stderr}\n${result.stdout}`,
   );
 }
 
 function bootoutLaunchAgent(
   config: AutostartConfig,
   opts: LaunchctlOptions,
-  commands: AutostartCommandResult[]
+  commands: AutostartCommandResult[],
 ): void {
   const domain = launchdDomain(opts.uid);
   const bootout = runLaunchctl(["bootout", domain, config.plistPath], opts);
   commands.push(bootout);
-  if (!commandFailed(bootout) || bootoutIsIgnorable(bootout)) return;
+  if (!commandFailed(bootout)) return;
 
+  // A missing plist does not prove that the fixed machine label is unloaded.
+  // launchd can keep a job alive after its source plist has been removed.
   const labelBootout = runLaunchctl(["bootout", `${domain}/${config.label}`], opts);
   commands.push(labelBootout);
   if (!commandFailed(labelBootout) || bootoutIsIgnorable(labelBootout)) return;
   throw new Error(
-    `launchctl bootout failed: ${labelBootout.stderr || labelBootout.stdout || labelBootout.status}`
+    `launchctl bootout failed: ${labelBootout.stderr || labelBootout.stdout || labelBootout.status}`,
+  );
+}
+
+function snapshotLaunchAgentLoaded(
+  config: AutostartConfig,
+  opts: LaunchctlOptions,
+  commands: AutostartCommandResult[],
+): boolean {
+  const result = runLaunchctl(["print", `${launchdDomain(opts.uid)}/${config.label}`], opts);
+  commands.push(result);
+  if (result.status === 0) return true;
+  if (bootoutIsIgnorable(result)) return false;
+  throw new Error(
+    `launchctl could not inspect ${config.label}: ${result.stderr || result.stdout || result.status}`,
   );
 }
 
 export function enableAutostart(
   config: AutostartConfig,
-  opts: LaunchctlOptions = {}
+  opts: LaunchctlOptions = {},
 ): AutostartInstallResult {
   ensureDarwin(opts.platform);
   validateAutostartExecutables(config);
+  assertSecureLaunchAgentTarget(config.plistPath);
   const commands: AutostartCommandResult[] = [];
   const domain = launchdDomain(opts.uid);
   const previous = readLaunchAgentSnapshot(config.plistPath);
+  const previousLoaded = snapshotLaunchAgentLoaded(config, opts, commands);
+  if (!previous && previousLoaded) {
+    throw new Error(
+      `LaunchAgent ${config.label} is loaded without its managed plist; disable it before enabling`,
+    );
+  }
 
   let oldBootoutCompleted = false;
   let bootstrapAttempted = false;
@@ -372,7 +464,7 @@ export function enableAutostart(
     }
     try {
       restoreLaunchAgentSnapshot(config.plistPath, previous);
-      if (previous) {
+      if (previous && previousLoaded) {
         const bootstrap = runLaunchctl(["bootstrap", domain, config.plistPath], opts);
         commands.push(bootstrap);
         if (commandFailed(bootstrap)) {
@@ -396,9 +488,10 @@ export function enableAutostart(
 
 export function disableAutostart(
   config: AutostartConfig,
-  opts: LaunchctlOptions = {}
+  opts: LaunchctlOptions = {},
 ): AutostartInstallResult {
   ensureDarwin(opts.platform);
+  assertSecureLaunchAgentTarget(config.plistPath);
   const commands: AutostartCommandResult[] = [];
   bootoutLaunchAgent(config, opts, commands);
   fs.rmSync(config.plistPath, { force: true });
@@ -407,9 +500,10 @@ export function disableAutostart(
 
 export function autostartStatus(
   config: AutostartConfig,
-  opts: LaunchctlOptions = {}
+  opts: LaunchctlOptions = {},
 ): AutostartStatus {
-  const enabled = fs.existsSync(config.plistPath);
+  assertSecureLaunchAgentTarget(config.plistPath);
+  const enabled = lstatIfExists(config.plistPath) !== null;
   if ((opts.platform ?? process.platform) !== "darwin") {
     return { config, enabled, loaded: null, detail: "unsupported platform" };
   }

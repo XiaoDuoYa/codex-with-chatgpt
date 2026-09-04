@@ -6,7 +6,12 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Workspace, WorkspaceError } from "../src/workspace/manager.js";
 import { makeTmpDir, cleanup, write, git, makeGitRepo } from "./helpers.js";
-import { projectIdMetadataPath } from "../src/workspace/identity.js";
+import { getProjectDataDir, getWorkspaceDataDir } from "../src/config/paths.js";
+import { projectDataDirectory, projectIdMetadataPath } from "../src/workspace/identity.js";
+import { openControlResultRequest } from "../src/control/mailbox.js";
+import { saveExecutionOutput, listExecutionOutputs } from "../src/execution/output.js";
+import { appendExecutionRecord, readExecutionRecords } from "../src/execution/records.js";
+import { commitSessionRoute, readSession } from "../src/session/state.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -219,6 +224,12 @@ describe("workspace identity", () => {
       expect(metadata).not.toBeNull();
       expect(fs.statSync(metadata!).mode & 0o777).toBe(0o600);
       expect(fs.lstatSync(metadata!).isFile()).toBe(true);
+      expect(getProjectDataDir(first.projectId)).toBe(projectDataDirectory(repo));
+      expect(getWorkspaceDataDir(first.id)).toBe(
+        path.join(projectDataDirectory(repo), "workspaces", first.id),
+      );
+      expect(getWorkspaceDataDir(first.id)).not.toBe(getProjectDataDir(first.projectId));
+      expect(projectDataDirectory(repo)).toBe(path.join(path.dirname(metadata!), "codex-with-chatgpt"));
     } finally {
       cleanup(repo);
     }
@@ -343,13 +354,125 @@ describe("workspace identity", () => {
     }
   });
 
+  it("isolates checkout state for linked worktrees under the shared project root", () => {
+    const repo = makeTmpDir("project-worktree-state");
+    const linked = `${repo}-linked`;
+    try {
+      makeGitRepo(repo);
+      git(repo, "worktree", "add", "-b", "linked-state", linked);
+      const primary = new Workspace(repo);
+      const linkedWorkspace = new Workspace(linked);
+
+      expect(linkedWorkspace.projectId).toBe(primary.projectId);
+      expect(linkedWorkspace.id).not.toBe(primary.id);
+      expect(getProjectDataDir(primary.projectId)).toBe(projectDataDirectory(repo));
+      expect(getWorkspaceDataDir(primary.id)).toBe(
+        path.join(projectDataDirectory(repo), "workspaces", primary.id),
+      );
+      expect(getWorkspaceDataDir(linkedWorkspace.id)).toBe(
+        path.join(projectDataDirectory(repo), "workspaces", linkedWorkspace.id),
+      );
+      expect(getWorkspaceDataDir(primary.id)).not.toBe(getWorkspaceDataDir(linkedWorkspace.id));
+
+      appendExecutionRecord(primary.id, {
+        localSessionId: "session-shared",
+        taskId: "task-primary",
+        iteration: 0,
+        changedFiles: ["src/primary.ts"],
+        tests: "primary",
+        exitStatus: "ok",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      });
+      appendExecutionRecord(linkedWorkspace.id, {
+        localSessionId: "session-shared",
+        taskId: "task-linked",
+        iteration: 0,
+        changedFiles: ["src/linked.ts"],
+        tests: "linked",
+        exitStatus: "ok",
+        timestamp: "2026-01-01T00:00:01.000Z",
+      });
+      expect(readExecutionRecords(primary.id).map((record) => record.tests)).toEqual(["primary"]);
+      expect(readExecutionRecords(linkedWorkspace.id).map((record) => record.tests)).toEqual(["linked"]);
+
+      expect(saveExecutionOutput(primary.id, {
+        command: "pnpm test",
+        raw: "primary output",
+        localSessionId: "session-shared",
+        taskId: "task-primary",
+        iteration: 0,
+      }).id).toBe(1);
+      expect(saveExecutionOutput(linkedWorkspace.id, {
+        command: "pnpm test",
+        raw: "linked output",
+        localSessionId: "session-shared",
+        taskId: "task-linked",
+        iteration: 0,
+      }).id).toBe(1);
+      expect(listExecutionOutputs(primary.id).map((item) => item.taskId)).toEqual(["task-primary"]);
+      expect(listExecutionOutputs(linkedWorkspace.id).map((item) => item.taskId)).toEqual(["task-linked"]);
+
+      const projectUrl = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
+      commitSessionRoute(primary.id, "session-shared", {
+        projectUrl,
+        chatUrl: `${projectUrl.slice(0, -"project".length)}c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`,
+      });
+      commitSessionRoute(linkedWorkspace.id, "session-shared", {
+        projectUrl,
+        chatUrl: `${projectUrl.slice(0, -"project".length)}c/bbbbbbbb-cccc-dddd-eeee-ffffffffffff`,
+      });
+      expect(readSession(primary.id, "session-shared")?.url).toContain("aaaaaaaa");
+      expect(readSession(linkedWorkspace.id, "session-shared")?.url).toContain("bbbbbbbb");
+
+      const primaryRequest = openControlResultRequest(primary.id, {
+        localSessionId: "session-shared",
+        taskId: "task-primary",
+        iteration: 0,
+        phase: "PLAN",
+      });
+      const linkedRequest = openControlResultRequest(linkedWorkspace.id, {
+        localSessionId: "session-shared",
+        taskId: "task-linked",
+        iteration: 0,
+        phase: "PLAN",
+      });
+      expect(linkedRequest.requestId).not.toBe(primaryRequest.requestId);
+    } finally {
+      try {
+        git(repo, "worktree", "remove", "--force", linked);
+      } catch {
+        // Cleanup below is sufficient if git worktree bookkeeping is unavailable.
+      }
+      cleanup(repo);
+      cleanup(linked);
+    }
+  });
+
   it("uses a path fallback for non-Git workspaces", () => {
     const plain = fs.mkdtempSync(path.join(os.tmpdir(), "c2c-project-fallback-"));
     try {
       const plainWorkspace = new Workspace(plain);
       expect(plainWorkspace.projectId).toMatch(/^path-[a-f0-9]{32}$/);
+      expect(getProjectDataDir(plainWorkspace.projectId)).toBe(
+        path.join(fs.realpathSync.native(plain), ".codex-with-chatgpt"),
+      );
+      expect(() => plainWorkspace.resolve(".codex-with-chatgpt/state.json")).toThrowError(
+        expect.objectContaining<Partial<WorkspaceError>>({ code: "ACCESS_DENIED_SENSITIVE_FILE" }),
+      );
     } finally {
       cleanup(plain);
+    }
+  });
+
+  it("rejects a symlinked non-Git workspace data directory", () => {
+    const plain = fs.mkdtempSync(path.join(os.tmpdir(), "c2c-project-state-symlink-"));
+    const outsideState = makeTmpDir("project-state-outside");
+    try {
+      fs.symlinkSync(outsideState, path.join(plain, ".codex-with-chatgpt"), "dir");
+      expect(() => new Workspace(plain)).toThrow(/workspace data directory must be a real directory/);
+    } finally {
+      cleanup(plain);
+      cleanup(outsideState);
     }
   });
 
@@ -361,24 +484,11 @@ describe("workspace identity", () => {
       JSON.stringify({
         name: "Remi",
         maxIterations: 12,
-        resultTransport: "mailbox",
       })
     );
     const namedWs = new Workspace(named);
     expect(namedWs.name).toBe("Remi");
     expect(namedWs.projectConfig.maxIterations).toBe(12);
-    expect(namedWs.projectConfig.resultTransport).toBe("mailbox");
-    expect(namedWs.resultTransport).toBe("mailbox");
     cleanup(named);
-  });
-
-  it("rejects an unknown result transport", () => {
-    const invalid = makeTmpDir("invalid-transport");
-    try {
-      write(invalid, ".c2c.json", JSON.stringify({ resultTransport: "mail-box" }));
-      expect(() => new Workspace(invalid)).toThrow(/resultTransport must be one of auto, mailbox, browser/);
-    } finally {
-      cleanup(invalid);
-    }
   });
 });

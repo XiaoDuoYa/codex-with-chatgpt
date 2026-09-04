@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import {
   ensureDir,
-  getStateDir,
+  getWorkspaceDataDir,
   readJsonIfExists,
   withFileLock,
   writeSecureJson,
@@ -15,9 +15,9 @@ import {
   type ControlPhase,
 } from "../control/result-schema.js";
 
-export type ConversationMode = "long-chat" | "project";
+export type ConversationMode = "project";
 
-export type ConversationReason = "existing-long-chat" | "project" | "new-workspace";
+export type ConversationReason = "project" | "new-workspace";
 
 export type LocalSessionIdentitySource =
   | "explicit"
@@ -39,7 +39,6 @@ export interface LocalSessionIdentity {
 export type ConversationRouteAction =
   | "resume-chat"
   | "create-project-chat"
-  | "create-long-chat"
   | "bind-project";
 
 export interface ConversationRoute {
@@ -111,22 +110,58 @@ export interface SavedSession {
   conversationMode?: ConversationMode;
   projectUrl?: string;
   connectorName?: string;
+  /** Surface generation/tab that verified and persisted this route. */
+  surfaceGeneration?: number;
+  surfaceTabId?: string;
   checkpoint?: TaskCheckpoint;
 }
 
 export interface SessionPatch {
   localSessionId?: string;
-  url?: string;
   title?: string;
   taskId?: string;
   iteration?: number;
   lastState?: string;
-  conversationMode?: ConversationMode;
-  projectUrl?: string;
-  connectorName?: string;
   checkpoint?: Partial<TaskCheckpoint> & { protocolState?: ProtocolState };
   clearCheckpoint?: boolean;
   clearMailbox?: boolean;
+}
+
+/** Route-bearing merge input. It is intentionally not accepted by updateSession. */
+interface RouteSessionPatch extends SessionPatch {
+  url?: string;
+  conversationMode?: ConversationMode;
+  projectUrl?: string;
+  connectorName?: string;
+  surfaceGeneration?: number;
+  surfaceTabId?: string;
+}
+
+/**
+ * A verified browser surface is the only source allowed to persist routing.
+ * Keep this separate from SessionPatch so ordinary checkpoint updates cannot
+ * accidentally become a route write.
+ */
+export interface SessionRouteCommit {
+  projectUrl: string;
+  chatUrl?: string;
+  connectorName?: string;
+  surfaceGeneration?: number;
+  surfaceTabId?: string;
+}
+
+/**
+ * Route data replayed from the protected machine surface authority. A missing
+ * chat URL means that the local session route must be cleared while retaining
+ * the machine-owned Project association.
+ */
+export interface SessionRouteAuthority {
+  /** `null` is an explicit machine-authoritative Project unregister. */
+  projectUrl: string | null;
+  chatUrl?: string;
+  surfaceGeneration?: number;
+  surfaceTabId?: string;
+  connectorName?: string;
 }
 
 export interface ConversationView {
@@ -137,7 +172,7 @@ export interface ConversationView {
   projectReady: boolean;
   chatUrl: string | null;
   connectorName: string | null;
-  /** long-chat: Skill may goto chatUrl. project: only if this local Codex session already bound it. */
+  /** Only the exact Project chat bound to this local Codex session may be reused. */
   reuseSavedChat: boolean;
 }
 
@@ -160,6 +195,8 @@ interface ThreadSession {
   iteration?: number;
   lastState?: string;
   checkpoint?: TaskCheckpoint;
+  surfaceGeneration?: number;
+  surfaceTabId?: string;
   savedAt: string;
 }
 
@@ -262,7 +299,8 @@ export function currentLocalSessionId(explicit?: string): string {
 }
 
 function sessionDir(workspaceId: string): string {
-  return ensureDir(path.join(getStateDir(), "sessions", validatedWorkspaceId(workspaceId)));
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  return ensureDir(path.join(getWorkspaceDataDir(resolvedWorkspaceId), "sessions"));
 }
 
 function sessionStateLockFile(workspaceId: string): string {
@@ -368,6 +406,12 @@ function optionalIteration(value: unknown, label: string): number | undefined {
   return value as number;
 }
 
+function optionalSurfaceGeneration(value: unknown, label: string): number | undefined {
+  const result = optionalIteration(value, label);
+  if (result !== undefined && result < 1) throw new Error(`${label} is invalid`);
+  return result;
+}
+
 function parseStoredCheckpoint(value: unknown): TaskCheckpoint | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value)) throw new Error("local session checkpoint is invalid");
@@ -466,7 +510,7 @@ function readWorkspaceSession(workspaceId: string): WorkspaceSession | null {
     "workspace session state"
   );
   const conversationMode = value.conversationMode;
-  if (conversationMode !== undefined && conversationMode !== "long-chat" && conversationMode !== "project") {
+  if (conversationMode !== undefined && conversationMode !== "project") {
     throw new Error("workspace session conversation mode is invalid");
   }
   const projectUrl = optionalCanonicalProjectUrl(value.projectUrl, "workspace session project URL");
@@ -515,12 +559,19 @@ function readThreadSession(workspaceId: string, localSessionId: string): ThreadS
       "iteration",
       "lastState",
       "checkpoint",
+      "surfaceGeneration",
+      "surfaceTabId",
       "savedAt",
     ],
     "local session state"
   );
   const url = optionalCanonicalChatUrl(value.url, "local session chat URL");
   const iteration = optionalIteration(value.iteration, "local session iteration");
+  const surfaceGeneration = optionalSurfaceGeneration(value.surfaceGeneration, "surface generation");
+  const surfaceTabId = optionalSafeId(value.surfaceTabId, "surface tab id");
+  if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
+    throw new Error("surface route requires generation and tab id together");
+  }
   return {
     schemaVersion: 2,
     workspaceId: resolvedWorkspaceId,
@@ -531,6 +582,8 @@ function readThreadSession(workspaceId: string, localSessionId: string): ThreadS
     iteration,
     lastState: optionalStoredText(value.lastState, "local session state", SESSION_TEXT_LIMITS.lastState),
     checkpoint: parseStoredCheckpoint(value.checkpoint),
+    surfaceGeneration,
+    surfaceTabId,
     savedAt: storedTimestamp(value.savedAt, "local session timestamp"),
   };
 }
@@ -565,6 +618,8 @@ function readSessionUnlocked(workspaceId: string, localSessionId: string): Saved
     conversationMode: workspace?.conversationMode,
     projectUrl: workspace?.projectUrl,
     connectorName: workspace?.connectorName,
+    surfaceGeneration: thread?.surfaceGeneration,
+    surfaceTabId: thread?.surfaceTabId,
     checkpoint: thread?.checkpoint,
     savedAt: thread?.savedAt ?? workspace?.savedAt ?? new Date().toISOString(),
   };
@@ -581,7 +636,8 @@ export function readSession(workspaceId: string, localSessionId = currentLocalSe
 function writeSessionUnlocked(
   workspaceId: string,
   session: SavedSession,
-  localSessionId = session.localSessionId ?? currentLocalSessionId()
+  localSessionId = session.localSessionId ?? currentLocalSessionId(),
+  options: { allowProjectRebind?: boolean; clearProjectBinding?: boolean } = {},
 ): SavedSession {
   const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
   const resolvedLocalSessionId = currentLocalSessionId(localSessionId);
@@ -593,25 +649,37 @@ function writeSessionUnlocked(
   }
   const savedAt = storedTimestamp(session.savedAt ?? new Date().toISOString(), "local session timestamp");
   const previousWorkspace = readWorkspaceSession(workspaceId);
-  const conversationMode = session.conversationMode ?? previousWorkspace?.conversationMode;
-  if (conversationMode !== undefined && conversationMode !== "long-chat" && conversationMode !== "project") {
+  const conversationMode = options.clearProjectBinding
+    ? undefined
+    : session.conversationMode ?? previousWorkspace?.conversationMode;
+  if (conversationMode !== undefined && conversationMode !== "project") {
     throw new Error("workspace session conversation mode is invalid");
   }
   const parsedCheckpoint = session.checkpoint ? parseStoredCheckpoint(session.checkpoint) : undefined;
-  const rawProjectUrl = session.projectUrl ?? parsedCheckpoint?.projectUrl ?? previousWorkspace?.projectUrl;
+  const rawProjectUrl = options.clearProjectBinding
+    ? undefined
+    : session.projectUrl ?? previousWorkspace?.projectUrl;
   const projectUrl = rawProjectUrl ? (normalizeProjectUrl(rawProjectUrl) ?? undefined) : undefined;
   if (rawProjectUrl && !projectUrl) {
     throw new Error("project URL must look like https://chatgpt.com/g/g-p-.../project");
   }
+  if (
+    !options.allowProjectRebind &&
+    previousWorkspace?.projectUrl &&
+    projectUrl &&
+    previousWorkspace.projectUrl !== projectUrl
+  ) {
+    throw new Error("workspace is already bound to a different ChatGPT Project");
+  }
   if (conversationMode === "project" && !projectUrl) {
     throw new Error("project mode requires a project URL");
   }
-  const rawUrl = session.url ?? parsedCheckpoint?.chatUrl;
+  const rawUrl = session.url;
   const url = rawUrl ? (normalizeChatUrl(rawUrl) ?? undefined) : undefined;
   if (rawUrl && !url) {
     throw new Error("chat URL must identify a ChatGPT conversation");
   }
-  assertProjectChatMatch(conversationMode, projectUrl, url);
+  assertProjectChatMatch(projectUrl, url);
   const taskId = optionalSafeId(session.taskId ?? parsedCheckpoint?.taskId, "local session task id");
   const iteration = optionalIteration(
     session.iteration ?? parsedCheckpoint?.iteration,
@@ -624,10 +692,17 @@ function writeSessionUnlocked(
     SESSION_TEXT_LIMITS.lastState
   );
   const connectorName = optionalStoredText(
-    session.connectorName ?? previousWorkspace?.connectorName,
+    options.clearProjectBinding
+      ? undefined
+      : session.connectorName ?? previousWorkspace?.connectorName,
     "workspace connector name",
     SESSION_TEXT_LIMITS.connectorName
   );
+  const surfaceGeneration = optionalSurfaceGeneration(session.surfaceGeneration, "surface generation");
+  const surfaceTabId = optionalSafeId(session.surfaceTabId, "surface tab id");
+  if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
+    throw new Error("surface route requires generation and tab id together");
+  }
   let checkpoint: TaskCheckpoint | undefined;
   if (parsedCheckpoint) {
     if (taskId !== parsedCheckpoint.taskId || iteration !== parsedCheckpoint.iteration) {
@@ -636,7 +711,12 @@ function writeSessionUnlocked(
     if (url && parsedCheckpoint.chatUrl && parsedCheckpoint.chatUrl !== url) {
       throw new Error("checkpoint chat URL does not match its local session state");
     }
-    if (projectUrl && parsedCheckpoint.projectUrl && parsedCheckpoint.projectUrl !== projectUrl) {
+    if (
+      !options.allowProjectRebind &&
+      projectUrl &&
+      parsedCheckpoint.projectUrl &&
+      parsedCheckpoint.projectUrl !== projectUrl
+    ) {
       throw new Error("checkpoint Project URL does not match its workspace state");
     }
     checkpoint = {
@@ -656,7 +736,8 @@ function writeSessionUnlocked(
   } satisfies WorkspaceSession);
 
   const hasThreadState = Boolean(
-    url || title || taskId || iteration !== undefined || lastState || checkpoint
+    url || title || taskId || iteration !== undefined || lastState || checkpoint ||
+      surfaceGeneration !== undefined || surfaceTabId !== undefined
   );
   if (hasThreadState) {
     writeSecureJson(threadSessionFile(workspaceId, resolvedLocalSessionId), {
@@ -669,6 +750,8 @@ function writeSessionUnlocked(
       iteration,
       lastState,
       checkpoint,
+      surfaceGeneration,
+      surfaceTabId,
       savedAt,
     } satisfies ThreadSession);
   }
@@ -693,12 +776,143 @@ export function updateSession(
   ) {
     throw new Error("local session patch does not match its storage path");
   }
+  const routePatch = patch as SessionPatch & Partial<Omit<RouteSessionPatch, keyof SessionPatch>>;
+  if (
+    routePatch.url !== undefined ||
+    routePatch.projectUrl !== undefined ||
+    routePatch.connectorName !== undefined ||
+    routePatch.conversationMode !== undefined ||
+    routePatch.surfaceGeneration !== undefined ||
+    routePatch.surfaceTabId !== undefined
+  ) {
+    throw new Error("session route can only be persisted by surface commit");
+  }
   return withFileLock(sessionStateLockFile(resolvedWorkspaceId), () => {
     const saved = mergeSession(readSessionUnlocked(resolvedWorkspaceId, resolvedLocalSessionId), {
       ...patch,
       localSessionId: resolvedLocalSessionId,
     });
     return writeSessionUnlocked(resolvedWorkspaceId, saved, resolvedLocalSessionId);
+  });
+}
+
+/** Persist a route only after the corresponding surface lease was verified. */
+export function commitSessionRoute(
+  workspaceId: string,
+  localSessionId: string,
+  route: SessionRouteCommit
+): SavedSession {
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const resolvedLocalSessionId = currentLocalSessionId(localSessionId);
+  const projectUrl = normalizeProjectUrl(route.projectUrl) ?? undefined;
+  if (!projectUrl) {
+    throw new Error("project URL must look like https://chatgpt.com/g/g-p-.../project");
+  }
+  const url = route.chatUrl === undefined ? undefined : normalizeChatUrl(route.chatUrl) ?? undefined;
+  if (route.chatUrl !== undefined && !url) {
+    throw new Error("chat URL must identify a ChatGPT conversation");
+  }
+  assertProjectChatMatch(projectUrl, url);
+  const surfaceGeneration = route.surfaceGeneration === undefined
+    ? undefined
+    : optionalSurfaceGeneration(route.surfaceGeneration, "surface generation");
+  const surfaceTabId = route.surfaceTabId === undefined
+    ? undefined
+    : optionalSafeId(route.surfaceTabId, "surface tab id");
+  if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
+    throw new Error("surface route requires generation and tab id together");
+  }
+  return withFileLock(sessionStateLockFile(resolvedWorkspaceId), () => {
+    const previous = readSessionUnlocked(resolvedWorkspaceId, resolvedLocalSessionId);
+    const previousGeneration = previous?.surfaceGeneration;
+    if (previousGeneration !== undefined) {
+      if (surfaceGeneration === undefined) {
+        throw new Error("surface route identity is required to update a committed route");
+      }
+      if (surfaceGeneration < previousGeneration) {
+        throw new Error("surface route commit is stale");
+      }
+      if (surfaceGeneration === previousGeneration && previous?.surfaceTabId !== surfaceTabId) {
+        throw new Error("surface route commit does not match the current tab");
+      }
+    }
+    const saved = mergeSession(previous, {
+      localSessionId: resolvedLocalSessionId,
+      url,
+      projectUrl,
+      conversationMode: "project",
+      connectorName: route.connectorName,
+      surfaceGeneration,
+      surfaceTabId,
+    });
+    return writeSessionUnlocked(resolvedWorkspaceId, saved, resolvedLocalSessionId);
+  });
+}
+
+/**
+ * Reconcile the checkout route from machine authority after a partial commit.
+ * This intentionally bypasses the normal route CAS checks: the input is
+ * already the protected machine binding, so an older or edited workspace
+ * mirror must be replaced by that binding rather than winning the write.
+ */
+export function reconcileSessionRoute(
+  workspaceId: string,
+  localSessionId: string,
+  authority: SessionRouteAuthority,
+): SavedSession | null {
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const resolvedLocalSessionId = currentLocalSessionId(localSessionId);
+  if (authority.projectUrl === null) {
+    return clearSessionRoute(resolvedWorkspaceId, resolvedLocalSessionId, null);
+  }
+  const projectUrl = normalizeProjectUrl(authority.projectUrl);
+  if (!projectUrl) {
+    throw new Error("project URL must identify a ChatGPT Project");
+  }
+  const chatUrl = authority.chatUrl === undefined
+    ? undefined
+    : normalizeChatUrl(authority.chatUrl) ?? undefined;
+  if (authority.chatUrl !== undefined && !chatUrl) {
+    throw new Error("chat URL must identify a ChatGPT conversation");
+  }
+  assertProjectChatMatch(projectUrl, chatUrl ?? undefined);
+  const surfaceGeneration = optionalSurfaceGeneration(authority.surfaceGeneration, "surface generation");
+  const surfaceTabId = optionalSafeId(authority.surfaceTabId, "surface tab id");
+  if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
+    throw new Error("surface route requires generation and tab id together");
+  }
+  return withFileLock(sessionStateLockFile(resolvedWorkspaceId), () => {
+    const previous = readSessionUnlocked(resolvedWorkspaceId, resolvedLocalSessionId);
+    const previousCheckpoint = previous?.checkpoint
+      ? { ...previous.checkpoint, chatUrl, projectUrl }
+      : undefined;
+    const routeMatchesAuthority = Boolean(
+      previous &&
+      previous.projectUrl === projectUrl &&
+      previous.url === chatUrl &&
+      previous.surfaceGeneration === surfaceGeneration &&
+      previous.surfaceTabId === surfaceTabId &&
+      previous.checkpoint?.chatUrl === chatUrl &&
+      previous.checkpoint?.projectUrl === projectUrl
+    );
+    if (routeMatchesAuthority) return previous;
+    return writeSessionUnlocked(
+      resolvedWorkspaceId,
+      {
+        ...(previous ?? {}),
+        localSessionId: resolvedLocalSessionId,
+        url: chatUrl,
+        projectUrl,
+        conversationMode: "project",
+        connectorName: authority.connectorName ?? previous?.connectorName,
+        surfaceGeneration,
+        surfaceTabId,
+        checkpoint: previousCheckpoint,
+        savedAt: new Date().toISOString(),
+      },
+      resolvedLocalSessionId,
+      { allowProjectRebind: true },
+    );
   });
 }
 
@@ -718,8 +932,6 @@ export function normalizeChatUrl(url: string): string | null {
   try {
     const parsed = new URL(url.trim());
     if (!isSecureChatGptUrl(parsed)) return null;
-    const direct = parsed.pathname.match(/^\/c\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/?$/);
-    if (direct) return `https://chatgpt.com/c/${direct[1]}`;
     const project = parsed.pathname.match(
       /^\/g\/(g-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\/c\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/?$/
     );
@@ -759,12 +971,11 @@ export function projectIdFromChatUrl(url: string): string | null {
   return segment ? canonicalProjectId(segment) : null;
 }
 
-function assertProjectChatMatch(
-  mode: ConversationMode | undefined,
-  projectUrl: string | undefined,
-  chatUrl: string | undefined
-): void {
-  if (mode !== "project" || !projectUrl || !chatUrl) return;
+function assertProjectChatMatch(projectUrl: string | undefined, chatUrl: string | undefined): void {
+  if (!chatUrl) return;
+  if (!projectUrl) {
+    throw new Error("chat URL requires a configured ChatGPT Project");
+  }
   if (projectIdFromChatUrl(chatUrl) !== projectIdFromUrl(projectUrl)) {
     throw new Error("project chat URL must belong to the configured ChatGPT Project");
   }
@@ -789,20 +1000,7 @@ export function resolveConversation(session: SavedSession | null): ConversationV
   const normalizedChatUrl = session.url ? normalizeChatUrl(session.url) : null;
   const projectReady = Boolean(projectUrl);
 
-  if (session.conversationMode === "long-chat") {
-    return {
-      localSessionId,
-      mode: "long-chat",
-      reason: "existing-long-chat",
-      projectUrl: null,
-      projectReady: false,
-      chatUrl: normalizedChatUrl,
-      connectorName: session.connectorName ?? null,
-      reuseSavedChat: Boolean(normalizedChatUrl),
-    };
-  }
-
-  if (session.conversationMode === "project" || projectReady) {
+  if (projectReady) {
     const chatUrl =
       normalizedChatUrl && projectUrl && projectIdFromChatUrl(normalizedChatUrl) === projectIdFromUrl(projectUrl)
         ? normalizedChatUrl
@@ -821,13 +1019,13 @@ export function resolveConversation(session: SavedSession | null): ConversationV
 
   return {
     localSessionId,
-    mode: "long-chat",
-    reason: "existing-long-chat",
+    mode: "project",
+    reason: "new-workspace",
     projectUrl: null,
     projectReady: false,
-    chatUrl: normalizedChatUrl,
+    chatUrl: null,
     connectorName: session.connectorName ?? null,
-    reuseSavedChat: Boolean(normalizedChatUrl),
+    reuseSavedChat: false,
   };
 }
 
@@ -840,23 +1038,15 @@ export function resolveConversationRoute(conversation: ConversationView): Conver
       controlReady: true,
     };
   }
-  if (conversation.mode === "project") {
-    if (conversation.projectUrl) {
-      return {
-        action: "create-project-chat",
-        targetUrl: conversation.projectUrl,
-        expectedChatUrl: null,
-        controlReady: false,
-      };
-    }
-    return { action: "bind-project", targetUrl: null, expectedChatUrl: null, controlReady: false };
+  if (conversation.projectUrl) {
+    return {
+      action: "create-project-chat",
+      targetUrl: conversation.projectUrl,
+      expectedChatUrl: null,
+      controlReady: false,
+    };
   }
-  return {
-    action: "create-long-chat",
-    targetUrl: "https://chatgpt.com/",
-    expectedChatUrl: null,
-    controlReady: false,
-  };
+  return { action: "bind-project", targetUrl: null, expectedChatUrl: null, controlReady: false };
 }
 
 function capCheckpointText(value: string | undefined, max: number): string | undefined {
@@ -867,7 +1057,7 @@ function capCheckpointText(value: string | undefined, max: number): string | und
   return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
 }
 
-export function mergeSession(previous: SavedSession | null, patch: SessionPatch): SavedSession {
+export function mergeSession(previous: SavedSession | null, patch: RouteSessionPatch): SavedSession {
   const previousCheckpoint = previous?.checkpoint
     ? parseStoredCheckpoint(previous.checkpoint)
     : undefined;
@@ -899,13 +1089,22 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
     throw new Error("changing checkpoint correlation requires --protocol-state or --clear-checkpoint");
   }
   const conversationMode = patch.conversationMode ?? previous?.conversationMode;
-  if (conversationMode !== undefined && conversationMode !== "long-chat" && conversationMode !== "project") {
+  if (conversationMode !== undefined && conversationMode !== "project") {
     throw new Error("conversation mode is invalid");
   }
   const rawProjectUrl = patch.projectUrl ?? previous?.projectUrl;
   const projectUrl = rawProjectUrl ? (normalizeProjectUrl(rawProjectUrl) ?? undefined) : undefined;
   if (rawProjectUrl && !projectUrl) {
     throw new Error("project URL must look like https://chatgpt.com/g/g-p-.../project");
+  }
+  if (previous?.projectUrl && projectUrl) {
+    const previousProjectUrl = normalizeProjectUrl(previous.projectUrl);
+    if (!previousProjectUrl) {
+      throw new Error("previous session contains an invalid ChatGPT Project URL");
+    }
+    if (previousProjectUrl !== projectUrl) {
+      throw new Error("local session is already bound to a different ChatGPT Project");
+    }
   }
 
   if (conversationMode === "project" && !projectUrl && !previous?.projectUrl) {
@@ -917,12 +1116,12 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
   if (rawUrl && !url) {
     throw new Error("chat URL must identify a ChatGPT conversation");
   }
-  assertProjectChatMatch(conversationMode, projectUrl, url);
+  assertProjectChatMatch(projectUrl, url);
   const hasChat = Boolean(url);
   const hasProject = Boolean(projectUrl);
   const hasTask = Boolean(taskId);
   const hasCheckpoint = Boolean(patch.checkpoint || patch.clearCheckpoint || previous?.checkpoint);
-  if (!hasChat && !hasProject && conversationMode !== "long-chat" && !hasTask && !hasCheckpoint) {
+  if (!hasChat && !hasProject && !hasTask && !hasCheckpoint) {
     throw new Error("nothing to save: pass --url, --project-url, or --mode");
   }
 
@@ -1000,8 +1199,10 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
         patch.checkpoint.nextExpectedStep ?? previousCheckpoint?.nextExpectedStep,
         CHECKPOINT_LIMITS.nextExpectedStep
       ),
-      chatUrl: patch.checkpoint.chatUrl ?? previousCheckpoint?.chatUrl ?? url,
-      projectUrl: patch.checkpoint.projectUrl ?? previousCheckpoint?.projectUrl ?? projectUrl,
+      // Checkpoints describe task progress. Their route fields are a legacy
+      // mirror and must never be allowed to create or change a session route.
+      chatUrl: url,
+      projectUrl,
       mailboxRequestId,
       mailboxPhase,
       mailboxResultId,
@@ -1046,6 +1247,17 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
     "workspace connector name",
     SESSION_TEXT_LIMITS.connectorName
   );
+  const surfaceGeneration = optionalSurfaceGeneration(
+    patch.surfaceGeneration ?? previous?.surfaceGeneration,
+    "surface generation",
+  );
+  const surfaceTabId = optionalSafeId(
+    patch.surfaceTabId ?? previous?.surfaceTabId,
+    "surface tab id",
+  );
+  if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
+    throw new Error("surface route requires generation and tab id together");
+  }
 
   return {
     schemaVersion: 2,
@@ -1055,9 +1267,11 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
     taskId,
     iteration,
     lastState,
-    conversationMode: conversationMode === "project" && projectUrl ? "project" : conversationMode,
+    conversationMode: projectUrl ? "project" : undefined,
     projectUrl,
     connectorName,
+    surfaceGeneration,
+    surfaceTabId,
     checkpoint,
     savedAt: new Date().toISOString(),
   };
@@ -1086,6 +1300,8 @@ export function clearChatPointer(
           ...previous,
           url: undefined,
           title: undefined,
+          surfaceGeneration: undefined,
+          surfaceTabId: undefined,
           checkpoint: previous.checkpoint
             ? { ...previous.checkpoint, chatUrl: undefined }
             : undefined,
@@ -1107,5 +1323,103 @@ export function clearChatPointer(
       if (!hasSharedConfiguration) fs.rmSync(sessionFile(resolvedWorkspaceId), { force: true });
     }
     return { cleared: hadChat, keptProject: false };
+  });
+}
+
+/** Clear a route during machine-authority reconciliation and keep Project/task state. */
+export function clearSessionRoute(
+  workspaceId: string,
+  localSessionId = currentLocalSessionId(),
+  projectUrl?: string | null,
+): SavedSession | null {
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const resolvedLocalSessionId = currentLocalSessionId(localSessionId);
+  const clearProjectBinding = projectUrl === null;
+  const normalizedProjectUrl = projectUrl === undefined
+    ? undefined
+    : clearProjectBinding
+      ? undefined
+      : normalizeProjectUrl(projectUrl) ?? undefined;
+  if (projectUrl !== undefined && !normalizedProjectUrl) {
+    if (!clearProjectBinding) {
+      throw new Error("project URL must identify a ChatGPT Project");
+    }
+  }
+  return withFileLock(sessionStateLockFile(resolvedWorkspaceId), () => {
+    const previous = readSessionUnlocked(resolvedWorkspaceId, resolvedLocalSessionId);
+    if (!previous) return null;
+    const view = resolveConversation(previous);
+    const threadFile = threadSessionFile(resolvedWorkspaceId, view.localSessionId);
+    const shouldKeepThread = Boolean(
+      previous.taskId || previous.iteration !== undefined || previous.lastState || previous.checkpoint
+    );
+    if (shouldKeepThread) {
+      writeSessionUnlocked(
+        resolvedWorkspaceId,
+        {
+          ...previous,
+          url: undefined,
+          title: undefined,
+          conversationMode: clearProjectBinding ? undefined : previous.conversationMode,
+          projectUrl: clearProjectBinding ? undefined : normalizedProjectUrl ?? previous.projectUrl,
+          connectorName: clearProjectBinding ? undefined : previous.connectorName,
+          surfaceGeneration: undefined,
+          surfaceTabId: undefined,
+          checkpoint: previous.checkpoint
+            ? {
+                ...previous.checkpoint,
+                chatUrl: undefined,
+                projectUrl: clearProjectBinding
+                  ? undefined
+                  : normalizedProjectUrl ?? previous.checkpoint.projectUrl,
+              }
+            : undefined,
+          savedAt: new Date().toISOString(),
+        },
+        view.localSessionId,
+        {
+          allowProjectRebind: clearProjectBinding || normalizedProjectUrl !== undefined,
+          clearProjectBinding,
+        },
+      );
+    } else {
+      fs.rmSync(threadFile, { force: true });
+      if (clearProjectBinding) {
+        fs.rmSync(sessionFile(resolvedWorkspaceId), { force: true });
+      } else if (normalizedProjectUrl !== undefined) {
+        writeSessionUnlocked(
+          resolvedWorkspaceId,
+          {
+            ...previous,
+            url: undefined,
+            title: undefined,
+            projectUrl: normalizedProjectUrl,
+            conversationMode: "project",
+            surfaceGeneration: undefined,
+            surfaceTabId: undefined,
+            checkpoint: undefined,
+            savedAt: new Date().toISOString(),
+          },
+          view.localSessionId,
+          { allowProjectRebind: true },
+        );
+      }
+    }
+    return readSessionUnlocked(resolvedWorkspaceId, resolvedLocalSessionId);
+  });
+}
+
+/** Permanently remove one local session's checkout-specific route and state. */
+export function retireSession(
+  workspaceId: string,
+  localSessionId = currentLocalSessionId()
+): boolean {
+  const resolvedWorkspaceId = validatedWorkspaceId(workspaceId);
+  const resolvedLocalSessionId = currentLocalSessionId(localSessionId);
+  return withFileLock(sessionStateLockFile(resolvedWorkspaceId), () => {
+    const file = threadSessionFile(resolvedWorkspaceId, resolvedLocalSessionId);
+    if (!fs.existsSync(file)) return false;
+    fs.rmSync(file);
+    return true;
   });
 }

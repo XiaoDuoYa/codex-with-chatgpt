@@ -1,123 +1,168 @@
-import { Command } from "commander";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { startBridge } from "../bridge/server.js";
-import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
-import { Workspace } from "../workspace/manager.js";
-import { AuthStore } from "../auth/store.js";
-import { detectTunnelBinaries } from "../tunnel/detect.js";
-import { bridgeHealth } from "../tunnel/cloudflared.js";
-import { namedTunnelStartRequestTimeoutMs } from "../tunnel/cloudflared-named.js";
+import { Command } from "commander";
 import {
-  chooseQuickTunnel,
-  hasCloudflaredCert,
-  ProcessCloudflaredAccount,
-  provisionNamedTunnel,
-} from "../tunnel/named-provision.js";
-import { parseZoneInput, suggestedNamedHostname } from "../tunnel/hostname.js";
-import {
-  isNamedTunnelReady,
-  NAMED_LOGIN_PROMPT,
-  NAMED_REPAIR_MESSAGE,
-  needsTunnelChoice,
-  readTunnelState,
-  TUNNEL_CHOICE_PROMPT,
-} from "../tunnel/state.js";
-import { Logger } from "../logger/index.js";
-import { getStateDir } from "../config/paths.js";
-import {
+  AUTOSTART_LABEL,
   autostartStatus,
   buildAutostartConfig,
   disableAutostart,
   enableAutostart,
 } from "../config/autostart.js";
-import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
+import {
+  ensureSandboxIsolation,
+  restoreCodexConfig,
+  snapshotCodexConfig,
+} from "../config/sandbox-allow.js";
+import {
+  restorePrivateFile,
+  snapshotPrivateFile,
+} from "../config/private-file.js";
+import { getProjectDataDir, getStateDir, writeSecureJson } from "../config/paths.js";
+import {
+  installRuntime,
+  restoreRuntimeInstallation,
+  runtimeCurrentPath,
+  snapshotRuntimeInstallation,
+  type RuntimeInstallResult,
+} from "../config/runtime-install.js";
+import {
+  installGlobalSkill,
+  restoreGlobalSkill,
+  snapshotGlobalSkill,
+  statusGlobalSkill,
+  type SkillInstallResult,
+  type SkillStatusResult,
+} from "../config/skill-install.js";
+import {
+  runRollbackSteps,
+  shouldRestorePreviousGateway,
+  type RollbackStep,
+} from "../config/setup-transaction.js";
 import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
-import {
-  CHATGPT_CREATE_CONNECTOR_URL,
-  CHATGPT_DEVELOPER_MODE_URL,
-  CHATGPT_PLUGINS_URL,
-  connectorAction,
-  connectorNameFor,
-  mcpUrlFromPublic,
-  normalizePublicUrl,
-  readLastEndpoint,
-  reclaimUserMessage,
-  writeLastEndpoint,
-  type LastEndpoint,
-} from "../config/endpoint.js";
-import { PRODUCT_NAME, VERSION } from "../version.js";
-import {
-  clearChatPointer,
-  currentLocalSessionId,
-  currentLocalSessionIdentity,
-  readSession,
-  resolveConversation,
-  resolveConversationRoute,
-  updateSession,
-  PROTOCOL_STATES,
-  WAITING_FOR,
-  type ConversationMode,
-  type ProtocolState,
-  type WaitingFor,
-} from "../session/state.js";
-import {
-  appendExecutionRecord,
-  parseExecutionExitStatus,
-  validateExecutionRecordInput,
-} from "../execution/records.js";
-import { saveExecutionOutput } from "../execution/output.js";
-import {
-  acknowledgeControlResult,
-  cancelControlResultRequest,
-  getControlResultStatus,
-  openControlResultRequest,
-  waitForControlResult,
-} from "../control/mailbox.js";
 import {
   CONTROL_PHASES,
   ControlMailboxError,
   MAX_C2C_ITERATION,
   validateControlId,
   type ControlPhase,
+  type ControlResultRequest,
   type ControlResultCorrelation,
 } from "../control/result-schema.js";
+import { saveExecutionOutput } from "../execution/output.js";
+import {
+  appendExecutionRecord,
+  parseExecutionExitStatus,
+  validateExecutionRecordInput,
+} from "../execution/records.js";
+import {
+  adminFetch as machineAdminFetch,
+  claimSurface as claimMachineSurface,
+  commitSurface as commitMachineSurface,
+  acknowledgeMailboxResult,
+  cancelMailboxRequest,
+  cancelTurn as cancelMachineTurn,
+  getMailboxStatus,
+  getSurface as getMachineSurface,
+  issueTurn as issueMachineTurn,
+  openMailboxRequest,
+  registerWorkspace as registerMachineWorkspace,
+  releaseSurface as releaseMachineSurface,
+  renewSurface as renewMachineSurface,
+  revokeRequest as revokeMachineRequest,
+  retireSurface as retireMachineSurface,
+  unregisterWorkspace as unregisterMachineWorkspace,
+  waitMailboxResult,
+  type MachineRegistrationIdentity,
+} from "../gateway/control-client.js";
+import { startMachineGatewayServer, TURN_SCOPES } from "../gateway/server.js";
+import {
+  observeMachineRuntime,
+  type MachineRuntimeObservation,
+  type MachineRuntimeState,
+} from "../gateway/runtime.js";
+import { Logger } from "../logger/index.js";
+import {
+  ensureMachineGateway,
+  observeManagedMachine,
+  restoreMachineGateway,
+  stopMachineGateway,
+  withMachineSetupLock,
+} from "../process/machine-daemon.js";
+import {
+  clearChatPointer,
+  currentLocalSessionId,
+  currentLocalSessionIdentity,
+  PROTOCOL_STATES,
+  readSession,
+  resolveConversation,
+  resolveConversationRoute,
+  updateSession,
+  WAITING_FOR,
+  type ProtocolState,
+  type WaitingFor,
+} from "../session/state.js";
+import {
+  createOpenAiTunnelConfig,
+  doctorOpenAiTunnel,
+  installOpenAiRuntimeKey,
+  installOpenAiTunnelClient,
+  OPENAI_CONNECTOR_NAME,
+  openAiTunnelConfigFile,
+  openAiTunnelRuntimeStatusView,
+  openAiTunnelRuntimeKeyPath,
+  readOpenAiTunnelConfig,
+  statusOpenAiTunnel,
+  stopOpenAiTunnel,
+  writeOpenAiTunnelConfig,
+  type OpenAiTunnelConfig,
+} from "../tunnel/openai-secure.js";
 import { checkGitUpdate } from "../update/check.js";
+import { PRODUCT_NAME, VERSION } from "../version.js";
+import { Workspace } from "../workspace/manager.js";
 
 const program = new Command();
-
-const say = (msg: string): void => {
-  process.stdout.write(msg + "\n");
-};
-const check = (msg: string): void => say(`✓ ${msg}`);
-const cross = (msg: string): void => say(`✗ ${msg}`);
-
-function resolveWorkspace(option?: string): string {
-  return path.resolve(option ?? process.cwd());
-}
-
-/** Local harness output only. Never pasted into ChatGPT. */
+const DEFAULT_TURN_TTL_MS = 30 * 60_000;
+const MAX_TURN_TTL_MS = 60 * 60_000;
+const DEFAULT_SURFACE_TTL_MS = 60 * 60_000;
 const MAX_RECORD_OUTPUT_READ = 256 * 1024;
 
-function readCappedUtf8(filePath: string, maxBytes: number): string {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    const buf = Buffer.alloc(maxBytes);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    return buf.subarray(0, n).toString("utf8");
-  } finally {
-    fs.closeSync(fd);
+const say = (message: string): void => {
+  process.stdout.write(`${message}\n`);
+};
+
+const check = (message: string): void => say(`✓ ${message}`);
+const cross = (message: string): void => say(`✗ ${message}`);
+
+function resolveWorkspace(option?: string): string {
+  const cwd = fs.realpathSync.native(process.cwd());
+  if (option === undefined) return cwd;
+
+  const requested = fs.realpathSync.native(path.resolve(option));
+  if (requested !== cwd) {
+    throw new Error(
+      "Workspace path must match the current working directory; run this command from the target workspace."
+    );
+  }
+  return cwd;
+}
+
+function assertCurrentWorkspaceIdentity(
+  workspace: Workspace,
+  workspaceId: string,
+  projectId: string,
+): void {
+  if (workspaceId !== workspace.id || projectId !== workspace.projectId) {
+    throw new Error(
+      "Workspace identity must match the workspace belonging to the current working directory."
+    );
   }
 }
 
-function parseControlPhase(value: string): ControlPhase {
-  const phase = value.trim().toUpperCase();
-  if (!CONTROL_PHASES.includes(phase as ControlPhase)) {
-    throw new Error(`phase must be one of ${CONTROL_PHASES.join(", ")}`);
-  }
-  return phase as ControlPhase;
+function resolveLocalSession(option?: string): string {
+  return currentLocalSessionId(option);
 }
 
 function parseIntegerOption(value: string, label: string, min: number, max: number): number {
@@ -136,195 +181,182 @@ function parseControlIteration(value: string): number {
   return parseIntegerOption(value, "iteration", 0, MAX_C2C_ITERATION);
 }
 
+function parseControlPhase(value: string): ControlPhase {
+  const phase = value.trim().toUpperCase();
+  if (!CONTROL_PHASES.includes(phase as ControlPhase)) {
+    throw new Error(`phase must be one of ${CONTROL_PHASES.join(", ")}`);
+  }
+  return phase as ControlPhase;
+}
+
+function parseMachinePhase(value: string): "BOOT" | ControlPhase {
+  const phase = value.trim().toUpperCase();
+  return phase === "BOOT" ? phase : parseControlPhase(phase);
+}
+
 function parseControlCorrelation(opts: {
   task: string;
   iteration: string;
   phase: string;
 }): ControlResultCorrelation {
   return {
-    taskId: opts.task,
+    taskId: validateControlId(opts.task, "task id"),
     iteration: parseControlIteration(opts.iteration),
     phase: parseControlPhase(opts.phase),
   };
 }
 
-function resolveLocalSession(option?: string): string {
-  return currentLocalSessionId(option);
+function parseScopes(value?: string): string[] {
+  const scopes = (value === undefined ? [...TURN_SCOPES] : value.split(","))
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+  if (scopes.length === 0) throw new Error("scopes must include at least one scope");
+  const allowed = new Set<string>(TURN_SCOPES);
+  const unknown = scopes.filter((scope) => !allowed.has(scope));
+  if (unknown.length > 0) throw new Error(`unknown scopes: ${unknown.join(", ")}`);
+  return [...new Set(scopes)];
 }
 
-function persistWorkspaceEndpoint(opts: {
-  workspaceId: string;
-  workspaceName: string;
-  port: number;
-  publicUrl: string | null;
-  mcpUrl: string;
-  previous?: LastEndpoint | null;
-}): string {
-  const previous = opts.previous ?? readLastEndpoint(opts.workspaceId);
-  const connectorName = connectorNameFor({
-    workspaceName: opts.workspaceName,
-    workspaceId: opts.workspaceId,
-    previousName: previous?.connectorName,
-    hadEndpointBefore: Boolean(previous),
-  });
-  writeLastEndpoint({
-    workspaceId: opts.workspaceId,
-    port: opts.port,
-    publicUrl: opts.publicUrl,
-    mcpUrl: opts.mcpUrl,
-    connectorName,
-  });
-  return connectorName;
-}
-
-function tunnelChoicePayload(workspace: Workspace, zoneHint?: string): Record<string, unknown> {
-  const state = readTunnelState(workspace.id);
-  const zone = parseZoneInput(zoneHint ?? "") ?? state.zone ?? null;
-  return {
-    ok: true,
-    needsChoice: needsTunnelChoice(state),
-    preference: state.preference,
-    loggedIn: hasCloudflaredCert(),
-    namedReady: isNamedTunnelReady(state),
-    zone,
-    hostname: state.hostname ?? null,
-    suggestedHostname: zone ? suggestedNamedHostname(zone, workspace.name, workspace.id) : null,
-    userPrompt: needsTunnelChoice(state) ? TUNNEL_CHOICE_PROMPT : undefined,
-    loginPrompt: NAMED_LOGIN_PROMPT,
-    fallbackReason: state.fallbackReason,
-  };
-}
-
-function trySandboxAllow():
-  | { ok: true; added: boolean; alreadyAllowed: boolean; stateDir: string; configPath: string }
-  | { ok: false; added: false; alreadyAllowed: false; error: string } {
+function readCappedUtf8(filePath: string, maxBytes: number): string {
+  const fd = fs.openSync(filePath, "r");
   try {
-    const result = ensureSandboxAllowlist();
-    return { ok: true, ...result };
-  } catch (error) {
-    return { ok: false, added: false, alreadyAllowed: false, error: (error as Error).message };
+    const buffer = Buffer.alloc(maxBytes);
+    const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, length).toString("utf8");
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
-interface TunnelStartResponse {
-  url?: string;
-  error?: string;
-  message?: string;
+function errorCode(error: unknown): string | undefined {
+  if (error instanceof ControlMailboxError) return error.code;
+  if (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
+  ) {
+    const code = (error as { code: string }).code;
+    return code.startsWith("mailbox_") ? code.toUpperCase() : code;
+  }
+  return undefined;
 }
 
-interface PairingResponse {
-  code: string;
-  expiresAt: number;
+function handleCliError(error: unknown, json: boolean): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (json) say(JSON.stringify({ ok: false, error: message, code: errorCode(error) }));
+  else cross(message);
+  process.exitCode = 1;
 }
 
-interface AdminInfo {
-  workspaceId: string;
-  workspaceName: string;
-  workspaceRoot: string;
-  port: number;
-  publicUrl: string | null;
-  tunnel: { running: boolean; url: string | null; provider: string };
-  tokenCount: number;
-  authorization?: {
-    activeTokenCount: number;
-    activeClientCount: number;
-    connectorClientCount: number;
-    connectorActiveTokenCount: number;
-    grantedScopes: string[];
-    resultWriteAuthorized: boolean;
+function machineRuntimeView(
+  runtime: MachineRuntimeState
+): Omit<MachineRuntimeState, "adminToken" | "associationNonce"> {
+  const { adminToken: _adminToken, associationNonce: _associationNonce, ...view } = runtime;
+  return view;
+}
+
+function machineRuntimeObservationView(
+  observation: MachineRuntimeObservation
+): Record<string, unknown> {
+  return {
+    ...observation,
+    runtime: observation.runtime ? machineRuntimeView(observation.runtime) : null,
   };
-  pairingActive: boolean;
+}
+
+interface MachineAdminInfo {
+  service: string;
+  version: string;
+  machineId: string;
+  bootEpoch: string;
   pid: number;
+  port: number;
   startedAt: string;
+  workspaceCount: number;
+  capabilityCount: number;
+  activeTurnCount: number;
+  tombstoneCount: number;
+  drainingTurnCount: number;
+  maxTombstones: number;
 }
 
-async function requestTunnelUrl(runtime: RuntimeState, opts: { restart?: boolean } = {}): Promise<string> {
-  const result = await adminFetch<TunnelStartResponse>(
-    runtime,
-    "POST",
-    opts.restart ? "/admin/tunnel/restart" : "/admin/tunnel/start",
-    namedTunnelStartRequestTimeoutMs()
-  );
-  if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
-  return result.url;
+async function machineInfo(runtime: MachineRuntimeState): Promise<MachineAdminInfo> {
+  return machineAdminFetch<MachineAdminInfo>(runtime, "GET", "/admin/info");
 }
 
-async function publicHealthOk(publicUrl: string, workspaceId: string): Promise<boolean> {
-  try {
-    return (await bridgeHealth(fetch, publicUrl, workspaceId)).ready;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureBridgeAndTunnel(
-  workspaceRoot: string,
-  opts: { tunnel: boolean }
-): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
-  const { runtime } = await ensureBridge(workspaceRoot);
-  let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-  let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
-  if (opts.tunnel && !info.publicUrl) {
-    const binaries = detectTunnelBinaries();
-    if (!binaries.cloudflared) {
-      throw new Error(
-        "NEED_CLOUDFLARED: cloudflared is not installed. Install it first (macOS: brew install cloudflared)."
-      );
-    }
-    const url = await requestTunnelUrl(runtime);
-    info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    mcpUrl = `${url}/mcp`;
-  }
-  return { runtime, info, mcpUrl };
-}
-
-async function runAutostartOnce(workspaceRoot: string): Promise<Record<string, unknown>> {
-  const sandbox = trySandboxAllow();
-  const { runtime, info: ensuredInfo, mcpUrl: ensuredMcpUrl } = await ensureBridgeAndTunnel(workspaceRoot, {
-    tunnel: true,
-  });
-  let info = ensuredInfo;
-  let mcpUrl = ensuredMcpUrl;
-  let publicHealthy: boolean | null = null;
-  let tunnelRestarted = false;
-
-  if (info.publicUrl) {
-    publicHealthy = await publicHealthOk(info.publicUrl, info.workspaceId);
-    if (!publicHealthy) {
-      const url = await requestTunnelUrl(runtime, { restart: true });
-      tunnelRestarted = true;
-      info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      mcpUrl = `${url}/mcp`;
-      publicHealthy = await publicHealthOk(url, info.workspaceId);
-      if (!publicHealthy) {
-        throw new Error(`Public health check failed: ${url}/health`);
-      }
-    }
-  }
-
-  const connectorName = mcpUrl
-    ? persistWorkspaceEndpoint({
-        workspaceId: info.workspaceId,
-        workspaceName: info.workspaceName,
-        port: runtime.port,
-        publicUrl: info.publicUrl,
-        mcpUrl,
-      })
-    : readLastEndpoint(info.workspaceId)?.connectorName;
-
+function tunnelConfigView(config: OpenAiTunnelConfig | null): Record<string, unknown> | null {
+  if (!config) return null;
   return {
-    ok: true,
-    workspaceId: info.workspaceId,
-    workspaceName: info.workspaceName,
-    workspaceRoot: info.workspaceRoot,
-    port: runtime.port,
-    publicUrl: info.publicUrl,
-    mcpUrl,
-    connectorName,
-    tunnel: info.tunnel,
-    publicHealthy,
-    tunnelRestarted,
-    sandbox,
+    tunnelId: config.tunnelId,
+    associationId: config.associationId,
+    alias: config.alias,
+    profileName: config.profileName,
+    binaryPath: config.binaryPath,
+    runtimeKeyInstalled: fs.existsSync(config.runtimeKeyFile),
+  };
+}
+
+function skillInstallView(result: SkillInstallResult): Record<string, unknown> {
+  return {
+    installed: result.installed,
+    changed: result.changed,
+    path: result.path,
+    contentHash: result.contentHash,
+  };
+}
+
+function skillStatusView(result: SkillStatusResult): Record<string, unknown> {
+  return {
+    installed: result.installed,
+    matches: result.matches,
+    path: result.path,
+    contentHash: result.contentHash,
+    expectedContentHash: result.expectedContentHash,
+  };
+}
+
+function runtimeInstallView(result: RuntimeInstallResult): Record<string, unknown> {
+  return {
+    installed: result.installed,
+    changed: result.changed,
+    path: result.path,
+    entryPath: result.entryPath,
+    packageVersion: result.packageVersion,
+    launcherPath: result.launcherPath,
+    launcherChanged: result.launcherChanged,
+  };
+}
+
+function sessionOwnerEpoch(localSessionId: string): string {
+  return `owner-${createHash("sha256").update(localSessionId).digest("hex").slice(0, 32)}`;
+}
+
+async function machineSurfaceContext(
+  workspace: Workspace,
+  localSessionId: string,
+): Promise<{
+  runtime: MachineRuntimeState;
+  identity: {
+    workspaceId: string;
+    projectId: string;
+    registrationId: string;
+    localSessionId: string;
+  };
+}> {
+  const runtime = (await ensureMachineGateway()).runtime;
+  const registration = await registerMachineWorkspace(runtime, workspace.root);
+  if (registration.workspaceId !== workspace.id || registration.projectId !== workspace.projectId) {
+    throw new Error("Machine workspace registration does not match the trusted local workspace.");
+  }
+  return {
+    runtime,
+    identity: {
+      workspaceId: registration.workspaceId,
+      projectId: registration.projectId,
+      registrationId: registration.registrationId,
+      localSessionId,
+    },
   };
 }
 
@@ -334,925 +366,971 @@ program
   .version(VERSION, "-v, --version")
   .configureHelp({ sortSubcommands: true });
 
-// ---------------------------------------------------------------- serve (internal)
-
+// The official tunnel-client owns this process and its stdio transport.
 program
-  .command("serve", { hidden: true })
-  .description("Run the bridge in the foreground (internal)")
-  .requiredOption("--workspace <path>")
-  .option("--port <port>", "preferred port")
-  .action(async (opts: { workspace: string; port?: string }) => {
-    const logger = new Logger({ name: "bridge", console: true });
-    const bridge = await startBridge({
-      workspaceRoot: resolveWorkspace(opts.workspace),
-      port: opts.port ? parseIntegerOption(opts.port, "port", 0, 65_535) : undefined,
-      logger,
-    });
-    const shutdown = (): void => {
-      void bridge.close().then(() => process.exit(0));
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
-    say(`bridge ready on ${bridge.localBaseUrl()} (workspace ${bridge.workspace.name})`);
-  });
-
-// ---------------------------------------------------------------- start
-
-program
-  .command("start")
-  .description("Start (or reuse) the bridge for this workspace")
-  .option("-w, --workspace <path>", "workspace root (defaults to current directory)")
-  .option("--tunnel", "also establish the secure public connection", false)
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
+  .command("serve-machine", { hidden: true })
+  .description("Run the machine-scoped stdio MCP gateway (internal)")
+  .requiredOption("--stdio", "serve MCP over stdio")
+  .option("--port <port>", "loopback control port", "0")
+  .action(async (opts: { stdio: boolean; port: string }) => {
     try {
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : readLastEndpoint(info.workspaceId)?.connectorName;
-      if (opts.json) {
-        say(JSON.stringify({ ok: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl, connectorName }));
-        return;
+      if (!opts.stdio) throw new Error("serve-machine requires --stdio");
+      const associationId = process.env.C2C_ASSOCIATION_ID;
+      const associationNonce = process.env.C2C_ASSOCIATION_NONCE;
+      if (!associationId || !/^assoc-[a-f0-9]{32}$/.test(associationId)) {
+        throw new Error("serve-machine requires C2C_ASSOCIATION_ID from the managed tunnel runtime");
       }
-      check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
-      if (mcpUrl) check("安全连接已建立");
+      if (!associationNonce || !/^[A-Za-z0-9_-]{43}$/.test(associationNonce)) {
+        throw new Error("serve-machine requires C2C_ASSOCIATION_NONCE from the managed tunnel runtime");
+      }
+      const gateway = await startMachineGatewayServer({
+        port: parseIntegerOption(opts.port, "port", 0, 65_535),
+        connectStdio: true,
+        exitOnShutdown: true,
+        associationId,
+        associationNonce,
+        logger: new Logger({ name: "machine-gateway", console: false }),
+      });
+      const shutdown = (): void => {
+        void gateway.close().finally(() => process.exit(0));
+      };
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
     } catch (error) {
-      handleCliError(error, opts.json);
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      process.exitCode = 1;
     }
   });
 
-// ---------------------------------------------------------------- setup
+const machine = program
+  .command("machine")
+  .description("Manage the one machine-wide Connector, tunnel, and MCP gateway");
 
-program
+machine
   .command("setup")
-  .description("First-time setup: bridge + secure connection + pairing code")
-  .option("-w, --workspace <path>")
-  .option("--no-tunnel", "local-only setup (development)")
+  .description("Install and configure the official OpenAI Secure MCP Tunnel")
+  .requiredOption("--tunnel-id <id>", "OpenAI tunnel id")
+  .requiredOption("--runtime-key-file <path>", "file containing the tunnel runtime key")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
+  .action(async (opts: { tunnelId: string; runtimeKeyFile: string; json: boolean }) => {
     try {
-      if (!opts.json) {
-        say(PRODUCT_NAME);
-        say("");
-        say("正在连接 ChatGPT…");
-        say("");
-      }
-      const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : connectorNameFor({
-            workspaceName: info.workspaceName,
-            workspaceId: info.workspaceId,
-            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
-            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
+      const payload = await withMachineSetupLock(async () => {
+        const previousConfig = readOpenAiTunnelConfig();
+        const previousConfigFile = snapshotPrivateFile(openAiTunnelConfigFile());
+        const previousRuntimeKeyFile = snapshotPrivateFile(openAiTunnelRuntimeKeyPath());
+        const previousGateway = await observeMachineRuntime();
+        const runtimeHomeDir = path.resolve(process.env.HOME ?? os.homedir());
+        const previousRuntime = snapshotRuntimeInstallation({ homeDir: runtimeHomeDir });
+        const previousSkill = snapshotGlobalSkill();
+        const previousCodexConfig = snapshotCodexConfig();
+        let installedRuntime: RuntimeInstallResult | null = null;
+        let skill: SkillInstallResult | null = null;
+        let draft: OpenAiTunnelConfig | null = null;
+        let requiresFreshRuntime = false;
+        let oldSupervisorStopped = false;
+        let newSupervisorStarted = false;
+        let replacementStartAttempted = false;
+        try {
+          const nextRuntime = installRuntime({ checkoutRoot: repoRoot, homeDir: runtimeHomeDir });
+          installedRuntime = nextRuntime;
+          const nextSkill = installGlobalSkill({ checkoutRoot: nextRuntime.path });
+          skill = nextSkill;
+          const binaryPath = await installOpenAiTunnelClient();
+          const nextDraft = createOpenAiTunnelConfig({
+            tunnelId: opts.tunnelId,
+            binaryPath,
+            associationId:
+              previousConfig?.tunnelId === opts.tunnelId ? previousConfig.associationId : undefined,
+            associationNonce:
+              previousConfig?.tunnelId === opts.tunnelId ? previousConfig.associationNonce : undefined,
           });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      const tunnelState = readTunnelState(info.workspaceId);
-      if (opts.json) {
-        say(
-          JSON.stringify({
+          draft = nextDraft;
+          const configChanged =
+            previousConfig === null ||
+            previousConfig.tunnelId !== nextDraft.tunnelId ||
+            previousConfig.runtimeKeyFile !== nextDraft.runtimeKeyFile ||
+            previousConfig.binaryPath !== nextDraft.binaryPath ||
+            previousConfig.alias !== nextDraft.alias ||
+            previousConfig.profileName !== nextDraft.profileName ||
+            previousConfig.profileDir !== nextDraft.profileDir;
+          requiresFreshRuntime = configChanged || nextRuntime.changed;
+          installOpenAiRuntimeKey(path.resolve(opts.runtimeKeyFile), nextDraft.runtimeKeyFile);
+          const installedRuntimeKey = fs.readFileSync(nextDraft.runtimeKeyFile);
+          const runtimeKeyChanged =
+            previousRuntimeKeyFile === null ||
+            !previousRuntimeKeyFile.bytes.equals(installedRuntimeKey);
+          requiresFreshRuntime ||= runtimeKeyChanged;
+          if (requiresFreshRuntime && previousConfig) {
+            oldSupervisorStopped = await stopMachineGateway({
+              config: previousConfig,
+              machineLockHeld: true,
+            });
+          }
+          writeOpenAiTunnelConfig(nextDraft);
+          const sandbox = ensureSandboxIsolation();
+          replacementStartAttempted = requiresFreshRuntime || previousGateway.state !== "healthy";
+          const result = await ensureMachineGateway({
+            config: nextDraft,
+            requireFreshRuntime: requiresFreshRuntime,
+            previousRuntime: previousGateway.state === "healthy" ? previousGateway.runtime : null,
+            machineLockHeld: true,
+          });
+          newSupervisorStarted = result.spawned;
+          const info = await machineInfo(result.runtime);
+          return {
             ok: true,
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            connectorName,
-            mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
-            local: mcpUrl === null,
-            pairingCode: pairingResult.code,
-            pairingExpiresAt: pairingResult.expiresAt,
-            sandbox,
-            tunnel: {
-              mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
-              hostname: tunnelState.hostname ?? null,
-              fallback: Boolean(tunnelState.fallbackReason),
+            configured: true,
+            connector: {
+              name: OPENAI_CONNECTOR_NAME,
+              authentication: "none",
+              tunnelId: nextDraft.tunnelId,
             },
-          })
-        );
-        return;
-      }
-      check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
-      if (mcpUrl) check("安全连接已建立");
-      say("");
-      say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
-      say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
-      say("");
-      say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
-      say("如果你在使用 Codex Skill，这一步会自动完成。");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-// ---------------------------------------------------------------- stop / restart
-
-program
-  .command("stop")
-  .description("Stop the bridge for this workspace")
-  .option("-w, --workspace <path>")
-  .action(async (opts: { workspace?: string }) => {
-    const stopped = await stopBridge(resolveWorkspace(opts.workspace));
-    if (stopped) check("Bridge 已停止");
-    else say("没有正在运行的 Bridge。");
-  });
-
-program
-  .command("restart")
-  .description("Restart the bridge for this workspace")
-  .option("-w, --workspace <path>")
-  .option("--tunnel", "re-establish the secure public connection", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    await stopBridge(root);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    try {
-      const { info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      check(`Bridge 已重启（${info.workspaceName}）`);
-      if (mcpUrl) check(`安全连接已建立`);
-    } catch (error) {
-      handleCliError(error, false);
-    }
-  });
-
-// ---------------------------------------------------------------- status
-
-program
-  .command("status")
-  .description("Show bridge status for this workspace")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    const workspace = new Workspace(root);
-    const observation = await findBridgeObservation(workspace.id);
-    if (observation.state === "unknown") {
-      if (opts.json) {
-        say(JSON.stringify({ ok: false, running: null, state: "unknown", reason: observation.reason }));
-      } else {
-        cross(`Bridge 状态无法确认（${observation.reason}），未将其视为未运行。`);
-      }
-      return;
-    }
-    if (observation.state === "stopped") {
-      if (opts.json) say(JSON.stringify({ ok: false, running: false }));
-      else say("Bridge 未运行。使用 `c2c start` 启动。");
-      return;
-    }
-    const runtime = observation.runtime;
-    const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    if (opts.json) {
-      say(JSON.stringify({ ok: true, running: true, ...info }));
-      return;
-    }
-    say(PRODUCT_NAME);
-    say("");
-    check(`Workspace：${info.workspaceName}`);
-    check(`Bridge：运行中（端口 ${info.port}）`);
-    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
-    else say("· 安全连接：未启用（本地模式）");
-    say(`· 已授权连接：${info.authorization?.resultWriteAuthorized === true ? "是" : "否"}`);
-  });
-
-// ---------------------------------------------------------------- doctor
-
-program
-  .command("doctor")
-  .description("Diagnose and auto-repair the connection")
-  .option("-w, --workspace <path>")
-  .option("--no-fix", "diagnose only, do not repair")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; fix: boolean; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    const report: Record<string, { ok: boolean; detail?: string }> = {};
-    const results: string[] = [];
-
-    // Node
-    const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
-    report.node = { ok: nodeMajor >= 20, detail: `v${process.versions.node}` };
-
-    // Codex sandbox writable_roots (so later chats do not need elevation)
-    if (opts.fix) {
-      const sandbox = trySandboxAllow();
-      if (sandbox.ok) {
-        report.sandbox = { ok: true, detail: sandbox.alreadyAllowed ? "已在白名单" : "已写入白名单" };
-        if (sandbox.added) results.push("已将本地设置目录加入 Codex 沙箱白名单");
-      } else {
-        report.sandbox = { ok: false, detail: sandbox.error };
-      }
-    } else {
-      try {
-        const configPath = getCodexConfigPath();
-        const allowed =
-          fs.existsSync(configPath) && isStateDirAllowlisted(fs.readFileSync(configPath, "utf8"), getStateDir());
-        report.sandbox = allowed ? { ok: true, detail: "已在白名单" } : { ok: false, detail: "未在白名单" };
-      } catch (error) {
-        report.sandbox = { ok: false, detail: (error as Error).message };
-      }
-    }
-
-    // Workspace
-    let workspace: Workspace | null = null;
-    try {
-      workspace = new Workspace(root);
-      report.workspace = { ok: true, detail: workspace.name };
-    } catch (error) {
-      report.workspace = { ok: false, detail: (error as Error).message };
-    }
-
-    // Bridge
-    let runtime: RuntimeState | null = null;
-    let bridgeUnknown = false;
-    if (workspace) {
-      const observation = await findBridgeObservation(workspace.id);
-      if (observation.state === "healthy") {
-        runtime = observation.runtime;
-      } else if (observation.state === "unknown") {
-        bridgeUnknown = true;
-        report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
-      } else if (opts.fix) {
-        try {
-          runtime = (await ensureBridge(root)).runtime;
-          results.push("已自动启动 Bridge");
-        } catch (error) {
-          report.bridge = { ok: false, detail: (error as Error).message };
-        }
-      }
-      if (runtime) report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
-      else report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
-    }
-
-    // MCP local reachability (401 without token means MCP + auth both work)
-    if (runtime) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),
-        });
-        report.mcp = { ok: response.status === 401, detail: `未授权请求返回 ${response.status}` };
-        report.oauth = { ok: response.status === 401 };
-      } catch (error) {
-        report.mcp = { ok: false, detail: (error as Error).message };
-      }
-    }
-
-    // Tunnel + remote reachability. If this workspace once had a public URL,
-    // a full quit reclaims it — restore a tunnel and tell the Skill to update
-    // the existing ChatGPT connector (never treat that as "local mode").
-    const lastEndpoint = workspace ? readLastEndpoint(workspace.id) : null;
-    const connectorName = workspace
-      ? connectorNameFor({
-          workspaceName: workspace.name,
-          workspaceId: workspace.id,
-          previousName: lastEndpoint?.connectorName,
-          hadEndpointBefore: Boolean(lastEndpoint),
-        })
-      : "Codex with ChatGPT";
-    const tunnelState = workspace ? readTunnelState(workspace.id) : null;
-    const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
-    let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
-    let chatgptRepair: {
-      needed: boolean;
-      reason?: string;
-      connectorAction: "none" | "create" | "update";
-      connectorName: string;
-      userMessage?: string;
-      mcpUrl: string | null;
-      previousMcpUrl: string | null;
-      pairingCode?: string;
-      pairingExpiresAt?: number;
-      pages: {
-        developerMode: string;
-        plugins: string;
-        createConnector: string;
-      };
-    } = {
-      needed: false,
-      connectorAction: "none",
-      connectorName,
-      mcpUrl: lastEndpoint?.mcpUrl ?? null,
-      previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
-      pages: {
-        developerMode: CHATGPT_DEVELOPER_MODE_URL,
-        plugins: CHATGPT_PLUGINS_URL,
-        createConnector: CHATGPT_CREATE_CONNECTOR_URL,
-      },
-    };
-
-    if (runtime) {
-      let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
-        await stopBridge(root);
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        try {
-          runtime = (await ensureBridge(root)).runtime;
-          info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-          results.push("已切换到固定域名连接");
-        } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
-        }
-      }
-      const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
-      let currentUrl = info.publicUrl ?? info.tunnel.url;
-      let healthy = false;
-      if (currentUrl) {
-        healthy = await publicHealthOk(currentUrl, info.workspaceId);
-      }
-
-      if ((!currentUrl || !healthy) && opts.fix && (expectedPublic || info.tunnel.running)) {
-        try {
-          const binaries = detectTunnelBinaries();
-          if (!binaries.cloudflared) {
-            report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
-          } else {
-            const forceRestart = Boolean(currentUrl && !healthy);
-            const startedUrl = await requestTunnelUrl(runtime, { restart: forceRestart });
-            if (startedUrl) {
-              const previousUrl = lastEndpoint?.publicUrl;
-              currentUrl = startedUrl;
-              info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-              healthy = await publicHealthOk(startedUrl, info.workspaceId);
-              const sameAddress =
-                previousUrl && normalizePublicUrl(previousUrl) === normalizePublicUrl(startedUrl);
-              if (healthy) {
-                results.push(sameAddress ? "已重新建立安全连接" : "已重新建立安全连接（地址已更换）");
-              } else {
-                report.tunnel = { ok: false, detail: "公网地址无法访问" };
-              }
-            }
-          }
-        } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
-        }
-      }
-
-      if (currentUrl && healthy) {
-        report.tunnel = { ok: true, detail: currentUrl };
-        const nextMcp = mcpUrlFromPublic(currentUrl);
-        const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
-        const boundName = nextMcp
-          ? persistWorkspaceEndpoint({
-              workspaceId: info.workspaceId,
-              workspaceName: info.workspaceName,
-              port: runtime.port,
-              publicUrl: currentUrl,
-              mcpUrl: nextMcp,
-              previous: lastEndpoint,
-            })
-          : connectorName;
-        chatgptRepair = {
-          ...chatgptRepair,
-          needed: action === "update",
-          reason: action === "update" ? "address_reclaimed" : undefined,
-          connectorAction: action,
-          connectorName: boundName,
-          userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
-          mcpUrl: nextMcp,
-          previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
-        };
-        if (action === "update") {
-          try {
-            const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-            chatgptRepair.pairingCode = pairing.code;
-            chatgptRepair.pairingExpiresAt = pairing.expiresAt;
-            results.push(`已生成新的配对码，需要更新「${boundName}」`);
-          } catch (error) {
-            report.oauth = { ok: false, detail: (error as Error).message };
-          }
-        }
-      } else if (namedReady) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
-        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
-      } else if (expectedPublic) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "安全连接未恢复" };
-        chatgptRepair = {
-          ...chatgptRepair,
-          needed: true,
-          reason: "address_reclaimed",
-          connectorAction: "update",
-          connectorName,
-          userMessage: reclaimUserMessage(connectorName),
-          mcpUrl: null,
-        };
-      } else if (!currentUrl) {
-        report.tunnel = { ok: true, detail: "未启用（本地模式）" };
-      } else {
-        report.tunnel = { ok: false, detail: "公网地址无法访问" };
-      }
-
-      const missingResultWriteAuthorization = info.authorization?.resultWriteAuthorized !== true;
-      if (missingResultWriteAuthorization) {
-        const authorizationDetail =
-          !info.authorization || info.authorization.connectorClientCount === 0
-            ? "ChatGPT 连接尚未注册"
-            : info.authorization.connectorActiveTokenCount === 0
-              ? "ChatGPT 连接尚未完成授权"
-              : "现有 ChatGPT 授权缺少结果回写权限";
-        report.oauth = { ok: false, detail: authorizationDetail };
-        if (!chatgptRepair.needed && currentUrl && healthy) {
-          const nextMcp = mcpUrlFromPublic(currentUrl);
-          const connectorExists = (info.authorization?.connectorClientCount ?? 0) > 0;
-          chatgptRepair = {
-            ...chatgptRepair,
-            needed: true,
-            reason: connectorExists ? "missing_result_write_scope" : "missing_authorization",
-            connectorAction: connectorExists ? "update" : "create",
-            userMessage: connectorExists
-              ? `「${chatgptRepair.connectorName}」需要重新授权结果回写能力，请在 ChatGPT 删除并重新添加该连接。`
-              : `请在 ChatGPT 添加「${chatgptRepair.connectorName}」并完成授权。`,
-            mcpUrl: nextMcp,
-            previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
+            installation: runtimeInstallView(nextRuntime),
+            skill: skillInstallView(nextSkill),
+            tunnel: openAiTunnelRuntimeStatusView(result.tunnel),
+            runtime: machineRuntimeView(result.runtime),
+            info,
+            sandbox,
           };
-          try {
-            const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-            chatgptRepair.pairingCode = pairing.code;
-            chatgptRepair.pairingExpiresAt = pairing.expiresAt;
-            results.push(
-              connectorExists
-                ? `已生成新的配对码，需要重新授权「${chatgptRepair.connectorName}」`
-                : `已生成配对码，需要添加并授权「${chatgptRepair.connectorName}」`
-            );
-          } catch (error) {
-            report.oauth = { ok: false, detail: (error as Error).message };
+        } catch (error) {
+          const replacementMayBeRunning =
+            newSupervisorStarted ||
+            oldSupervisorStopped ||
+            replacementStartAttempted;
+          const rollbackSteps: RollbackStep[] = [];
+          const replacementConfig = draft;
+          if (replacementMayBeRunning && replacementConfig) {
+            rollbackSteps.push({
+              label: "stop replacement gateway",
+              run: () => stopMachineGateway({ config: replacementConfig, machineLockHeld: true }).then(() => undefined),
+            });
           }
+          rollbackSteps.push(
+            {
+              label: "restore tunnel config",
+              run: () => restorePrivateFile(openAiTunnelConfigFile(), previousConfigFile),
+            },
+            {
+              label: "restore tunnel runtime key",
+              run: () => restorePrivateFile(openAiTunnelRuntimeKeyPath(), previousRuntimeKeyFile),
+            },
+            {
+              label: "restore runtime installation",
+              run: () => restoreRuntimeInstallation(previousRuntime),
+            },
+            {
+              label: "restore global Skill",
+              run: () => restoreGlobalSkill(previousSkill),
+            },
+            {
+              label: "restore Codex config",
+              run: () => restoreCodexConfig(previousCodexConfig),
+            },
+          );
+          if (previousConfig && shouldRestorePreviousGateway(previousGateway.state, oldSupervisorStopped)) {
+            rollbackSteps.push({
+              label: "restore previous gateway",
+              run: async () => {
+                await restoreMachineGateway({ config: previousConfig, machineLockHeld: true });
+              },
+            });
+          }
+          const rollbackErrors = await runRollbackSteps(rollbackSteps);
+          if (rollbackErrors.length > 0) {
+            const original = error instanceof Error ? error.message : String(error);
+            throw new Error(`${original}; machine setup rollback failed: ${rollbackErrors.join("; ")}`);
+          }
+          throw error;
         }
-      }
-    } else if (bridgeUnknown) {
-      report.tunnel = report.tunnel ?? { ok: false, detail: "Bridge 状态无法确认，未执行连接器修复" };
-    } else if (namedReady) {
-      report.tunnel = { ok: false, detail: "NAMED_TUNNEL_DOWN" };
-      namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
-    } else if (lastEndpoint?.publicUrl) {
-      report.tunnel = { ok: false, detail: "安全连接未运行" };
-      chatgptRepair = {
-        ...chatgptRepair,
-        needed: true,
-        reason: "address_reclaimed",
-        connectorAction: "update",
-        connectorName,
-        userMessage: reclaimUserMessage(connectorName),
-      };
-    }
-
-    if (opts.json) {
-      say(JSON.stringify({ report, repairs: results, chatgptRepair, namedRepair }));
-      return;
-    }
-    say(`${PRODUCT_NAME} Doctor`);
-    say("");
-    const labels: Record<string, string> = {
-      node: "Node.js",
-      sandbox: "Sandbox",
-      workspace: "Workspace",
-      bridge: "Bridge",
-      mcp: "MCP",
-      oauth: "OAuth",
-      tunnel: "Tunnel",
-    };
-    let allOk = true;
-    for (const [key, value] of Object.entries(report)) {
-      const label = labels[key] ?? key;
-      if (value.ok) check(`${label}${value.detail ? `（${value.detail}）` : ""}`);
+      });
+      if (opts.json) say(JSON.stringify(payload));
       else {
-        cross(`${label}${value.detail ? `：${value.detail}` : ""}`);
-        allOk = false;
-      }
-    }
-    for (const repair of results) say(`· ${repair}`);
-    say("");
-    if (namedRepair.needed && namedRepair.userMessage) {
-      say(namedRepair.userMessage);
-      say("");
-    }
-    if (chatgptRepair.needed && chatgptRepair.userMessage) {
-      say(chatgptRepair.userMessage);
-      if (chatgptRepair.mcpUrl) say(`新的连接地址：${chatgptRepair.mcpUrl}`);
-      if (chatgptRepair.pairingCode) say(`配对码：${chatgptRepair.pairingCode}`);
-      say("");
-    }
-    say(
-      allOk && !chatgptRepair.needed && !namedRepair.needed
-        ? "Everything looks good."
-        : chatgptRepair.needed
-          ? "本地已就绪，还需要在 ChatGPT 删除并重新添加该连接。"
-          : namedRepair.needed
-            ? "固定域名还没连上，需要先登录 Cloudflare。"
-            : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
-    );
-    if (!allOk || namedRepair.needed) process.exitCode = 1;
-  });
-
-// ---------------------------------------------------------------- pair / unpair
-
-program
-  .command("pair")
-  .description("Generate a fresh pairing code")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; json: boolean }) => {
-    try {
-      const { runtime } = await ensureBridge(resolveWorkspace(opts.workspace));
-      const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      if (opts.json) say(JSON.stringify({ ok: true, pairingCode: pairing.code, expiresAt: pairing.expiresAt }));
-      else {
-        say(`配对码：${pairing.code}`);
-        say(`（${Math.round((pairing.expiresAt - Date.now()) / 60000)} 分钟内有效，仅可使用一次）`);
+        check("官方 OpenAI Secure MCP Tunnel 已配置");
+        check("机器网关已启动");
+        say(`Connector：${OPENAI_CONNECTOR_NAME}（Authentication: None）`);
       }
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-program
-  .command("unpair")
-  .description("Revoke ChatGPT's access to this workspace immediately")
-  .option("-w, --workspace <path>")
-  .action(async (opts: { workspace?: string }) => {
-    const root = resolveWorkspace(opts.workspace);
-    const workspace = new Workspace(root);
-    const runtime = await findLiveBridge(workspace.id);
-    if (runtime) {
-      await adminFetch(runtime, "POST", "/admin/revoke-all");
-    } else {
-      // bridge not running: revoke directly in the persisted store
-      new AuthStore(workspace.id).revokeAll();
-    }
-    check("已断开 ChatGPT 对当前项目的访问（所有令牌已吊销）");
-  });
+const skill = program
+  .command("skill")
+  .description("Install and inspect the one machine-wide C2C Skill");
 
-// ---------------------------------------------------------------- logs / workspace / record
-
-program
-  .command("logs")
-  .description("Show recent bridge logs")
-  .option("-w, --workspace <path>")
-  .option("-n, --lines <n>", "number of lines", "50")
-  .option("--verbose", "include debug detail", false)
-  .action((opts: { workspace?: string; lines: string; verbose: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const candidates = [
-      path.join(getStateDir(), "logs", "bridge.log"),
-      path.join(getStateDir(), "logs", `bridge-${workspace.id}.out.log`),
-    ];
-    let shown = false;
-    for (const file of candidates) {
-      if (!fs.existsSync(file)) continue;
-      const lines = fs.readFileSync(file, "utf8").trim().split("\n");
-      const filtered = opts.verbose ? lines : lines.filter((line) => !line.includes(" DEBUG "));
-      say(filtered.slice(-parseIntegerOption(opts.lines, "lines", 1, 10_000)).join("\n"));
-      shown = true;
-    }
-    if (!shown) say("暂无日志。");
-  });
-
-program
-  .command("workspace")
-  .description("Show workspace identity and project info")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const project = workspace.detectProject();
-    const data = { workspaceId: workspace.id, name: workspace.name, root: workspace.root, ...project };
-    if (opts.json) say(JSON.stringify(data));
-    else {
-      say(`Workspace：${data.name}（${data.workspaceId}）`);
-      say(`类型：${data.projectType}  语言：${data.languages.join(", ") || "-"}`);
-      say(`路径：${data.root}`);
-    }
-  });
-
-// ---------------------------------------------------------------- sandbox-allow (Codex writable_roots, macOS + Windows)
-
-program
-  .command("sandbox-allow")
-  .description("Add the local settings directory to the Codex sandbox allowlist")
+skill
+  .command("install")
+  .description("Install or update the Skill in the global Codex skills directory")
   .option("--json", "machine-readable output", false)
   .action((opts: { json: boolean }) => {
-    const result = trySandboxAllow();
-    if (opts.json) {
-      say(JSON.stringify(result));
-      if (!result.ok) process.exitCode = 1;
-      return;
+    try {
+      const installedRuntime = installRuntime({ checkoutRoot: repoRoot });
+      const result = installGlobalSkill({ checkoutRoot: installedRuntime.path });
+      const payload = { ok: true, ...skillInstallView(result) };
+      if (opts.json) say(JSON.stringify(payload));
+      else check(result.changed ? "已安装或更新机器级 Skill" : "机器级 Skill 已是最新");
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
-    if (!result.ok) {
-      cross(`无法写入 Codex 沙箱白名单：${result.error}`);
-      process.exitCode = 1;
-      return;
-    }
-    if (result.alreadyAllowed) check("沙箱白名单已就绪，后续对话无需再提权");
-    else check("已将本地设置目录加入 Codex 沙箱白名单（后续对话无需再提权）");
   });
 
-// ---------------------------------------------------------------- autostart (macOS LaunchAgent wakes C2C, C2C owns bridge/tunnel)
-
-const autostartCmd = program
-  .command("autostart")
-  .description("Manage login autostart for a workspace bridge and secure connection");
-
-autostartCmd
-  .command("enable")
-  .description("Enable macOS autostart for this workspace")
-  .option("-w, --workspace <path>")
-  .option("--interval <seconds>", "repair interval in seconds", "60")
+skill
+  .command("status", { isDefault: true })
+  .description("Show the one machine-wide C2C Skill status")
   .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; interval: string; json: boolean }) => {
+  .action((opts: { json: boolean }) => {
     try {
-      const config = buildAutostartConfig({
-        workspaceRoot: resolveWorkspace(opts.workspace),
-        intervalSeconds: Number(opts.interval),
+      const result = statusGlobalSkill({ checkoutRoot: runtimeCurrentPath() });
+      const payload = { ok: result.matches, ...skillStatusView(result) };
+      if (opts.json) {
+        say(JSON.stringify(payload));
+        if (!result.matches) process.exitCode = 1;
+      } else if (result.matches) {
+        check("机器级 Skill 已安装且与当前版本一致");
+      } else {
+        cross(result.installed ? "机器级 Skill 需要更新" : "机器级 Skill 尚未安装");
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machine
+  .command("start")
+  .description("Start or reuse the tunnel-owned machine gateway")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const result = await ensureMachineGateway();
+      const info = await machineInfo(result.runtime);
+      const payload = {
+        ok: true,
+        started: result.spawned,
+        tunnel: openAiTunnelRuntimeStatusView(result.tunnel),
+        runtime: machineRuntimeView(result.runtime),
+        info,
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else check(result.spawned ? "机器级安全连接已启动" : "机器级安全连接已在运行");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machine
+  .command("status")
+  .description("Inspect the managed tunnel and its exact gateway child")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const observation = await observeManagedMachine();
+      const info =
+        observation.gateway.state === "healthy"
+          ? await machineInfo(observation.gateway.runtime)
+          : null;
+      const payload = {
+        ok: observation.ready,
+        configured: observation.config !== null,
+        ready: observation.ready,
+        config: tunnelConfigView(observation.config),
+        tunnel: openAiTunnelRuntimeStatusView(observation.tunnel),
+        gateway: {
+          ...machineRuntimeObservationView(observation.gateway),
+          ...(info ? { info } : {}),
+        },
+      };
+      if (opts.json) {
+        say(JSON.stringify(payload));
+        if (!observation.ready) process.exitCode = 1;
+      } else if (observation.ready && info) {
+        check(`机器级安全连接正常（${info.workspaceCount} 个已注册 workspace）`);
+      } else {
+        cross(observation.config ? "机器级安全连接未就绪" : "机器级安全连接尚未配置");
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machine
+  .command("stop")
+  .description("Stop the official tunnel supervisor and its gateway child")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const stopped = await stopMachineGateway();
+      if (opts.json) say(JSON.stringify({ ok: true, stopped }));
+      else if (stopped) check("机器级安全连接已停止");
+      else say("机器级安全连接未运行。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machine
+  .command("doctor")
+  .description("Diagnose and optionally repair the machine-wide connection")
+  .option("--no-fix", "diagnose only")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { fix: boolean; json: boolean }) => {
+    try {
+      const config = readOpenAiTunnelConfig();
+      if (!config) {
+        const payload = {
+          ok: false,
+          configured: false,
+          setupRequired: true,
+          connector: { name: OPENAI_CONNECTOR_NAME, authentication: "none" },
+        };
+        if (opts.json) say(JSON.stringify(payload));
+        else cross("尚未配置 OpenAI Secure MCP Tunnel");
+        process.exitCode = 1;
+        return;
+      }
+      let repaired = false;
+      let before = await observeManagedMachine({ config });
+      if (opts.fix && !before.ready) {
+        await ensureMachineGateway({ config });
+        repaired = true;
+        before = await observeManagedMachine({ config });
+      }
+      const tunnelDoctor = doctorOpenAiTunnel(config);
+      const info =
+        before.gateway.state === "healthy"
+          ? await machineInfo(before.gateway.runtime)
+          : null;
+      const ok = before.ready && tunnelDoctor.ok && info !== null;
+      const payload = {
+        ok,
+        configured: true,
+        repaired,
+        config: tunnelConfigView(config),
+        tunnel: openAiTunnelRuntimeStatusView(before.tunnel),
+        gateway: {
+          ...machineRuntimeObservationView(before.gateway),
+          ...(info ? { info } : {}),
+        },
+        info,
+        checks: tunnelDoctor.checks,
+      };
+      if (opts.json) {
+        say(JSON.stringify(payload));
+        if (!ok) process.exitCode = 1;
+      } else if (ok) {
+        check(repaired ? "机器级安全连接已修复" : "机器级安全连接健康");
+      } else {
+        cross("机器级安全连接仍未就绪");
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+const machineWorkspace = machine
+  .command("workspace")
+  .description("Register trusted local workspaces with the running gateway");
+
+machineWorkspace
+  .command("register")
+  .option("-w, --workspace <path>", "workspace root")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    try {
+      const runtime = (await ensureMachineGateway()).runtime;
+      const registration = await registerMachineWorkspace(runtime, resolveWorkspace(opts.workspace));
+      if (opts.json) say(JSON.stringify({ ok: true, registration }));
+      else check(`Workspace 已注册（${registration.workspaceName}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machineWorkspace
+  .command("unregister")
+  .requiredOption("--workspace-id <id>")
+  .requiredOption("--project-id <id>")
+  .requiredOption("--registration-id <id>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: MachineRegistrationIdentity & { json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace());
+      assertCurrentWorkspaceIdentity(workspace, opts.workspaceId, opts.projectId);
+      const observation = await observeMachineRuntime();
+      if (observation.state !== "healthy") throw new Error("Machine gateway is not running.");
+      const result = await unregisterMachineWorkspace(observation.runtime, {
+        workspaceId: opts.workspaceId,
+        projectId: opts.projectId,
+        registrationId: opts.registrationId,
       });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else if (result.unregistered) check("Workspace 已注销");
+      else say("Workspace 注册不存在。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+const machineContext = machine
+  .command("context")
+  .description("Issue or cancel an exact short-lived turn capability");
+
+machineContext
+  .command("issue")
+  .requiredOption("--workspace-id <id>")
+  .requiredOption("--project-id <id>")
+  .requiredOption("--registration-id <id>")
+  .requiredOption("--task <id>")
+  .requiredOption("--iteration <n>")
+  .requiredOption("--phase <phase>", "BOOT, RESEARCH, PLAN, or REVIEW")
+  .requiredOption("--generation <n>")
+  .option("--request <id>", "exact mailbox request id (required for non-BOOT phases)")
+  .option("--compaction-epoch <n>", "compaction epoch", "0")
+  .option("--local-session <id>")
+  .option("--scopes <scope,...>")
+  .option("--model-id <id>")
+  .option("--effort <name>")
+  .option("--ttl-ms <ms>", "capability lifetime", String(DEFAULT_TURN_TTL_MS))
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    workspaceId: string;
+    projectId: string;
+    registrationId: string;
+    task: string;
+    iteration: string;
+    phase: string;
+    generation: string;
+    request?: string;
+    compactionEpoch: string;
+    localSession?: string;
+    scopes?: string;
+    modelId?: string;
+    effort?: string;
+    ttlMs: string;
+    json: boolean;
+  }) => {
+    try {
+      const phase = parseMachinePhase(opts.phase);
+      if (phase !== "BOOT" && opts.request === undefined) {
+        throw new Error("--request is required for non-BOOT machine context turns");
+      }
+      const workspace = new Workspace(resolveWorkspace());
+      assertCurrentWorkspaceIdentity(workspace, opts.workspaceId, opts.projectId);
+      const runtime = (await ensureMachineGateway()).runtime;
+      const grant = await issueMachineTurn(runtime, {
+        workspaceId: opts.workspaceId,
+        projectId: opts.projectId,
+        registrationId: opts.registrationId,
+        localSessionId: resolveLocalSession(opts.localSession),
+        taskId: validateControlId(opts.task, "task id"),
+        iteration: parseControlIteration(opts.iteration),
+        phase,
+        requestId: opts.request
+          ? validateControlId(opts.request, "request id")
+          : undefined,
+        scopes: parseScopes(opts.scopes),
+        modelId: opts.modelId,
+        effort: opts.effort,
+        compactionEpoch: parseIntegerOption(
+          opts.compactionEpoch,
+          "compaction-epoch",
+          0,
+          Number.MAX_SAFE_INTEGER
+        ),
+        generation: parseIntegerOption(opts.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+        ttlMs: parseIntegerOption(opts.ttlMs, "ttl-ms", 1_000, MAX_TURN_TTL_MS),
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, contextId: grant.token, grant }));
+      else say(`CONTEXT_ID: ${grant.token}`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+machineContext
+  .command("cancel")
+  .requiredOption("--context-id <id>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { contextId: string; json: boolean }) => {
+    try {
+      const observation = await observeMachineRuntime();
+      if (observation.state !== "healthy") throw new Error("Machine gateway is not running.");
+      const result = await cancelMachineTurn(observation.runtime, opts.contextId);
+      if (opts.json) say(JSON.stringify({ ok: true, contextId: opts.contextId, ...result }));
+      else check("Context capability 已取消");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+// ---------------------------------------------------------------- autostart (one machine-wide LaunchAgent)
+
+function autostartCommandView(
+  commands: Array<{ command: string; args: string[]; status: number | null }>,
+): Array<{ command: string; args: string[]; status: number | null }> {
+  return commands.map(({ command, args, status }) => ({ command, args, status }));
+}
+
+const autostart = program
+  .command("autostart")
+  .description("Manage the one machine-wide macOS LaunchAgent");
+
+autostart
+  .command("enable")
+  .description("Install and load the machine LaunchAgent")
+  .option("--interval-seconds <seconds>", "launchd wake interval in seconds", "60")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { intervalSeconds: string; json: boolean }) => {
+    try {
+      const config = buildAutostartConfig({ intervalSeconds: opts.intervalSeconds });
       const result = enableAutostart(config);
       const status = autostartStatus(config);
       const payload = {
         ok: true,
         enabled: true,
         loaded: status.loaded,
-        label: config.label,
+        label: AUTOSTART_LABEL,
         plistPath: config.plistPath,
         intervalSeconds: config.intervalSeconds,
-        workspaceId: config.workspaceId,
-        workspaceName: config.workspaceName,
-        workspaceRoot: config.workspaceRoot,
-        c2cBinPath: config.c2cBinPath,
         programArguments: config.programArguments,
-        commands: result.commands,
+        commands: autostartCommandView(result.commands),
       };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
+      if (opts.json) say(JSON.stringify(payload));
+      else {
+        check("机器级 LaunchAgent 已启用");
+        say(`· ${config.label}`);
+        say(`· 每 ${config.intervalSeconds} 秒唤醒一次`);
       }
-      check(`自启已启用（${config.workspaceName}）`);
-      say(`· ${config.label}`);
-      say(`· 每 ${config.intervalSeconds} 秒唤醒 C2C 检查一次`);
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-autostartCmd
-  .command("disable")
-  .description("Disable macOS autostart for this workspace")
-  .option("-w, --workspace <path>")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
-    try {
-      const config = buildAutostartConfig({ workspaceRoot: resolveWorkspace(opts.workspace) });
-      const result = disableAutostart(config);
-      const payload = {
-        ok: true,
-        enabled: false,
-        label: config.label,
-        plistPath: config.plistPath,
-        workspaceId: config.workspaceId,
-        workspaceName: config.workspaceName,
-        workspaceRoot: config.workspaceRoot,
-        commands: result.commands,
-      };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
-      }
-      check(`自启已关闭（${config.workspaceName}）`);
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-autostartCmd
+autostart
   .command("status", { isDefault: true })
-  .description("Show macOS autostart status for this workspace")
-  .option("-w, --workspace <path>")
+  .description("Show the machine LaunchAgent status")
   .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; json: boolean }) => {
+  .action((opts: { json: boolean }) => {
     try {
-      const config = buildAutostartConfig({ workspaceRoot: resolveWorkspace(opts.workspace) });
+      const config = buildAutostartConfig();
       const status = autostartStatus(config);
       const payload = {
         ok: true,
         enabled: status.enabled,
         loaded: status.loaded,
         detail: status.detail,
-        label: config.label,
+        label: AUTOSTART_LABEL,
         plistPath: config.plistPath,
         intervalSeconds: config.intervalSeconds,
-        workspaceId: config.workspaceId,
-        workspaceName: config.workspaceName,
-        workspaceRoot: config.workspaceRoot,
-        c2cBinPath: config.c2cBinPath,
         programArguments: config.programArguments,
       };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
+      if (opts.json) say(JSON.stringify(payload));
+      else {
+        say(`自启：${status.enabled ? "已启用" : "未启用"}`);
+        say(`LaunchAgent：${status.loaded === null ? "不支持" : status.loaded ? "已加载" : "未加载"}`);
+        say(`Label：${AUTOSTART_LABEL}`);
+        if (status.detail) say(`Detail：${status.detail}`);
       }
-      say(`自启：${status.enabled ? "已启用" : "未启用"}`);
-      say(`LaunchAgent：${status.loaded === null ? "不支持" : status.loaded ? "已加载" : "未加载"}`);
-      say(`Label：${config.label}`);
-      if (status.detail) say(`Detail：${status.detail}`);
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-autostartCmd
-  .command("run", { hidden: true })
-  .description("Wake C2C once for launchd (internal)")
-  .option("-w, --workspace <path>")
+autostart
+  .command("disable")
+  .description("Unload and remove the machine LaunchAgent")
   .option("--json", "machine-readable output", false)
-  .option("--quiet", "suppress successful output", false)
-  .action(async (opts: { workspace?: string; json: boolean; quiet: boolean }) => {
+  .action((opts: { json: boolean }) => {
     try {
-      const payload = await runAutostartOnce(resolveWorkspace(opts.workspace));
-      if (opts.quiet) return;
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
-      }
-      check(`C2C 已唤醒（${payload.workspaceName}）`);
+      const config = buildAutostartConfig();
+      const result = disableAutostart(config);
+      const payload = {
+        ok: true,
+        enabled: false,
+        label: AUTOSTART_LABEL,
+        plistPath: config.plistPath,
+        commands: autostartCommandView(result.commands),
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else check("机器级 LaunchAgent 已关闭");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+autostart
+  .command("run", { hidden: true })
+  .description("Wake the tunnel-owned machine gateway once")
+  .option("--quiet", "suppress successful output", false)
+  .action(async (opts: { quiet: boolean }) => {
+    try {
+      const result = await ensureMachineGateway();
+      if (!opts.quiet) check(result.spawned ? "机器级安全连接已启动" : "机器级安全连接已在运行");
     } catch (error) {
       if (opts.quiet) {
-        const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`${message}\n`);
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
         process.exitCode = 1;
-        return;
+      } else {
+        handleCliError(error, false);
       }
+    }
+  });
+
+program
+  .command("workspace")
+  .description("Show the trusted local workspace identity")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const project = workspace.detectProject();
+      const data = {
+        workspaceId: workspace.id,
+        projectId: workspace.projectId,
+        name: workspace.name,
+        root: workspace.root,
+        ...project,
+      };
+      if (opts.json) say(JSON.stringify({ ok: true, ...data }));
+      else {
+        say(`Workspace：${data.name}`);
+        say(`路径：${data.root}`);
+      }
+    } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-// ---------------------------------------------------------------- update-check (once per local day)
+const surface = program
+  .command("surface")
+  .description("Manage the ChatGPT page owned by this local Codex session");
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-program
-  .command("update-check")
-  .description("Check GitHub for a newer version (real check at most once per local day)")
-  .option("--force", "check even if already checked today", false)
+surface
+  .command("get", { isDefault: true })
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
   .option("--json", "machine-readable output", false)
-  .action((opts: { force: boolean; json: boolean }) => {
-    const file = path.join(getStateDir(), "update-check.json");
-    const today = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD in local tz
-    let last: { date?: string; updateAvailable?: boolean } = {};
+  .action(async (opts: { workspace?: string; localSession?: string; json: boolean }) => {
     try {
-      last = JSON.parse(fs.readFileSync(file, "utf8")) as typeof last;
-    } catch {
-      /* first run */
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const { projectUrl, lease, binding } = await getMachineSurface(machine.runtime, machine.identity);
+      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, projectUrl, lease, binding }));
+      else if (lease) {
+        const route = lease.chatUrl ? `ChatGPT page：${lease.chatUrl}` : "ChatGPT Project candidate page";
+        say(`${route}（generation ${lease.generation}）`);
+      }
+      else if (projectUrl) say(`Project：${projectUrl}`);
+      else say("当前本地会话尚未认领 ChatGPT page。");
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
-
-    const emit = (data: {
-      checked: boolean;
-      updateAvailable: boolean;
-      localCommit?: string;
-      remoteCommit?: string;
-      note?: string;
-    }): void => {
-      if (opts.json) say(JSON.stringify({ ok: true, version: VERSION, ...data }));
-      else if (data.updateAvailable) say(`发现新版本（本地 ${data.localCommit?.slice(0, 7)} → 远端 ${data.remoteCommit?.slice(0, 7)}）。`);
-      else say(data.note ?? "已是最新版本。");
-    };
-
-    if (!opts.force && last.date === today) {
-      emit({ checked: false, updateAvailable: last.updateAvailable ?? false, note: "今天已检查过更新。" });
-      return;
-    }
-
-    const update = checkGitUpdate(repoRoot);
-    if (!update) {
-      // Offline or not a git checkout: skip quietly and retry tomorrow-ish (do not
-      // record the date so a transient failure does not suppress the daily check).
-      emit({ checked: false, updateAvailable: false, note: "无法检查更新（离线或非 git 安装），已跳过。" });
-      return;
-    }
-    fs.mkdirSync(getStateDir(), { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ date: today, updateAvailable: update.updateAvailable, remoteCommit: update.remoteCommit }),
-      { mode: 0o600 }
-    );
-    emit({ checked: true, ...update });
   });
 
-// ---------------------------------------------------------------- session (ChatGPT conversation / Project memory)
+surface
+  .command("claim")
+  .requiredOption("--tab-id <id>", "exact in-app browser tab id")
+  .requiredOption("--project-url <url>", "ChatGPT Project collection URL")
+  .option("--chat-url <url>", "existing ChatGPT chat URL inside that Project")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .option("--replace-generation <n>", "exact current generation to rotate")
+  .option("--replace-tab-id <id>", "exact current tab id to rotate")
+  .option("--lease-ttl-ms <ms>", "page ownership lease", String(DEFAULT_SURFACE_TTL_MS))
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    tabId: string;
+    projectUrl: string;
+    chatUrl?: string;
+    workspace?: string;
+    localSession?: string;
+    replaceGeneration?: string;
+    replaceTabId?: string;
+    leaseTtlMs: string;
+    json: boolean;
+  }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const { lease: current, binding: persistent } = await getMachineSurface(machine.runtime, machine.identity);
+      let replaces;
+      if ((opts.replaceGeneration === undefined) !== (opts.replaceTabId === undefined)) {
+        throw new Error("replace-generation and replace-tab-id must be provided together");
+      }
+      if (opts.replaceGeneration !== undefined && opts.replaceTabId !== undefined) {
+        const generation = parseIntegerOption(
+          opts.replaceGeneration,
+          "replace-generation",
+          1,
+          Number.MAX_SAFE_INTEGER
+        );
+        const previous = current ?? persistent;
+        const previousGeneration = current?.generation ?? persistent?.lastGeneration;
+        if (!previous || previousGeneration !== generation || previous.tabId !== opts.replaceTabId) {
+          throw new Error("replacement generation or tab id does not match the current surface binding");
+        }
+        replaces = current ?? {
+          projectId: previous.projectId,
+          localSessionId: previous.localSessionId,
+          browserId: previous.browserId,
+          surfaceId: previous.surfaceId,
+          tabId: previous.tabId,
+          generation,
+          ownerProcessEpoch: sessionOwnerEpoch(localSessionId),
+        };
+      }
+      const { lease } = await claimMachineSurface(machine.runtime, machine.identity, {
+        tabId: opts.tabId,
+        projectUrl: opts.projectUrl,
+        chatUrl: opts.chatUrl,
+        ownerProcessEpoch: sessionOwnerEpoch(localSessionId),
+        replaces,
+        leaseTtlMs: parseIntegerOption(
+          opts.leaseTtlMs,
+          "lease-ttl-ms",
+          1_000,
+          24 * 60 * 60_000
+        ),
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, lease }));
+      else check(`已临时认领本会话的 ChatGPT page（generation ${lease.generation}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+surface
+  .command("commit")
+  .description("Persist a page route after workspace verification succeeds")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .requiredOption("--generation <n>", "exact verified page generation")
+  .requiredOption("--tab-id <id>", "exact verified in-app browser tab id")
+  .requiredOption("--chat-url <url>", "observed ChatGPT chat URL created inside that Project")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    workspace?: string;
+    localSession?: string;
+    generation: string;
+    tabId: string;
+    chatUrl: string;
+    json: boolean;
+  }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const { lease } = await getMachineSurface(machine.runtime, machine.identity);
+      if (!lease) throw new Error("This local session has no active ChatGPT page lease.");
+      const generation = parseIntegerOption(opts.generation, "generation", 1, Number.MAX_SAFE_INTEGER);
+      if (lease.generation !== generation || lease.tabId !== opts.tabId) {
+        throw new Error("generation or tab-id does not match the current surface lease");
+      }
+      const { binding, session: saved } = await commitMachineSurface(machine.runtime, machine.identity, lease, {
+        chatUrl: opts.chatUrl,
+        connectorName: OPENAI_CONNECTOR_NAME,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, binding, session: saved }));
+      else check(`已保存验证通过的 ChatGPT page（generation ${binding.lastGeneration}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+surface
+  .command("renew")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .requiredOption("--generation <n>", "exact owned page generation")
+  .requiredOption("--tab-id <id>", "exact owned in-app browser tab id")
+  .option("--lease-ttl-ms <ms>", "page ownership lease", String(DEFAULT_SURFACE_TTL_MS))
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    workspace?: string;
+    localSession?: string;
+    generation: string;
+    tabId: string;
+    leaseTtlMs: string;
+    json: boolean;
+  }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const { lease } = await getMachineSurface(machine.runtime, machine.identity);
+      if (!lease) throw new Error("This local session has no active ChatGPT page lease.");
+      const generation = parseIntegerOption(opts.generation, "generation", 1, Number.MAX_SAFE_INTEGER);
+      if (lease.generation !== generation || lease.tabId !== opts.tabId) {
+        throw new Error("generation or tab-id does not match the current surface lease");
+      }
+      const { lease: renewed } = await renewMachineSurface(machine.runtime, machine.identity, lease, parseIntegerOption(
+        opts.leaseTtlMs,
+        "lease-ttl-ms",
+        1_000,
+        24 * 60 * 60_000
+      ));
+      if (opts.json) say(JSON.stringify({ ok: true, lease: renewed }));
+      else check("ChatGPT page ownership 已续期");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+surface
+  .command("release")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .requiredOption("--generation <n>", "exact owned page generation")
+  .requiredOption("--tab-id <id>", "exact owned in-app browser tab id")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    workspace?: string;
+    localSession?: string;
+    generation: string;
+    tabId: string;
+    json: boolean;
+  }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const { lease } = await getMachineSurface(machine.runtime, machine.identity);
+      const generation = parseIntegerOption(opts.generation, "generation", 1, Number.MAX_SAFE_INTEGER);
+      if (lease && (lease.generation !== generation || lease.tabId !== opts.tabId)) {
+        throw new Error("generation or tab-id does not match the current surface lease");
+      }
+      const released = lease
+        ? (await releaseMachineSurface(machine.runtime, machine.identity, lease)).released
+        : false;
+      if (opts.json) say(JSON.stringify({ ok: true, released }));
+      else if (released) check("ChatGPT page ownership 已释放");
+      else say("当前本地会话没有活动 page lease。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+surface
+  .command("retire")
+  .description("Permanently retire this local session's ChatGPT page and contexts")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; localSession?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const result = await retireMachineSurface(machine.runtime, machine.identity);
+      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, ...result }));
+      else if (result.retired) {
+        check(`已退役本地会话的 ChatGPT page，并撤销 ${result.revokedContexts} 个 context`);
+      } else {
+        say("当前本地会话没有可退役的 ChatGPT page。");
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
 
 const session = program
   .command("session")
-  .description("Remember the ChatGPT Project and conversation for this workspace");
+  .description("Remember one ChatGPT Project chat for this local Codex session");
 
 session
   .command("get", { isDefault: true })
-  .description("Show the saved ChatGPT conversation / Project for this workspace")
   .option("-w, --workspace <path>")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
+  .option("--local-session <id>")
   .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; localSession?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const sessionIdentity = currentLocalSessionIdentity(opts.localSession);
-    const localSessionId = sessionIdentity.id;
-    const saved = readSession(workspace.id, localSessionId);
-    const conversation = resolveConversation(saved);
-    const route = resolveConversationRoute(conversation);
-    if (opts.json) {
-      say(JSON.stringify({ ok: true, sessionIdentity, session: saved, conversation, route, resultTransport: workspace.resultTransport }));
-    }
-    else if (!saved) {
-      say("尚未记录 ChatGPT 会话。新仓库默认使用 Project 合集。");
-    } else {
-      say(`本地会话：${conversation.localSessionId}`);
-      say(`模式：${conversation.mode === "project" ? "Project 合集" : "长对话"}`);
-      if (conversation.projectUrl) say(`合集：${conversation.projectUrl}`);
-      if (saved.title) say(`会话：${saved.title}`);
-      if (saved.url) say(`对话：${saved.url}`);
-      if (saved.connectorName) say(`连接器：${saved.connectorName}`);
-      if (saved.taskId) say(`任务：${saved.taskId}（第 ${saved.iteration ?? 0} 轮，${saved.lastState ?? "?"}）`);
-      if (saved.checkpoint) {
-        say(
-          `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
-        );
+  .action(async (opts: { workspace?: string; localSession?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const sessionIdentity = currentLocalSessionIdentity(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, sessionIdentity.id);
+      const { lease } = await getMachineSurface(machine.runtime, machine.identity);
+      // surface get reconciles any partially-written route before this
+      // command reads and reports the session snapshot.
+      const saved = readSession(workspace.id, sessionIdentity.id);
+      const conversation = resolveConversation(saved);
+      const route = resolveConversationRoute(conversation);
+      const payload = {
+        ok: true,
+        connectorName: OPENAI_CONNECTOR_NAME,
+        sessionIdentity,
+        session: saved,
+        conversation,
+        route,
+        surface: lease,
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else if (!saved) say("尚未记录本会话的 ChatGPT Project chat。");
+      else {
+        say(`本地会话：${sessionIdentity.id}`);
+        if (saved.projectUrl) say(`Project：${saved.projectUrl}`);
+        if (saved.url) say(`Chat：${saved.url}`);
+        if (lease) say(`Page：${lease.tabId}（generation ${lease.generation}）`);
       }
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
   });
 
 session
   .command("set")
-  .description("Save the ChatGPT Project and/or conversation for this workspace")
   .option("-w, --workspace <path>")
-  .option("--url <url>", "ChatGPT conversation URL from the address bar")
   .option("--title <title>")
   .option("--task <id>")
   .option("--iteration <n>")
-  .option("--state <state>", "last protocol state, e.g. EXECUTED")
-  .option("--mode <mode>", "long-chat or project")
-  .option("--project-url <url>", "ChatGPT Project collection URL (…/g/g-p-…/project)")
-  .option("--connector-name <name>", "exact connector title for this workspace")
-  .option("--protocol-state <state>", "checkpoint protocol state, e.g. EXECUTED_SENT")
-  .option("--waiting-for <who>", "none | GPT_RESEARCH | GPT_PLAN | GPT_REVIEW | USER")
-  .option("--goal <text>", "original task goal for resume / HANDOFF")
+  .option("--state <state>")
+  .option("--protocol-state <state>")
+  .option("--waiting-for <who>")
+  .option("--goal <text>")
   .option("--completed-subtasks <text>")
   .option("--known-issues <text>")
   .option("--next-step <text>")
-  .option("--clear-checkpoint", "drop the active checkpoint (task DONE)", false)
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--mailbox-request <id>", "active control mailbox request id for checkpoint resume")
-  .option("--mailbox-phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--mailbox-result <id>", "received control mailbox result id")
-  .option("--clear-mailbox", "drop mailbox metadata after a browser fallback", false)
-  .action(
-    (opts: {
-      workspace?: string;
-      url?: string;
-      title?: string;
-      task?: string;
-      iteration?: string;
-      state?: string;
-      mode?: string;
-      projectUrl?: string;
-      connectorName?: string;
-      protocolState?: string;
-      waitingFor?: string;
-      goal?: string;
-      completedSubtasks?: string;
-      knownIssues?: string;
-      nextStep?: string;
-      clearCheckpoint: boolean;
-      localSession?: string;
-      mailboxRequest?: string;
-      mailboxPhase?: string;
-      mailboxResult?: string;
-      clearMailbox: boolean;
-    }) => {
+  .option("--mailbox-request <id>")
+  .option("--mailbox-phase <phase>")
+  .option("--mailbox-result <id>")
+  .option("--clear-mailbox", "drop mailbox checkpoint metadata", false)
+  .option("--clear-checkpoint", "drop the active task checkpoint", false)
+  .option("--local-session <id>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: {
+    workspace?: string;
+    title?: string;
+    task?: string;
+    iteration?: string;
+    state?: string;
+    protocolState?: string;
+    waitingFor?: string;
+    goal?: string;
+    completedSubtasks?: string;
+    knownIssues?: string;
+    nextStep?: string;
+    mailboxRequest?: string;
+    mailboxPhase?: string;
+    mailboxResult?: string;
+    clearMailbox: boolean;
+    clearCheckpoint: boolean;
+    localSession?: string;
+    json: boolean;
+  }) => {
+    try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const localSessionId = resolveLocalSession(opts.localSession);
-      const modeRaw = opts.mode?.trim().toLowerCase();
-      if (modeRaw && modeRaw !== "long-chat" && modeRaw !== "project") {
-        throw new Error("mode must be long-chat or project");
-      }
       const protocolRaw = opts.protocolState?.trim().toUpperCase();
       if (protocolRaw && !PROTOCOL_STATES.includes(protocolRaw as ProtocolState)) {
         throw new Error(`protocol-state must be one of ${PROTOCOL_STATES.join(", ")}`);
       }
       const waitingRaw = opts.waitingFor?.trim();
-      const waitingNorm = waitingRaw
-        ? waitingRaw.toLowerCase() === "none"
-          ? "none"
-          : waitingRaw.toUpperCase()
-        : undefined;
-      if (waitingNorm && !WAITING_FOR.includes(waitingNorm as WaitingFor)) {
+      const waiting =
+        waitingRaw?.toLowerCase() === "none" ? "none" : waitingRaw?.toUpperCase();
+      if (waiting && !WAITING_FOR.includes(waiting as WaitingFor)) {
         throw new Error(`waiting-for must be one of ${WAITING_FOR.join(", ")}`);
       }
       if (opts.clearMailbox && (opts.mailboxRequest || opts.mailboxPhase || opts.mailboxResult)) {
@@ -1261,122 +1339,206 @@ session
       if ((opts.clearMailbox || opts.mailboxRequest || opts.mailboxPhase || opts.mailboxResult) && !protocolRaw) {
         throw new Error("mailbox checkpoint options require --protocol-state");
       }
-      const taskId = opts.task ? validateControlId(opts.task, "task id") : undefined;
-      const iteration =
-        opts.iteration !== undefined ? parseControlIteration(opts.iteration) : undefined;
-      const mailboxRequestId = opts.mailboxRequest
-        ? validateControlId(opts.mailboxRequest, "mailbox request id")
-        : undefined;
-      const mailboxResultId = opts.mailboxResult
-        ? validateControlId(opts.mailboxResult, "mailbox result id")
-        : undefined;
       const saved = updateSession(workspace.id, localSessionId, {
         localSessionId,
-        url: opts.url,
         title: opts.title,
-        taskId,
-        iteration,
+        taskId: opts.task ? validateControlId(opts.task, "task id") : undefined,
+        iteration:
+          opts.iteration === undefined ? undefined : parseControlIteration(opts.iteration),
         lastState: opts.state,
-        conversationMode: modeRaw as ConversationMode | undefined,
-        projectUrl: opts.projectUrl,
-        connectorName: opts.connectorName,
         clearCheckpoint: opts.clearCheckpoint,
         clearMailbox: opts.clearMailbox,
         checkpoint: protocolRaw
           ? {
               protocolState: protocolRaw as ProtocolState,
-              waitingFor: (waitingNorm as WaitingFor | undefined) ?? undefined,
+              waitingFor: waiting as WaitingFor | undefined,
               originalGoal: opts.goal,
               completedSubtasks: opts.completedSubtasks,
               knownIssues: opts.knownIssues,
               nextExpectedStep: opts.nextStep,
-              mailboxRequestId,
+              mailboxRequestId: opts.mailboxRequest
+                ? validateControlId(opts.mailboxRequest, "mailbox request id")
+                : undefined,
               mailboxPhase: opts.mailboxPhase ? parseControlPhase(opts.mailboxPhase) : undefined,
-              mailboxResultId,
+              mailboxResultId: opts.mailboxResult
+                ? validateControlId(opts.mailboxResult, "mailbox result id")
+                : undefined,
             }
           : undefined,
       });
-      if (saved.projectUrl && saved.conversationMode === "project") {
-        check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
-      } else {
-        check("已记录 ChatGPT 会话，后续任务将复用");
-      }
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved }));
+      else check("已记录本地会话的 ChatGPT Project chat");
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
-  );
+  });
 
 session
   .command("clear")
-  .description("Forget the current ChatGPT chat (Project binding is kept)")
   .option("-w, --workspace <path>")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .action((opts: { workspace?: string; localSession?: string }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const result = clearChatPointer(workspace.id, resolveLocalSession(opts.localSession));
-    if (!result.cleared) say("尚未记录 ChatGPT 会话。");
-    else if (result.keptProject) check("已清除当前对话，合集绑定仍保留");
-    else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
+  .option("--local-session <id>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; localSession?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const result = clearChatPointer(workspace.id, resolveLocalSession(opts.localSession));
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else if (result.cleared) check("已清除本会话的 Chat 指针，Project 绑定保留");
+      else say("尚未记录 ChatGPT chat。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
   });
 
-// ---------------------------------------------------------------- control result mailbox
-
-const controlCmd = program
+const control = program
   .command("control")
-  .description("Manage structured C2C control result handoff for this workspace");
+  .description("Manage exact, correlated ChatGPT result turns");
 
-controlCmd
+control
   .command("open")
-  .description("Open a one-shot request for ChatGPT to submit a structured control result")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
   .requiredOption("--iteration <n>")
-  .requiredOption("--phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--ttl-ms <ms>", "request lifetime in milliseconds")
+  .requiredOption("--phase <phase>")
+  .option("--local-session <id>")
+  .option("--ttl-ms <ms>", "request and capability lifetime", String(DEFAULT_TURN_TTL_MS))
+  .option("--scopes <scope,...>")
+  .option("--model-id <id>")
+  .option("--effort <name>")
+  .option("--compaction-epoch <n>", "compaction epoch", "0")
   .option("--json", "machine-readable output", false)
-  .action(
-    (opts: {
-      workspace?: string;
-      task: string;
-      iteration: string;
-      phase: string;
-      localSession?: string;
-      ttlMs?: string;
-      json: boolean;
-    }) => {
-      try {
-        const workspace = new Workspace(resolveWorkspace(opts.workspace));
-        const correlation = parseControlCorrelation(opts);
-        const request = openControlResultRequest(workspace.id, {
-          localSessionId: resolveLocalSession(opts.localSession),
-          ...correlation,
-          ttlMs: opts.ttlMs
-            ? parseIntegerOption(opts.ttlMs, "ttl-ms", 1_000, 86_400_000)
-            : undefined,
-        });
-        const payload = { ok: true, request };
-        if (opts.json) {
-          say(JSON.stringify(payload));
-          return;
-        }
-        check(`已打开 ${request.phase} 结果请求`);
-        say(`RESULT_REQUEST_ID: ${request.requestId}`);
-      } catch (error) {
-        handleCliError(error, opts.json);
+  .action(async (opts: {
+    workspace?: string;
+    task: string;
+    iteration: string;
+    phase: string;
+    localSession?: string;
+    ttlMs: string;
+    scopes?: string;
+    modelId?: string;
+    effort?: string;
+    compactionEpoch: string;
+    json: boolean;
+  }) => {
+    let createdRequest: ControlResultRequest | null = null;
+    let machineContext: Awaited<ReturnType<typeof machineSurfaceContext>> | null = null;
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const correlation = parseControlCorrelation(opts);
+      const ttlMs = parseIntegerOption(opts.ttlMs, "ttl-ms", 1_000, MAX_TURN_TTL_MS);
+      machineContext = await machineSurfaceContext(workspace, localSessionId);
+      const machine = machineContext;
+      const surface = await getMachineSurface(machine.runtime, machine.identity);
+      const page = surface.lease;
+      if (!page) throw new Error("Claim this local session's ChatGPT page before opening a control turn.");
+      const binding = surface.binding;
+      if (
+        !binding ||
+        binding.lastGeneration !== page.generation ||
+        binding.tabId !== page.tabId ||
+        binding.projectUrl !== page.projectUrl ||
+        binding.chatUrl !== page.chatUrl
+      ) {
+        throw new Error("Commit this local session's verified ChatGPT page before opening a control turn.");
       }
+      const opened = await openMailboxRequest(machine.runtime, machine.identity, {
+        ...correlation,
+        ttlMs,
+      });
+      if (!opened.created) {
+        const payload = {
+          ok: false,
+          code: "CONTROL_REQUEST_ALREADY_OPEN",
+          recoveryRequired: true,
+          request: opened.request,
+          nextAction: "Inspect this exact request with `c2c control status`, or cancel it before opening a replacement.",
+        };
+        if (opts.json) say(JSON.stringify(payload));
+        else {
+          cross(`请求 ${opened.request.requestId} 已存在，不能替换其 CONTEXT_ID`);
+          say("请先查询或取消这个精确请求。");
+        }
+        process.exitCode = 1;
+        return;
+      }
+      createdRequest = opened.request;
+      const remainingTtlMs = Math.max(
+        1_000,
+        Math.min(MAX_TURN_TTL_MS, Date.parse(opened.request.expiresAt) - Date.now())
+      );
+      const grant = await issueMachineTurn(machine.runtime, {
+        workspaceId: machine.identity.workspaceId,
+        projectId: machine.identity.projectId,
+        registrationId: machine.identity.registrationId,
+        localSessionId,
+        taskId: correlation.taskId,
+        iteration: correlation.iteration,
+        phase: correlation.phase,
+        requestId: opened.request.requestId,
+        scopes: parseScopes(opts.scopes),
+        modelId: opts.modelId,
+        effort: opts.effort,
+        compactionEpoch: parseIntegerOption(
+          opts.compactionEpoch,
+          "compaction-epoch",
+          0,
+          Number.MAX_SAFE_INTEGER
+        ),
+        generation: page.generation,
+        ttlMs: remainingTtlMs,
+      });
+      const payload = {
+        ok: true,
+        request: opened.request,
+        contextId: grant.token,
+        contextExpiresAt: grant.expiresAt,
+        surface: {
+          tabId: page.tabId,
+          chatUrl: page.chatUrl,
+          generation: page.generation,
+        },
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else {
+        say(`RESULT_REQUEST_ID: ${opened.request.requestId}`);
+        say(`CONTEXT_ID: ${grant.token}`);
+      }
+    } catch (error) {
+      if (createdRequest) {
+        try {
+          if (!machineContext) throw new Error("machine context is unavailable for mailbox cleanup");
+          await cancelMailboxRequest(
+            machineContext.runtime,
+            machineContext.identity,
+            {
+              requestId: createdRequest.requestId,
+              taskId: createdRequest.taskId,
+              iteration: createdRequest.iteration,
+              phase: createdRequest.phase,
+            },
+          );
+        } catch {
+          // Preserve the original setup error.
+        }
+      }
+      handleCliError(error, opts.json);
     }
-  );
+  });
 
-controlCmd
-  .command("status")
-  .description("Show the status of a structured control result request")
-  .option("-w, --workspace <path>")
-  .requiredOption("--request <id>")
-  .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
-  .requiredOption("--phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--json", "machine-readable output", false)
-  .action((opts: {
+function addControlLookupOptions(command: Command): Command {
+  return command
+    .option("-w, --workspace <path>")
+    .requiredOption("--request <id>")
+    .requiredOption("--task <id>")
+    .requiredOption("--iteration <n>")
+    .requiredOption("--phase <phase>")
+    .option("--local-session <id>")
+    .option("--json", "machine-readable output", false);
+}
+
+addControlLookupOptions(control.command("status"))
+  .action(async (opts: {
     workspace?: string;
     request: string;
     task: string;
@@ -1387,38 +1549,25 @@ controlCmd
   }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
-      const status = getControlResultStatus(
-        workspace.id,
-        opts.request,
-        resolveLocalSession(opts.localSession),
-        parseControlCorrelation(opts)
-      );
+      const identity = await machineSurfaceContext(workspace, resolveLocalSession(opts.localSession));
+      const status = await getMailboxStatus(identity.runtime, identity.identity, {
+        requestId: opts.request,
+        ...parseControlCorrelation(opts),
+      });
       const payload = { ok: status.status !== "not_found", ...status };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        if (status.status === "not_found") process.exitCode = 1;
-        return;
-      }
-      say(`状态：${status.status}`);
-      if (status.progress) say(`进度：${status.progress.status}`);
-      if (status.result) say(`结果：${status.result.kind} ${status.result.resultId}`);
+      if (opts.json) say(JSON.stringify(payload));
+      else say(`状态：${status.status}`);
       if (status.status === "not_found") process.exitCode = 1;
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-controlCmd
-  .command("wait")
-  .description("Wait locally for ChatGPT to submit a structured control result")
-  .option("-w, --workspace <path>")
-  .requiredOption("--request <id>")
-  .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
-  .requiredOption("--phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--timeout-ms <ms>", "wait timeout in milliseconds", "300000")
-  .option("--json", "machine-readable output", false)
+addControlLookupOptions(
+  control
+    .command("wait")
+    .option("--timeout-ms <ms>", "local wait timeout", "300000")
+)
   .action(async (opts: {
     workspace?: string;
     request: string;
@@ -1431,41 +1580,25 @@ controlCmd
   }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const identity = await machineSurfaceContext(workspace, resolveLocalSession(opts.localSession));
       const timeoutMs = parseIntegerOption(opts.timeoutMs, "timeout-ms", 0, 86_400_000);
-      const status = await waitForControlResult(
-        workspace.id,
-        opts.request,
+      const status = await waitMailboxResult(identity.runtime, identity.identity, {
+        requestId: opts.request,
+        ...parseControlCorrelation(opts),
         timeoutMs,
-        resolveLocalSession(opts.localSession),
-        parseControlCorrelation(opts)
-      );
+      });
       const received = status.status === "received" || status.status === "acknowledged";
-      const payload = { ok: received, ...status };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        if (!received) process.exitCode = 1;
-        return;
-      }
-      say(`状态：${status.status}`);
-      if (status.progress) say(`进度：${status.progress.status}`);
-      if (status.result) say(JSON.stringify(status.result, null, 2));
+      if (opts.json) say(JSON.stringify({ ok: received, ...status }));
+      else if (status.result) say(JSON.stringify(status.result, null, 2));
+      else say(`状态：${status.status}`);
       if (!received) process.exitCode = 1;
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-controlCmd
-  .command("ack")
-  .description("Acknowledge a received structured control result")
-  .option("-w, --workspace <path>")
-  .requiredOption("--request <id>")
-  .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
-  .requiredOption("--phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--json", "machine-readable output", false)
-  .action((opts: {
+addControlLookupOptions(control.command("ack"))
+  .action(async (opts: {
     workspace?: string;
     request: string;
     task: string;
@@ -1476,34 +1609,20 @@ controlCmd
   }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
-      const status = acknowledgeControlResult(
-        workspace.id,
-        opts.request,
-        resolveLocalSession(opts.localSession),
-        parseControlCorrelation(opts)
-      );
-      const payload = { ok: true, ...status };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
-      }
-      check("已确认 control result");
+      const identity = await machineSurfaceContext(workspace, resolveLocalSession(opts.localSession));
+      const status = await acknowledgeMailboxResult(identity.runtime, identity.identity, {
+        requestId: opts.request,
+        ...parseControlCorrelation(opts),
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...status }));
+      else check("已确认 control result");
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-controlCmd
-  .command("cancel")
-  .description("Cancel a pending structured control result request")
-  .option("-w, --workspace <path>")
-  .requiredOption("--request <id>")
-  .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
-  .requiredOption("--phase <phase>", "RESEARCH, PLAN, or REVIEW")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .option("--json", "machine-readable output", false)
-  .action((opts: {
+addControlLookupOptions(control.command("cancel"))
+  .action(async (opts: {
     workspace?: string;
     request: string;
     task: string;
@@ -1514,69 +1633,58 @@ controlCmd
   }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
-      const status = cancelControlResultRequest(
-        workspace.id,
-        opts.request,
-        resolveLocalSession(opts.localSession),
-        parseControlCorrelation(opts)
-      );
-      const payload = { ok: true, ...status };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
+      const runtimeObservation = await observeMachineRuntime();
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const correlation = parseControlCorrelation(opts);
+      let contextCancelled = false;
+      let contextInvalidated = false;
+      let machineRuntime: MachineRuntimeState;
+      let registration: MachineRegistrationIdentity;
+      if (runtimeObservation.state === "healthy") {
+        machineRuntime = runtimeObservation.runtime;
+        registration = await registerMachineWorkspace(machineRuntime, workspace.root);
+        if (registration.workspaceId !== workspace.id || registration.projectId !== workspace.projectId) {
+          throw new Error("Machine workspace registration does not match the trusted local workspace.");
+        }
+        const revoked = await revokeMachineRequest(machineRuntime, {
+          workspaceId: registration.workspaceId,
+          projectId: registration.projectId,
+          localSessionId,
+          ...correlation,
+          requestId: opts.request,
+        });
+        contextCancelled = revoked.revoked > 0;
+        contextInvalidated = revoked.revoked === 0;
+      } else if (runtimeObservation.state === "stopped") {
+        const ensured = await ensureMachineGateway();
+        machineRuntime = ensured.runtime;
+        registration = await registerMachineWorkspace(machineRuntime, workspace.root);
+        if (registration.workspaceId !== workspace.id || registration.projectId !== workspace.projectId) {
+          throw new Error("Machine workspace registration does not match the trusted local workspace.");
+        }
+        contextInvalidated = true;
+      } else {
+        throw new Error("The capability could not be revoked because the gateway state is uncertain.");
       }
-      check("已取消 control result request");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-const prefsCmd = program
-  .command("prefs")
-  .description("Remember ChatGPT developer mode and setup choice for this machine");
-
-prefsCmd
-  .command("get", { isDefault: true })
-  .description("Show remembered ChatGPT setup choices (not per workspace)")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { json: boolean }) => {
-    const prefs = readUiPrefs();
-    if (opts.json) {
-      say(JSON.stringify({ ok: true, ...prefs }));
-      return;
-    }
-    say(prefs.developerModeEnabled ? "开发人员模式：已记住已开启" : "开发人员模式：尚未记住");
-    if (prefs.setupMode === "auto") say("配置方式：AI 自动化配置（预览版）");
-    else if (prefs.setupMode === "manual") say("配置方式：手动教学配置");
-    else say("配置方式：尚未选择");
-  });
-
-prefsCmd
-  .command("set")
-  .description("Save a ChatGPT setup choice for this machine")
-  .option("--developer-mode", "remember that ChatGPT developer mode is on", false)
-  .option("--setup-mode <mode>", "auto (preview) or manual")
-  .option("--json", "machine-readable output", false)
-  .action((opts: { developerMode: boolean; setupMode?: string; json: boolean }) => {
-    try {
-      const modeRaw = opts.setupMode?.trim().toLowerCase();
-      if (modeRaw && !SETUP_MODES.includes(modeRaw as SetupMode)) {
-        throw new Error(`setup-mode must be one of ${SETUP_MODES.join(", ")}`);
-      }
-      if (!opts.developerMode && !modeRaw) {
-        throw new Error("nothing to save: pass --developer-mode and/or --setup-mode");
-      }
-      const prefs = mergeUiPrefs({
-        developerModeEnabled: opts.developerMode ? true : undefined,
-        setupMode: modeRaw as SetupMode | undefined,
+      const status = await cancelMailboxRequest(machineRuntime, {
+        ...registration,
+        localSessionId,
+      }, {
+        requestId: opts.request,
+        ...correlation,
       });
       if (opts.json) {
-        say(JSON.stringify({ ok: true, ...prefs }));
-        return;
+        say(JSON.stringify({
+          ok: true,
+          contextCancelled,
+          contextInvalidated,
+          ...status,
+        }));
+      } else if (contextCancelled) {
+        check("已取消 control result request");
+      } else {
+        check("已清理已失效的 control result request");
       }
-      if (opts.developerMode) check("已记住开发人员模式已开启");
-      if (modeRaw === "auto") check("已记住配置方式：AI 自动化配置（预览版）");
-      if (modeRaw === "manual") check("已记住配置方式：手动教学配置");
     } catch (error) {
       handleCliError(error, opts.json);
     }
@@ -1584,216 +1692,189 @@ prefsCmd
 
 program
   .command("record", { hidden: true })
-  .description("Record a Codex execution summary (used by the Skill)")
+  .description("Record one local execution iteration for ChatGPT review")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
   .requiredOption("--iteration <n>")
   .option("--changed-files <filesOrCount>", "comma-separated files or a count", "0")
-  .option("--tests <summary>", "e.g. '27 passed'")
+  .option("--tests <summary>")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
   .option("--notes <text>")
-  .option("--command <text>", "command whose output may be offered to ChatGPT")
-  .option("--output <text>", "command output (prefer --output-file for long logs)")
-  .option("--output-file <path>", "read command output from a local file")
-  .option("--exit-code <n>", "numeric exit code of that command")
-  .option("--local-session <id>", "local Codex session id (automatically detected when omitted)")
-  .action(
-    (opts: {
-      workspace?: string;
-      task: string;
-      iteration: string;
-      changedFiles: string;
-      tests?: string;
-      exitStatus: string;
-      notes?: string;
-      command?: string;
-      output?: string;
-      outputFile?: string;
-      exitCode?: string;
-      localSession?: string;
-    }) => {
+  .option("--command <text>")
+  .option("--output <text>")
+  .option("--output-file <path>")
+  .option("--exit-code <n>")
+  .option("--local-session <id>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: {
+    workspace?: string;
+    task: string;
+    iteration: string;
+    changedFiles: string;
+    tests?: string;
+    exitStatus: string;
+    notes?: string;
+    command?: string;
+    output?: string;
+    outputFile?: string;
+    exitCode?: string;
+    localSession?: string;
+    json: boolean;
+  }) => {
+    try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const localSessionId = resolveLocalSession(opts.localSession);
       const taskId = validateControlId(opts.task, "task id");
       const iteration = parseControlIteration(opts.iteration);
-      const changed = /^(0|[1-9][0-9]*)$/.test(opts.changedFiles)
+      const changedFiles = /^(0|[1-9][0-9]*)$/.test(opts.changedFiles)
         ? parseIntegerOption(opts.changedFiles, "changed-files count", 0, 1_000_000)
         : opts.changedFiles.split(",").map((file) => file.trim()).filter(Boolean);
-      const baseRecord = validateExecutionRecordInput(workspace.id, {
+      const base = validateExecutionRecordInput(workspace.id, {
         localSessionId,
         taskId,
         iteration,
-        changedFiles: changed,
+        changedFiles,
         tests: opts.tests ?? null,
         exitStatus: parseExecutionExitStatus(opts.exitStatus),
         timestamp: new Date().toISOString(),
         notes: opts.notes,
         outputAvailable: false,
       });
-      let outputId: number | undefined;
-      let outputAvailable = false;
       const rawOutput =
-        opts.outputFile !== undefined
-          ? readCappedUtf8(path.resolve(opts.outputFile), MAX_RECORD_OUTPUT_READ)
-          : opts.output;
+        opts.outputFile === undefined
+          ? opts.output
+          : readCappedUtf8(path.resolve(opts.outputFile), MAX_RECORD_OUTPUT_READ);
       if ((opts.command === undefined) !== (rawOutput === undefined)) {
         throw new Error("command and output/output-file must be provided together");
       }
       if (opts.exitCode !== undefined && opts.command === undefined) {
         throw new Error("exit-code requires command and output/output-file");
       }
+      let outputId: number | undefined;
+      let outputAvailable = false;
       if (opts.command && rawOutput !== undefined) {
-        const savedOutput = saveExecutionOutput(workspace.id, {
+        const saved = saveExecutionOutput(workspace.id, {
           command: opts.command,
           raw: rawOutput,
           exitCode:
-            opts.exitCode !== undefined
-              ? parseIntegerOption(opts.exitCode, "exit-code", 0, 255)
-              : null,
+            opts.exitCode === undefined
+              ? null
+              : parseIntegerOption(opts.exitCode, "exit-code", 0, 255),
           localSessionId,
           taskId,
           iteration,
         });
-        outputId = savedOutput.id;
-        outputAvailable = savedOutput.allowed;
+        outputId = saved.id;
+        outputAvailable = saved.allowed;
       }
-      appendExecutionRecord(workspace.id, {
-        ...baseRecord,
-        outputId,
-        outputAvailable,
-      });
-      if (outputId !== undefined && !outputAvailable) check("已记录执行摘要（输出未对 ChatGPT 开放）");
-      else if (outputId !== undefined) check("已记录执行摘要与输出");
-      else check("已记录执行摘要");
+      appendExecutionRecord(workspace.id, { ...base, outputId, outputAvailable });
+      if (opts.json) say(JSON.stringify({ ok: true, outputId, outputAvailable }));
+      else check("已记录本地执行结果");
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
-  );
+  });
 
-const tunnelCmd = program.command("tunnel").description("Choose or inspect the public connection for this workspace");
-
-tunnelCmd
-  .command("status", { isDefault: true })
-  .description("Show whether this workspace still needs a one-time connection choice")
-  .option("-w, --workspace <path>")
-  .option("--zone <domain>", "optional domain, used to preview the stable hostname")
+program
+  .command("sandbox-clean")
+  .description("Remove obsolete global write grants for C2C machine state")
   .option("--json", "machine-readable output", false)
-  .action((opts: { workspace?: string; zone?: string; json: boolean }) => {
+  .action((opts: { json: boolean }) => {
+    try {
+      const result = ensureSandboxIsolation();
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else if (result.removedRoots > 0) check("已移除旧版 C2C 机器状态写权限");
+      else check("C2C 机器状态未向工作区开放写权限");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+const prefs = program
+  .command("prefs")
+  .description("Remember machine-wide ChatGPT setup preferences");
+
+prefs
+  .command("get", { isDefault: true })
+  .option("--json", "machine-readable output", false)
+  .action((opts: { json: boolean }) => {
+    const value = readUiPrefs();
+    if (opts.json) say(JSON.stringify({ ok: true, ...value }));
+    else say(JSON.stringify(value, null, 2));
+  });
+
+prefs
+  .command("set")
+  .option("--developer-mode", "remember that ChatGPT developer mode is enabled", false)
+  .option("--setup-mode <mode>", "auto or manual")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { developerMode: boolean; setupMode?: string; json: boolean }) => {
+    try {
+      const mode = opts.setupMode?.trim().toLowerCase();
+      if (mode && !SETUP_MODES.includes(mode as SetupMode)) {
+        throw new Error(`setup-mode must be one of ${SETUP_MODES.join(", ")}`);
+      }
+      if (!opts.developerMode && !mode) throw new Error("nothing to save");
+      const value = mergeUiPrefs({
+        developerModeEnabled: opts.developerMode ? true : undefined,
+        setupMode: mode as SetupMode | undefined,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...value }));
+      else check("机器级 ChatGPT 配置偏好已保存");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+program
+  .command("update-check")
+  .description("Check GitHub for a newer C2C revision")
+  .option("-w, --workspace <path>")
+  .option("--force", "bypass the daily cache", false)
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; force: boolean; json: boolean }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
-      const payload = tunnelChoicePayload(workspace, opts.zone);
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
+      const file = path.join(getProjectDataDir(workspace.projectId), "update-check.json");
+      const today = new Date().toLocaleDateString("en-CA");
+      let cached: { date?: string; updateAvailable?: boolean } = {};
+      try {
+        cached = JSON.parse(fs.readFileSync(file, "utf8")) as typeof cached;
+      } catch {
+        // First check on this machine.
       }
-      if (payload.needsChoice) say(TUNNEL_CHOICE_PROMPT);
-      else if (payload.namedReady) check(`固定域名：${payload.hostname}`);
-      else say("当前使用临时地址。");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-tunnelCmd
-  .command("choose")
-  .description("Remember quick vs named, and provision a named hostname when asked")
-  .requiredOption("--mode <mode>", "quick or named")
-  .option("-w, --workspace <path>")
-  .option("--zone <domain>", "Cloudflare domain for a named hostname")
-  .option("--hostname <hostname>", "override the default c2c-<project>.<zone>")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { mode: string; workspace?: string; zone?: string; hostname?: string; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    try {
-      const workspace = new Workspace(root);
-      const mode = opts.mode.trim().toLowerCase();
-      const previous = readTunnelState(workspace.id);
-      if (mode === "quick") {
-        const state = chooseQuickTunnel(workspace.id);
-        if (await findLiveBridge(workspace.id)) {
-          if (previous.preference === "named") await stopBridge(root);
-        }
-        const payload = { ...tunnelChoicePayload(workspace), state };
-        if (opts.json) say(JSON.stringify(payload));
-        else check("已选用临时地址");
-        return;
-      }
-      if (mode !== "named") {
-        throw new Error("mode must be quick or named");
-      }
-      const zone = parseZoneInput(opts.zone ?? "");
-      if (!zone) {
+      if (!opts.force && cached.date === today) {
         const payload = {
-          ok: false,
-          need: "zone",
-          userMessage: "请告诉我已经加在 Cloudflare 上的域名，例如 example.com",
-          loginPrompt: NAMED_LOGIN_PROMPT,
+          ok: true,
+          checked: false,
+          updateAvailable: cached.updateAvailable ?? false,
+          version: VERSION,
         };
-        if (opts.json) {
-          say(JSON.stringify(payload));
-          return;
-        }
-        say(payload.userMessage);
+        if (opts.json) say(JSON.stringify(payload));
+        else say(payload.updateAvailable ? "检测到新版本。" : "今天已检查过更新。");
         return;
       }
-      if (!opts.json) say(NAMED_LOGIN_PROMPT);
-      const result = await provisionNamedTunnel({
-        workspaceId: workspace.id,
-        workspaceName: workspace.name,
-        zone,
-        hostname: opts.hostname,
+      const update = checkGitUpdate(repoRoot);
+      if (!update) {
+        const payload = { ok: true, checked: false, updateAvailable: false, version: VERSION };
+        if (opts.json) say(JSON.stringify(payload));
+        else say("当前无法检查更新。");
+        return;
+      }
+      writeSecureJson(file, {
+        date: today,
+        updateAvailable: update.updateAvailable,
+        remoteCommit: update.remoteCommit,
       });
-      if (await findLiveBridge(workspace.id)) await stopBridge(root);
-      const payload = {
-        ...tunnelChoicePayload(workspace),
-        ok: true,
-        fallback: result.fallback,
-        userMessage: result.userMessage,
-        error: result.error,
-        state: result.state,
-      };
-      if (opts.json) {
-        say(JSON.stringify(payload));
-        return;
-      }
-      if (result.fallback) say(result.userMessage ?? "");
-      else check(`固定域名已就绪：${result.state.hostname}`);
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-tunnelCmd
-  .command("login")
-  .description("Open the Cloudflare login window used by a named hostname")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { json: boolean }) => {
-    try {
-      if (!opts.json) say(NAMED_LOGIN_PROMPT);
-      const account = new ProcessCloudflaredAccount();
-      await account.login();
-      const payload = { ok: true, loggedIn: hasCloudflaredCert() };
+      const payload = { ok: true, checked: true, version: VERSION, ...update };
       if (opts.json) say(JSON.stringify(payload));
-      else check("Cloudflare 已登录");
+      else say(update.updateAvailable ? "检测到新版本。" : "已是最新版本。");
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
-
-function handleCliError(error: unknown, json: boolean): void {
-  const message = error instanceof Error ? error.message : String(error);
-  if (json) {
-    const code = error instanceof ControlMailboxError ? error.code : undefined;
-    say(JSON.stringify({ ok: false, error: message, code }));
-  } else if (message.startsWith("NEED_CLOUDFLARED")) {
-    say("需要你完成一步：");
-    say("");
-    say("尚未安装安全连接组件 cloudflared。");
-    say("macOS 用户可运行：brew install cloudflared");
-    say("完成后再试一次即可。");
-  } else {
-    cross(message);
-  }
-  process.exitCode = 1;
-}
 
 program.parseAsync(process.argv).catch((error: Error) => {
   cross(error.message);

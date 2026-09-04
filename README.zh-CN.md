@@ -4,205 +4,226 @@
 
 > ChatGPT 负责思考，Codex 负责干活。
 
-## 解决什么问题
+本项目把 ChatGPT 网页版作为本地 Codex 会话的规划与审查伙伴。Codex 始终掌握
+工作区写入、命令执行、测试和 Git 操作；ChatGPT 通过 MCP 按需读取当前工作区，
+再把结构化建议写回受保护的机器结果箱。
 
-ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的 API 额度做
-规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，Codex 只负责
-执行。不用 API Key、不搞逆向代理——官方网页 + 工作区只读 MCP 桥接 +
-本地结构化结果回传。
+## 机器级一次配置
 
-## 这是什么
+连接按机器配置一次：
 
-把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，而执行权完全保留在
-Codex 手里。你的仓库永远不会被上传——ChatGPT 通过一条安全的、OAuth 保护的
-连接按需读取代码，并且只能向 C2C 本地状态提交受限进度和一次性、结构化的
-建议结果，不能修改工作区。
+- 只创建一个名为 **`Codex with ChatGPT`** 的连接器。
+- 连接器的 **Authentication 必须是 `None`**。官方 OpenAI Secure MCP Tunnel
+  提供连接认证，连接器不保存某个项目的凭据。
+- Tunnel 独占并托管一个 `serve-machine --stdio` 子进程。这个子进程是机器上
+  唯一的 MCP 网关，可以服务所有已注册工作区。
+- 一个工作区对应一个 ChatGPT Project；一个本地 Codex 会话对应该 Project
+  内一个持久 ChatGPT 对话/页面。
+- 浏览器操作始终使用已认领的精确 `tabId`，不会因为某个页面恰好在前台就误发
+  消息。
+- 不设固定或全局的会话、页面、轮次或工作区数量上限。不同会话可以独立运行；
+  只有同一本地会话内部的轮次串行，因为一个对话需要保持顺序。
 
-ChatGPT 还可以负责代码检索和需要等待的网页研究；正式研究会在规划前独立返回
-结论、来源链接、发布日期、关键证据和待确认问题。Codex 负责把建议落实为本地
-修改并完成验证。C2C 本身不能
-切换当前 Codex 模型，低成本模型需要由用户或宿主环境选择。
+因此不会抢占用户普通的 ChatGPT 对话。C2C 只拥有本地会话记录的页面，不会接管
+其他标签页。
 
-## 一段话安装（纯小白专用）
+## 安装与配置
 
-不懂 git、Node、终端？完全不需要懂。把下面这段话原样复制给你的编码
-Agent（Codex），然后去倒杯咖啡：
+环境要求：Node.js 20 或更高版本、Git，以及支持连接器的 ChatGPT 账号。安装并
+构建仓库：
+
+```sh
+corepack pnpm install
+corepack pnpm build
+```
+
+创建或复用一个 OpenAI Secure MCP Tunnel，然后运行：
+
+```sh
+node bin/c2c.js machine setup \
+  --tunnel-id <OPENAI_TUNNEL_ID> \
+  --runtime-key-file <RUNTIME_KEY_FILE>
+```
+
+`machine setup` 会自动安装或更新唯一的全局 Skill，不需要为每个工作区重复安装。
+可随时运行 `c2c skill status --json` 验证安装状态。
+
+在 ChatGPT 的连接器设置中只创建以下连接器：
+
+| 字段 | 值 |
+| --- | --- |
+| 名称 | `Codex with ChatGPT` |
+| OpenAI Secure Tunnel | 选择 `machine setup` 配置的 Tunnel |
+| Authentication | `None` |
+
+ChatGPT 会选择已经配置的 Secure Tunnel；没有需要复制或粘贴到连接器中的公网
+Server URL。
+
+运行时密钥会复制到机器状态目录，绝不打印或提交到 Git。Tunnel 会托管网关，因而
+不要为某个工作区另起一个 MCP 网关。
+
+请在工作区根目录中运行。工作区命令根据当前 `cwd` 确定目标；即使传入
+`-w` 也只能指向同一个目录，不能用它选择其他路径。需要时注册当前工作区：
+
+```sh
+node bin/c2c.js machine workspace register --json
+node bin/c2c.js machine status --json
+node bin/c2c.js machine doctor --no-fix --json
+```
+
+每个工作区流程开始时，先检查更新并清理旧版全局沙箱写权限：
+
+```sh
+node bin/c2c.js update-check -w <workspace-root> --json
+node bin/c2c.js sandbox-clean --json
+```
+
+项目可变状态始终位于仓库自身边界内：Git checkout 使用
+`<git-common-dir>/codex-with-chatgpt`，非 Git 工作区使用
+`<workspace-root>/.codex-with-chatgpt`。项目元数据由链接 worktree 共享；会话路由和
+执行记录按 `workspaces/<workspaceId>/` 隔离。结果箱以及跨工作区的 Project URL、
+物理 tab 与 generation 权威索引由 Gateway 保存在受保护的机器状态中；C2C checkout
+也不在工作区边界内。
+
+Skill 会在内置 ChatGPT 浏览器中完成 Project 和会话页面配置：机器已有该工作区的
+Project URL 时直接复用，否则才要求创建一个 Project。每个本地 Codex 会话会在该
+Project 中新建一个 ChatGPT 对话并独占一个页面。
+
+### macOS 登录后自动启动（可选）
+
+首次完成机器配置后，在 macOS 上只需启用一次机器级 LaunchAgent，并确认状态：
+
+```sh
+c2c autostart enable --json
+c2c autostart status --json
+```
+
+LaunchAgent 会隐藏运行 `c2c autostart run --quiet`。这个命令只调用
+`ensureMachineGateway`，复用官方 Tunnel 已托管的子进程，不会为工作区创建第二个
+网关或第二个 Tunnel。关闭自动启动：
+
+```sh
+c2c autostart disable --json
+```
+
+自动启动只是机器级保活机制，不是页面调度器，也不会增加会话或页面限制。
+
+## 运行结构
 
 ```text
-请帮我完整安装并配置 Codex with ChatGPT，全程自动，我是不懂技术的小白，
-所有事情你自己做：
-
-1. 环境自检：需要 git 和 Node.js ≥ 20，缺什么就自动安装
-  （macOS 用 Homebrew，Windows 用 winget），同时安装 cloudflared。
-2. 下载：把 https://github.com/XiaoDuoYa/codex-with-chatgpt 克隆到
-   ~/codex-with-chatgpt（已存在就 git pull 更新）。
-3. 构建：在该目录里执行 corepack pnpm install 和 corepack pnpm build。
-4. 安装 Skill：把仓库里的 skill/SKILL.md 复制到
-   ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
-   "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
-5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
-   全程只用内置浏览器，禁止打开任何第三方浏览器。
-6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
-   而且一次只告诉我一个动作。
-7. 完成后给我看 ✓ 清单，并确认文件读取测试通过。我不懂 MCP、OAuth、
-   Tunnel、端口这些词，不要向我解释；出了问题先自己修。
+ChatGPT Project A                 ChatGPT Project B
+  会话 A1 -> 页面 A1                 会话 B1 -> 页面 B1
+  会话 A2 -> 页面 A2                 会话 B2 -> 页面 B2
+            \                         /
+             \                       /
+              一个全局连接器（Authentication: None）
+                              |
+                官方 OpenAI Secure MCP Tunnel
+                              |
+               Tunnel 托管 node ... serve-machine --stdio
+                              |
+          机器网关：工作区注册表 + 能力令牌代理 + 结果箱
+                              |
+                       可信本地工作区
 ```
 
-**更新**：Skill 每天自动检查一次 GitHub，有新版本会自动更新并继续任务，
-无需任何操作；也可以随时对 Codex 说"更新 Codex with ChatGPT"。
+Skill 根据可信的本地 `cwd` 确定工作区。网关为工作区分配稳定的 `projectId`、
+checkout-specific 的 `workspaceId` 和 `registrationId`，并把注册信息保存在机器
+注册表中。Project 与对话 URL 只用于导航和记忆，不是文件系统授权边界。
 
-## 安装 → 配置 → 使用（手动版）
+每个控制轮次都会获得一个短时 `CONTEXT_ID`，绑定：
 
-1. 安装 Codex Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。
-2. 对 Codex 说：**"使用 Codex with ChatGPT 完成首次配置。"**
-3. 之后正常使用：**"使用 Codex with ChatGPT，帮我实现 XXX。"**
-
-说明书到此结束。你不需要知道 MCP、OAuth、Tunnel、端口、localhost 是什么——
-Codex 会自动完成所有配置，你只会看到：
-
-```
-Codex with ChatGPT
-
-✓ 当前项目已识别
-✓ Workspace Bridge 已启动
-✓ 安全连接已建立
-✓ ChatGPT 已连接
-✓ 文件读取测试通过
-
-Ready.
+```text
+machine boot + workspaceId + projectId + registrationId
+localSessionId + taskId + iteration + phase
+requestId（非 BOOT 必填，BOOT 不包含）
+compactionEpoch + 页面 generation + 请求的 scopes
 ```
 
-唯一可能需要你动手的步骤：登录 ChatGPT（如果要用固定域名，再登录一次 Cloudflare）。**新仓库**还会请你在 ChatGPT 里建一次项目（合集）：名字用仓库名，记忆选「仅限项目记忆」。侧栏如果没有「项目」，把鼠标放在「聊天」上，点右边三个点，选「按项目整理」。之后对话都从合集页开，不用回首页。已经在用的仓库可以继续不使用 Project，但每个本地 Codex 会话仍会保存并复用各自的 ChatGPT 对话。
+ChatGPT 必须在每一次 MCP 调用中传入 `context_id`。网关验证能力令牌、取得活动
+租约，在长调用期间续租，并在调用结束后释放租约。令牌过期、取消、页面轮换、
+上下文压缩或网关重启都会让旧令牌失效。
 
-### 可选的固定域名
+## 控制流程
 
-默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
+正常状态流转为：
 
-如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
-
-凭证放在系统目录，不进项目。
-
-## 工作原理
-
-```
-             ┌───────────────────────────┐
-             │      ChatGPT 网页版       │
-             │   推理 / 规划 / 审查      │
-             └──────────┬──────────▲─────┘
-                        │          │
-          MCP 数据读取  │          │ 浏览器控制面
-       + 进度/结果提交  │          │ RESEARCH / INIT / EXECUTED（< 1 KB）
-                        ▼          │
-             ┌─────────────────────┐
-             │      C2C Bridge     │   仅监听本机回环地址
-             │ MCP + 结果 mailbox  │   OAuth 2.1 + 一次性配对码
-             │  OAuth + 配对       │   Cloudflare Quick Tunnel
-             │  Tunnel 管理        │
-             └──────┬────────┬─────┘
-          只读访问  │        │ 受限结果写入 C2C 状态
-                   ▼        ▼
-       ┌────────────────┐  ┌─────────────────────┐
-       │   本地工作区   │  │   本地结果 Mailbox │
-       └───────▲────────┘  └──────────▲──────────┘
-               │ 编辑/git/测试        │ 本地读取/确认
-               └──────────┬───────────┘
-                    ┌─────┴───────┐
-                    │Codex Harness│
-                    └─────────────┘
+```text
+RESEARCH -> INIT -> PLAN -> EXECUTED -> REVIEW -> DONE
 ```
 
-- **出站控制面（浏览器 UI）**：Codex 向 ChatGPT 发送极小的 `[C2C]` RESEARCH、
-  INIT 和 EXECUTED 消息。完整状态循环是
-  `[RESEARCH] → INIT → PLAN → EXECUTED → REVIEW → DONE`；
-  绝不粘贴 diff、日志或文件内容。
-- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
-  `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
-  `git_status`、`git_diff`、`test_status`、`execution_summary`、
-  `execution_output`。
-- **返回面（本地 Mailbox）**：`report_control_progress` 返回受限且只能前进的
-  进度；`submit_control_result` 只接受与有效一次性请求绑定的
-  RESEARCH/PLAN/REVIEW/DONE/BLOCKED 结构化结果；每个请求严格对应一次提问和
-  一次回答，Codex 使用同一 local-session/task/iteration/phase 在本地读取并
-  确认，不再解析页面正文。
-- **并行会话**：一个 ChatGPT Project 归工作区共享；每个本地 Codex 会话拥有
-  独立的 ChatGPT 对话、检查点和结果请求。C2C 会返回该会话唯一的目标 URL；
-  即使页面被切换，Skill 也会先跳回并确认正确对话，再发送控制消息。
-- **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
-  以及只属于当前本地会话、任务和轮次的测试记录，不会因为 Codex 说"测试全过"
-  就直接相信。
+Codex 只向精确认领的对话发送很短的控制消息，绝不把文件内容、diff 或日志粘贴
+到 ChatGPT。ChatGPT 通过 MCP 读取数据，并把结构化结果写到受保护的机器结果箱：
 
-结果返回默认优先使用本地 mailbox，失败时回退页面解析。可以在工作区的
-`.c2c.json` 中选择严格模式：
+- `report_control_progress` 只能报告向前推进的进度。
+- `submit_control_result` 只能为一个精确的 `RESULT_REQUEST_ID` 和关联元组提交
+  一次结果。
+- Codex 等待该请求、确认结果，然后才推进会话。
 
-```json
-{ "resultTransport": "auto" }
+受保护的机器结果箱是唯一结果传输方式。页面中可见的回复不能作为结果，
+即使它是该会话中的最新消息也不例外。
+
+## 页面所有权
+
+ChatGPT 操作使用内置浏览器。配置时 Skill 以 browser、surface、Project URL、
+chat URL 和 `tabId` 精确认领页面。租约带有 generation 和 owner epoch；替换存活
+页面必须提供精确的当前 generation，其他会话的页面不能被认领。
+
+每个本地会话的处理顺序：
+
+1. 执行 `c2c session get --json`，记录 `sessionIdentity.id`。
+2. 读取该会话的 route 和 surface lease。
+3. 只打开或返回该会话保存的 chat URL。
+4. 每条控制提示都带上 `CONTEXT_ID` 和 `RESULT_REQUEST_ID`。
+5. 等待精确的结果箱请求完成后，才能发送下一条控制消息。
+
+Computer Use 通过稳定 URL 和语义化 DOM/浏览器 API 驱动每个独立的内置浏览器
+页面，并始终使用精确 `tabId`。正常操作不使用截图坐标点击；轮次结束后保留页面
+为待机状态，不关闭或挪作其他会话用途。
+
+`surface release` 只结束当前租约，并保留会话路由以便下次继续使用。只有在本地
+Codex 会话被永久丢弃时，才执行
+`c2c surface retire --local-session <id> --json`。退役会撤销该会话的 context、
+结束活动结果箱请求，并删除页面绑定和 checkout 路由；工作区的 ChatGPT Project
+绑定仍供其他会话和未来会话复用。
+
+## 安全边界
+
+- MCP 工作区工具全部只读；结果写入同时受活动请求和能力令牌约束。
+- 工作区路径会规范化并限制在注册根目录内，符号链接和目录穿越都会被拒绝。
+- 能力令牌和活动租约均短时有效，并绑定会话、任务、轮次、阶段、压缩纪元、页面
+  generation 与 scopes。
+- 完成栅栏会先排空活动租约；结果箱写入失败时不会错误地标记完成，可以重试。
+- 机器生命周期记录同时校验 machine id、boot epoch、pid 和精确运行时数据，第二
+  个进程不能悄悄成为网关。
+- 运行时密钥、管理令牌和原始能力令牌只保存在受保护的机器状态中，普通 CLI 输出
+  会隐去它们。
+
+详细契约见 [docs/architecture.md](docs/architecture.md)、
+[docs/protocol.md](docs/protocol.md)、[docs/security.md](docs/security.md)。
+
+## 常用命令
+
+```sh
+node bin/c2c.js machine start
+node bin/c2c.js machine status --json
+node bin/c2c.js machine doctor --no-fix --json
+node bin/c2c.js machine stop
+node bin/c2c.js workspace --json
+node bin/c2c.js surface --json
+node bin/c2c.js session --json
+node bin/c2c.js control status \
+  --request <id> --task <id> --iteration <n> --phase <phase> --json
 ```
 
-可选值：`auto`（默认）、`mailbox`、`browser`（旧流程）。
+检查命令：
 
-## 安全模型（简版）
-
-- **工作区从构造上只读**：服务端不存在写文件/删除/Shell/提交类工具。两个受限
-  写工具只把进度或结构化建议写入 C2C 状态，不能选择工作区写入目标，并要求带
-  作用域且会过期的一次性请求。
-- **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
-  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
-- **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
-  （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
-- **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
-  客户端注册、refresh token 轮换）。无令牌：401；令牌属于别的工作区：403。
-- **模型永远接触不到长期凭据**：唯一会出现在浏览器里的秘密是一次性配对码
-  （5 分钟有效、限 5 次尝试、限速、用后即毁）。
-
-完整威胁模型：[docs/security.md](docs/security.md)
-
-## 开发者
-
-```bash
-pnpm install
-pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：路径安全、OAuth、配对、mailbox、MCP 端到端
-
-c2c setup           # 一条命令：Bridge + 隧道 + 配对码
-c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
-c2c status / doctor / pair / unpair / logs / stop
+```sh
+corepack pnpm typecheck
+corepack pnpm test
+corepack pnpm build
 ```
-
-环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
-（自动检测，Skill 会替你安装）。
-
-文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
-[安全](docs/security.md) · [机器级 Gateway 计划](docs/machine-gateway-plan.md) ·
-[故障排查](docs/troubleshooting.md)
-
-## 目录结构
-
-```
-src/
-  bridge/     本机回环 HTTP 服务、端口自动恢复、管理 API
-  mcp/        9 个只读数据工具 + 受限进度/结果提交、无状态 Streamable HTTP
-  auth/       OAuth 2.1（PKCE、动态注册、refresh 轮换、吊销）
-  pairing/    一次性配对码（CSPRNG、TTL、限速）
-  workspace/  路径收敛、敏感文件策略、搜索、git
-  tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
-  execution/  审查闭环所需的执行记录
-  control/    研究/结果/进度 schema 与本地 mailbox 生命周期
-  session/    工作区 Project 绑定 + 每个本地会话的对话/检查点
-  process/    守护进程生命周期
-  cli/        c2c 命令行
-skill/        Codex Skill（真正的 UX 层）
-tests/        单元 + 集成测试
-docs/         架构 / 协议 / 安全 / 故障排查
-```
-
-## 状态与声明
-
-V1。已端到端验证：Bridge、OAuth + 配对、公网隧道、ChatGPT 连接器配置、
-零操作首次配置体验。
-
-**非官方社区项目，与 OpenAI 无关联，未获其背书。**
 
 ## 许可证
 
-[MIT](LICENSE)
+MIT

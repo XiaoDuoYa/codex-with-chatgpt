@@ -4,16 +4,13 @@ const TOKEN_PREFIX = "c2c_ctx_";
 const LEASE_PREFIX = "c2c_lease_";
 const FENCE_PREFIX = "c2c_fence_";
 const TOKEN_BYTES = 32;
-const DEFAULT_CAPABILITY_TTL_MS = 5 * 60_000;
+const DEFAULT_CAPABILITY_TTL_MS = 30 * 60_000;
 const MIN_CAPABILITY_TTL_MS = 1_000;
 const MAX_CAPABILITY_TTL_MS = 60 * 60_000;
 const DEFAULT_LEASE_TTL_MS = 15_000;
 const MIN_LEASE_TTL_MS = 100;
 const MAX_LEASE_TTL_MS = 5 * 60_000;
-const DEFAULT_MAX_ACTIVE_TURNS = 1;
-const DEFAULT_MAX_CAPABILITIES = 128;
 const DEFAULT_MAX_TOMBSTONES = 128;
-const DEFAULT_MAX_LEASES_PER_TURN = 16;
 
 export type TurnCapabilityState =
   | "issued"
@@ -35,9 +32,7 @@ export type TurnCapabilityErrorCode =
   | "BOOT_EPOCH_MISMATCH"
   | "BINDING_MISMATCH"
   | "SCOPE_DENIED"
-  | "ACTIVE_TURN_LIMIT"
-  | "CAPABILITY_CAPACITY_EXCEEDED"
-  | "LEASE_CAPACITY_EXCEEDED"
+  | "STALE_BINDING_EPOCH"
   | "INVALID_TTL"
   | "LEASE_NOT_FOUND"
   | "LEASE_EXPIRED"
@@ -65,12 +60,21 @@ export interface TurnCapabilityBinding {
   taskId: string;
   iteration: number;
   phase: string;
+  /** Exact mailbox request authorized by this control turn. BOOT has no mailbox request. */
+  requestId?: string;
   scopes: readonly string[];
   modelId?: string;
   effort?: string;
   compactionEpoch: number;
   generation: number;
 }
+
+export type TurnRequestBinding = Pick<
+  TurnCapabilityBinding,
+  "workspaceId" | "projectId" | "localSessionId" | "taskId" | "iteration" | "phase"
+> & {
+  requestId: string;
+};
 
 export interface IssueTurnCapabilityInput extends TurnCapabilityBinding {
   ttlMs?: number;
@@ -114,6 +118,10 @@ export interface TurnCompletionReceipt {
   readonly completedAt: string;
 }
 
+export interface TurnCompletionAbortReceipt {
+  readonly status: "active";
+}
+
 export interface TurnCapabilityStatus {
   readonly status: TurnCapabilityState | "unknown";
   readonly bootEpoch?: string;
@@ -132,18 +140,12 @@ export interface TurnCapabilityStats {
   readonly tombstoneCount: number;
   /** Terminal turns that cannot yet be evicted because work is in flight. */
   readonly drainingTurnCount: number;
-  readonly maxActiveTurns: number;
-  readonly maxCapabilities: number;
   readonly maxTombstones: number;
-  readonly maxLeasesPerTurn: number;
 }
 
 export interface TurnCapabilityBrokerOptions {
-  maxActiveTurns?: number;
-  maxCapabilities?: number;
   /** Maximum terminal records retained after all activity leases drain. */
   maxTombstones?: number;
-  maxLeasesPerTurn?: number;
   now?: () => number;
 }
 
@@ -164,6 +166,11 @@ interface CapabilityRecord {
 interface LeaseProvenance {
   readonly tokenHash: string;
   readonly leaseHash: string;
+}
+
+interface SessionEpoch {
+  readonly compactionEpoch: number;
+  readonly generation: number;
 }
 
 function sha256(value: string): string {
@@ -209,6 +216,18 @@ function normalizeBinding(input: TurnCapabilityBinding): TurnCapabilityBinding {
   if (!input || typeof input !== "object") {
     throw new TurnCapabilityError("INVALID_BINDING", "turn binding is invalid");
   }
+  const phase = safeString(input.phase, "phase");
+  const requestId = input.requestId === undefined
+    ? undefined
+    : safeString(input.requestId, "requestId");
+  if (phase === "BOOT" ? requestId !== undefined : requestId === undefined) {
+    throw new TurnCapabilityError(
+      "INVALID_BINDING",
+      phase === "BOOT"
+        ? "BOOT turn capability must not bind a mailbox request"
+        : "control turn capability must bind an exact mailbox request"
+    );
+  }
   return Object.freeze({
     workspaceId: safeString(input.workspaceId, "workspaceId"),
     projectId: safeString(input.projectId, "projectId"),
@@ -216,7 +235,8 @@ function normalizeBinding(input: TurnCapabilityBinding): TurnCapabilityBinding {
     localSessionId: safeString(input.localSessionId, "localSessionId"),
     taskId: safeString(input.taskId, "taskId"),
     iteration: safeCounter(input.iteration, "iteration"),
-    phase: safeString(input.phase, "phase"),
+    phase,
+    requestId,
     scopes: normalizeScopes(input.scopes),
     modelId: input.modelId === undefined ? undefined : safeString(input.modelId, "modelId"),
     effort: input.effort === undefined ? undefined : safeString(input.effort, "effort"),
@@ -234,6 +254,7 @@ function sameBinding(left: TurnCapabilityBinding, right: TurnCapabilityBinding):
     left.taskId === right.taskId &&
     left.iteration === right.iteration &&
     left.phase === right.phase &&
+    left.requestId === right.requestId &&
     left.modelId === right.modelId &&
     left.effort === right.effort &&
     left.compactionEpoch === right.compactionEpoch &&
@@ -281,26 +302,13 @@ export class TurnCapabilityBroker {
   private readonly completionFences = new Map<string, string>();
   private readonly usedCompletionFences = new Set<string>();
   private readonly leaseProvenance = new WeakMap<object, LeaseProvenance>();
-  private readonly maxActiveTurns: number;
-  private readonly maxCapabilities: number;
+  private readonly sessionEpochs = new Map<string, SessionEpoch>();
   private readonly maxTombstones: number;
-  private readonly maxLeasesPerTurn: number;
   private readonly now: () => number;
 
   constructor(options: TurnCapabilityBrokerOptions = {}) {
     this.bootEpoch = randomBytes(16).toString("hex");
-    this.maxActiveTurns = this.positiveLimit(options.maxActiveTurns, DEFAULT_MAX_ACTIVE_TURNS, "maxActiveTurns");
-    this.maxCapabilities = this.positiveLimit(
-      options.maxCapabilities,
-      DEFAULT_MAX_CAPABILITIES,
-      "maxCapabilities"
-    );
     this.maxTombstones = this.nonNegativeLimit(options.maxTombstones, DEFAULT_MAX_TOMBSTONES, "maxTombstones");
-    this.maxLeasesPerTurn = this.positiveLimit(
-      options.maxLeasesPerTurn,
-      DEFAULT_MAX_LEASES_PER_TURN,
-      "maxLeasesPerTurn"
-    );
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -311,27 +319,24 @@ export class TurnCapabilityBroker {
     return this.issueNormalized(binding, ttlMs, now);
   }
 
-  /**
-   * Atomically supersede all live capabilities belonging to one local
-   * session, then issue the replacement capability. Validation and a pure
-   * capacity preflight happen before any prior capability is revoked.
-   */
+  /** Atomically supersede all live capabilities belonging to one local session. */
   issueReplacingSession(input: IssueTurnCapabilityInput): TurnCapabilityGrant {
     const { binding, ttlMs } = this.prepareIssue(input);
     const now = this.now();
-    if (!this.canIssueAfterReplacing(binding, now)) {
-      throw new TurnCapabilityError(
-        "CAPABILITY_CAPACITY_EXCEEDED",
-        "turn capability capacity is exhausted"
-      );
-    }
+    this.assertFreshSessionEpoch(binding);
     this.prune(now);
+    this.assertNoActiveSessionLeases(binding);
     for (const record of this.records.values()) {
       if (this.isTombstone(record.state) || !this.sameSession(record.binding, binding)) continue;
       this.terminate(record, "revoked", now);
     }
     this.trimTombstones();
-    return this.issueNormalized(binding, ttlMs, now);
+    const grant = this.issueNormalized(binding, ttlMs, now);
+    this.sessionEpochs.set(this.sessionKey(binding), {
+      compactionEpoch: binding.compactionEpoch,
+      generation: binding.generation,
+    });
+    return grant;
   }
 
   private prepareIssue(input: IssueTurnCapabilityInput): { binding: TurnCapabilityBinding; ttlMs: number } {
@@ -346,14 +351,6 @@ export class TurnCapabilityBroker {
   }
 
   private issueNormalized(binding: TurnCapabilityBinding, ttlMs: number, now: number): TurnCapabilityGrant {
-    this.makeCapacityForCapability();
-    if (this.records.size >= this.maxCapabilities) {
-      throw new TurnCapabilityError(
-        "CAPABILITY_CAPACITY_EXCEEDED",
-        "turn capability capacity is exhausted"
-      );
-    }
-
     const token = randomSecret(TOKEN_PREFIX);
     const tokenHash = sha256(token);
     const expiresAt = now + ttlMs;
@@ -393,13 +390,6 @@ export class TurnCapabilityBroker {
     if (record.state !== "issued" && record.state !== "active") {
       throw errorForTerminalState(record.state);
     }
-    if (record.leases.size >= this.maxLeasesPerTurn) {
-      throw new TurnCapabilityError("LEASE_CAPACITY_EXCEEDED", "activity lease capacity is exhausted for this turn");
-    }
-    if (record.state === "issued" && this.activeTurnCount() >= this.maxActiveTurns) {
-      throw new TurnCapabilityError("ACTIVE_TURN_LIMIT", "the active turn limit has been reached");
-    }
-
     const requestedLeaseTtl = assertTtl(
       options.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS,
       MIN_LEASE_TTL_MS,
@@ -492,6 +482,32 @@ export class TurnCapabilityBroker {
     };
   }
 
+  /**
+   * Verify that a completion fence was issued for this exact turn. A fence is
+   * intentionally opaque to callers, so completion APIs must establish its
+   * ownership before publishing any external result.
+   */
+  assertCompletionFence(
+    token: string,
+    expectedBinding: TurnCapabilityBinding,
+    fence: string,
+  ): void {
+    const record = this.resolveLiveToken(token);
+    const expected = normalizeBinding(expectedBinding);
+    this.assertBinding(record, expected);
+    const fenceHash = this.resolveFenceHash(fence);
+    if (
+      record.state !== "completing" ||
+      record.completionFenceHash !== fenceHash ||
+      this.completionFences.get(fenceHash) !== record.tokenHash
+    ) {
+      throw new TurnCapabilityError(
+        "COMPLETION_FENCE_INVALID",
+        "completion fence does not belong to this turn",
+      );
+    }
+  }
+
   complete(fence: string): TurnCompletionReceipt {
     const fenceHash = this.resolveFenceHash(fence);
     const tokenHash = this.completionFences.get(fenceHash);
@@ -516,6 +532,31 @@ export class TurnCapabilityBroker {
     record.terminalAt = now;
     this.trimTombstones();
     return { status: "completed", completedAt: new Date(now).toISOString() };
+  }
+
+  /**
+   * Re-open a completing turn when its external commit did not succeed.
+   * The abandoned fence is consumed so it can never complete a later retry.
+   */
+  abortCompletion(fence: string): TurnCompletionAbortReceipt {
+    const fenceHash = this.resolveFenceHash(fence);
+    const tokenHash = this.completionFences.get(fenceHash);
+    if (!tokenHash) {
+      throw new TurnCapabilityError("COMPLETION_FENCE_INVALID", "completion fence is not valid");
+    }
+    const record = this.records.get(tokenHash);
+    if (!record || record.bootEpoch !== this.bootEpoch) {
+      throw new TurnCapabilityError("BOOT_EPOCH_MISMATCH", "completion fence belongs to another broker epoch");
+    }
+    this.prune(this.now());
+    if (record.state !== "completing" || record.completionFenceHash !== fenceHash) {
+      throw errorForTerminalState(record.state);
+    }
+    this.completionFences.delete(fenceHash);
+    this.usedCompletionFences.add(fenceHash);
+    record.completionFenceHash = undefined;
+    record.state = "active";
+    return { status: "active" };
   }
 
   cancel(token: string): void {
@@ -546,6 +587,71 @@ export class TurnCapabilityBroker {
       if (this.isTombstone(record.state) || !sameBinding(record.binding, expected)) continue;
       this.terminate(record, "revoked", now);
       revokedCount += 1;
+    }
+    this.trimTombstones();
+    return revokedCount;
+  }
+
+  /** Revoke all live capabilities for one exact control request without a token. */
+  revokeRequest(binding: TurnRequestBinding): number {
+    const expected = {
+      workspaceId: safeString(binding.workspaceId, "workspaceId"),
+      projectId: safeString(binding.projectId, "projectId"),
+      localSessionId: safeString(binding.localSessionId, "localSessionId"),
+      taskId: safeString(binding.taskId, "taskId"),
+      iteration: safeCounter(binding.iteration, "iteration"),
+      phase: safeString(binding.phase, "phase"),
+      requestId: safeString(binding.requestId, "requestId"),
+    };
+    const now = this.now();
+    this.prune(now);
+    let revokedCount = 0;
+    for (const record of this.records.values()) {
+      if (
+        this.isTombstone(record.state) ||
+        record.binding.workspaceId !== expected.workspaceId ||
+        record.binding.projectId !== expected.projectId ||
+        record.binding.localSessionId !== expected.localSessionId ||
+        record.binding.taskId !== expected.taskId ||
+        record.binding.iteration !== expected.iteration ||
+        record.binding.phase !== expected.phase ||
+        record.binding.requestId !== expected.requestId
+      ) {
+        continue;
+      }
+      this.terminate(record, "revoked", now);
+      revokedCount += 1;
+    }
+    this.trimTombstones();
+    return revokedCount;
+  }
+
+  /** Revoke every live capability and epoch retained for one local session. */
+  revokeSession(workspaceId: string, projectId: string, localSessionId: string): number {
+    const expectedWorkspaceId = safeString(workspaceId, "workspaceId");
+    const expectedProjectId = safeString(projectId, "projectId");
+    const expectedLocalSessionId = safeString(localSessionId, "localSessionId");
+    const now = this.now();
+    this.prune(now);
+    let revokedCount = 0;
+    for (const record of this.records.values()) {
+      if (
+        this.isTombstone(record.state) ||
+        record.binding.workspaceId !== expectedWorkspaceId ||
+        record.binding.projectId !== expectedProjectId ||
+        record.binding.localSessionId !== expectedLocalSessionId
+      ) {
+        continue;
+      }
+      this.terminate(record, "revoked", now);
+      revokedCount += 1;
+    }
+    const epochPrefix = `${expectedWorkspaceId}\u0000${expectedProjectId}\u0000`;
+    const epochSuffix = `\u0000${expectedLocalSessionId}`;
+    for (const key of this.sessionEpochs.keys()) {
+      if (key.startsWith(epochPrefix) && key.endsWith(epochSuffix)) {
+        this.sessionEpochs.delete(key);
+      }
     }
     this.trimTombstones();
     return revokedCount;
@@ -595,6 +701,11 @@ export class TurnCapabilityBroker {
     };
   }
 
+  /** Return the exact binding only while the capability is nonterminal. */
+  assertLive(token: string): TurnCapabilityBinding {
+    return cloneBinding(this.resolveLiveToken(token).binding);
+  }
+
   /**
    * Validate that a lease object was issued by this broker instance and is
    * still live. The object identity is intentionally part of the proof so a
@@ -632,10 +743,7 @@ export class TurnCapabilityBroker {
       drainingTurnCount: [...this.records.values()].filter(
         (record) => this.isTombstone(record.state) && record.leases.size > 0
       ).length,
-      maxActiveTurns: this.maxActiveTurns,
-      maxCapabilities: this.maxCapabilities,
       maxTombstones: this.maxTombstones,
-      maxLeasesPerTurn: this.maxLeasesPerTurn,
     };
   }
 
@@ -698,11 +806,6 @@ export class TurnCapabilityBroker {
         record.expiredLeaseHashes.add(leaseHash);
       }
     }
-    while (record.expiredLeaseHashes.size > this.maxLeasesPerTurn) {
-      const oldest = record.expiredLeaseHashes.values().next().value as string | undefined;
-      if (!oldest) break;
-      record.expiredLeaseHashes.delete(oldest);
-    }
   }
 
   private expire(record: CapabilityRecord, now: number): void {
@@ -744,27 +847,15 @@ export class TurnCapabilityBroker {
     }
   }
 
-  private makeCapacityForCapability(): void {
-    this.trimTombstones();
-    while (this.records.size >= this.maxCapabilities) {
-      const oldest = [...this.records.values()]
-        .filter((record) => this.isTombstone(record.state) && record.leases.size === 0)
-        .sort((left, right) => (left.terminalAt ?? 0) - (right.terminalAt ?? 0))[0];
-      if (!oldest) return;
-      this.records.delete(oldest.tokenHash);
-    }
-  }
-
-  private canIssueAfterReplacing(binding: TurnCapabilityBinding, now: number): boolean {
-    if (this.records.size < this.maxCapabilities) return true;
-    let reclaimable = 0;
+  private assertNoActiveSessionLeases(binding: TurnCapabilityBinding): void {
     for (const record of this.records.values()) {
-      const hasLiveLease = [...record.leases.values()].some((leaseExpiresAt) => leaseExpiresAt > now);
-      if (!hasLiveLease && (this.isTombstone(record.state) || now >= record.expiresAt || this.sameSession(record.binding, binding))) {
-        reclaimable += 1;
+      if (this.sameSession(record.binding, binding) && record.leases.size > 0) {
+        throw new TurnCapabilityError(
+          "ACTIVE_LEASES_REMAIN",
+          "active leases must be released before replacing a session turn"
+        );
       }
     }
-    return this.records.size - reclaimable < this.maxCapabilities;
   }
 
   private sameSession(left: TurnCapabilityBinding, right: TurnCapabilityBinding): boolean {
@@ -774,6 +865,28 @@ export class TurnCapabilityBroker {
       left.registrationId === right.registrationId &&
       left.localSessionId === right.localSessionId
     );
+  }
+
+  private sessionKey(binding: TurnCapabilityBinding): string {
+    return [
+      binding.workspaceId,
+      binding.projectId,
+      binding.registrationId,
+      binding.localSessionId,
+    ].join("\u0000");
+  }
+
+  private assertFreshSessionEpoch(binding: TurnCapabilityBinding): void {
+    const current = this.sessionEpochs.get(this.sessionKey(binding));
+    if (
+      current &&
+      (binding.compactionEpoch < current.compactionEpoch || binding.generation < current.generation)
+    ) {
+      throw new TurnCapabilityError(
+        "STALE_BINDING_EPOCH",
+        "turn capability belongs to an older session or page generation"
+      );
+    }
   }
 
   private isTombstone(state: TurnCapabilityState): boolean {
@@ -787,12 +900,6 @@ export class TurnCapabilityBroker {
         record.state === "completing" ||
         (this.isTombstone(record.state) && record.leases.size > 0)
     ).length;
-  }
-
-  private positiveLimit(value: number | undefined, fallback: number, label: string): number {
-    if (value === undefined) return fallback;
-    if (!Number.isSafeInteger(value) || value < 1) throw new TurnCapabilityError("INVALID_BINDING", `${label} is invalid`);
-    return value;
   }
 
   private nonNegativeLimit(value: number | undefined, fallback: number, label: string): number {
