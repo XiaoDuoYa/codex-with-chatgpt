@@ -26,6 +26,7 @@ import {
 const SURFACE_STATE_VERSION = 1;
 const MACHINE_SURFACE_STATE_VERSION = 3;
 const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
+export const MAX_ACTIVE_SURFACE_SESSIONS = 100;
 const PROCESS_EPOCH = `pid-${process.pid}-${randomBytes(16).toString("hex")}`;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -33,6 +34,7 @@ export type SurfaceOwnershipErrorCode =
   | "SURFACE_ALREADY_OWNED"
   | "SURFACE_BOUND_TO_ANOTHER_SESSION"
   | "SESSION_ALREADY_OWNED"
+  | "SESSION_CAPACITY_REACHED"
   | "PROJECT_BINDING_CONFLICT"
   | "STALE_SURFACE_GENERATION"
   | "LEASE_NOT_FOUND"
@@ -1461,9 +1463,9 @@ function validateClaim(request: ClaimSurfaceOptions): {
 /**
  * Claim a temporary ChatGPT page lease for one local session.
  *
- * There is intentionally no global capacity check: every local session may
- * own a page. Durable routing is written only by commitSurface after the
- * candidate page has passed its workspace verification.
+ * Up to 100 local sessions may own active page leases across the machine.
+ * Durable routing is written only by commitSurface after the candidate page
+ * has passed its workspace verification.
  */
 export function claimSurface(options: ClaimSurfaceOptions): SurfaceLease {
   const { request } = validateClaim(options);
@@ -1548,6 +1550,12 @@ export function claimSurface(options: ClaimSurfaceOptions): SurfaceLease {
       throw new SurfaceOwnershipError(
         "SESSION_ALREADY_OWNED",
         "local session already has a persistent ChatGPT surface binding; explicit rotation is required"
+      );
+    }
+    if (!activeForSession && machine.leases.length >= MAX_ACTIVE_SURFACE_SESSIONS) {
+      throw new SurfaceOwnershipError(
+        "SESSION_CAPACITY_REACHED",
+        `machine already has ${MAX_ACTIVE_SURFACE_SESSIONS} active ChatGPT sessions`,
       );
     }
     if (activeForSession) {

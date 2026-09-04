@@ -485,7 +485,7 @@ describe("workspace registry", () => {
     }
   });
 
-  it("registers more than five independent workspaces without a capacity gate", () => {
+  it("registers independent workspaces without a registry capacity gate", () => {
     const parent = makeTmpDir("registry-unbounded");
     try {
       const broker = new TurnCapabilityBroker();

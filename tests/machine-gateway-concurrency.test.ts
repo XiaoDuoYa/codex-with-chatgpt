@@ -17,7 +17,9 @@ import { createMcpServer } from "../src/mcp/server.js";
 import { cleanup, isolateStateDir, makeTmpDir } from "./helpers.js";
 
 const PROJECT_URL = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
-const SESSION_COUNT = 8;
+const SESSION_COUNT = 100;
+const FLOW_TTL_MS = 10 * 60 * 1000;
+const ADMIN_REQUEST_CONCURRENCY = 8;
 
 type Registration = Awaited<ReturnType<typeof registerWorkspace>>;
 type SessionIdentity = Pick<Registration, "workspaceId" | "projectId" | "registrationId"> & {
@@ -58,7 +60,26 @@ function planPayload(localSessionId: string) {
   };
 }
 
-describe("machine gateway unbounded session concurrency", () => {
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await mapper(items[index], index);
+      }
+    }),
+  );
+  return results;
+}
+
+describe("machine gateway session concurrency", () => {
   let server: MachineGatewayServer | null = null;
   const cleanups: string[] = [];
 
@@ -69,7 +90,7 @@ describe("machine gateway unbounded session concurrency", () => {
     delete process.env.C2C_STATE_DIR;
   });
 
-  it("runs eight independent page and mailbox flows through one HTTP gateway", async () => {
+  it("runs 100 independent page and mailbox flows through one HTTP gateway", async () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("machine-gateway-concurrency");
     cleanups.push(root);
@@ -96,48 +117,53 @@ describe("machine gateway unbounded session concurrency", () => {
     });
 
     // All sessions share the same registered workspace, but each owns a
-    // distinct browser page. Promise.all intentionally starts every claim at
-    // the same time so a hidden capacity gate fails this test at session six.
-    const claims = await Promise.all(
-      sessions.map((session) =>
+    // distinct browser page. Every lease stays live while the test exercises
+    // all slots in the machine-wide active-session capacity.
+    const claims = await mapWithConcurrency(
+      sessions,
+      ADMIN_REQUEST_CONCURRENCY,
+      (session) =>
         claimSurface(server!.runtime, session.identity, {
           tabId: session.tabId,
           projectUrl: PROJECT_URL,
           chatUrl: session.chatUrl,
           ownerProcessEpoch: `owner-${session.localSessionId}`,
-          leaseTtlMs: 60_000,
+          leaseTtlMs: FLOW_TTL_MS,
         }),
-      ),
     );
     expect(claims).toHaveLength(SESSION_COUNT);
     expect(new Set(claims.map(({ lease }) => lease.localSessionId)).size).toBe(SESSION_COUNT);
     expect(new Set(claims.map(({ lease }) => lease.tabId)).size).toBe(SESSION_COUNT);
     expect(new Set(claims.map(({ lease }) => lease.generation)).size).toBe(SESSION_COUNT);
 
-    await Promise.all(
-      sessions.map((session, index) =>
+    await mapWithConcurrency(
+      sessions,
+      ADMIN_REQUEST_CONCURRENCY,
+      (session, index) =>
         commitSurface(server!.runtime, session.identity, claims[index].lease, {
           chatUrl: session.chatUrl,
           connectorName: "Codex with ChatGPT",
         }),
-      ),
     );
 
-    const requests = await Promise.all(
-      sessions.map((session) =>
+    const requests = await mapWithConcurrency(
+      sessions,
+      ADMIN_REQUEST_CONCURRENCY,
+      (session) =>
         openMailboxRequest(server!.runtime, session.identity, {
           taskId: `task-${session.localSessionId}`,
           iteration: 0,
           phase: "PLAN",
-          ttlMs: 60_000,
+          ttlMs: FLOW_TTL_MS,
         }),
-      ),
     );
     expect(requests.every(({ created }) => created)).toBe(true);
     expect(new Set(requests.map(({ request }) => request.requestId)).size).toBe(SESSION_COUNT);
 
-    const grants = await Promise.all(
-      sessions.map((session, index) =>
+    const grants = await mapWithConcurrency(
+      sessions,
+      ADMIN_REQUEST_CONCURRENCY,
+      (session, index) =>
         issueTurn(server!.runtime, {
           ...session.identity,
           taskId: `task-${session.localSessionId}`,
@@ -147,9 +173,8 @@ describe("machine gateway unbounded session concurrency", () => {
           scopes: ["c2c.result.write"],
           compactionEpoch: 0,
           generation: claims[index].lease.generation,
-          ttlMs: 60_000,
+          ttlMs: FLOW_TTL_MS,
         }),
-      ),
     );
     expect(grants).toHaveLength(SESSION_COUNT);
     expect(new Set(grants.map(({ token }) => token)).size).toBe(SESSION_COUNT);
@@ -177,39 +202,42 @@ describe("machine gateway unbounded session concurrency", () => {
       expect(results.every((result) => result.isError !== true)).toBe(true);
       expect(grants.every(({ token }) => server!.gateway.turnStatus(token).status === "completed")).toBe(true);
 
-      const statuses = await Promise.all(
-        sessions.map((session, index) =>
+      const statuses = await mapWithConcurrency(
+        sessions,
+        ADMIN_REQUEST_CONCURRENCY,
+        (session, index) =>
           getMailboxStatus(server!.runtime, session.identity, {
             requestId: requests[index].request.requestId,
             taskId: `task-${session.localSessionId}`,
             iteration: 0,
             phase: "PLAN",
           }),
-        ),
       );
       expect(statuses.every((status) => status.status === "received")).toBe(true);
 
-      const acknowledgements = await Promise.all(
-        sessions.map((session, index) =>
+      const acknowledgements = await mapWithConcurrency(
+        sessions,
+        ADMIN_REQUEST_CONCURRENCY,
+        (session, index) =>
           acknowledgeMailboxResult(server!.runtime, session.identity, {
             requestId: requests[index].request.requestId,
             taskId: `task-${session.localSessionId}`,
             iteration: 0,
             phase: "PLAN",
           }),
-        ),
       );
       expect(acknowledgements.every((status) => status.status === "acknowledged")).toBe(true);
     } finally {
       await Promise.all(connections.map((connection) => connection.close()));
     }
 
-    const released = await Promise.all(
-      sessions.map((session, index) =>
+    const released = await mapWithConcurrency(
+      sessions,
+      ADMIN_REQUEST_CONCURRENCY,
+      (session, index) =>
         releaseSurface(server!.runtime, session.identity, claims[index].lease),
-      ),
     );
     expect(released.every(({ released: didRelease }) => didRelease)).toBe(true);
     expect(server.gateway.stats().activeTurnCount).toBe(0);
-  });
+  }, 300_000);
 });

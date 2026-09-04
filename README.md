@@ -20,8 +20,13 @@ The connection is configured once per machine:
   one persistent ChatGPT chat/page inside that Project.
 - Browser operations target the exact owned `tabId`; a visible or recently used
   ChatGPT tab is never treated as the target by accident.
-- There is no fixed or global limit on sessions, pages, turns, or workspaces.
-  Different sessions can run independently. Only turns within the same local
+- The machine supports at most 100 unexpired session/page leases, counted by
+  unique `(projectId, localSessionId)` identities, each representing one
+  workspace-local session owner. Released, expired, and retired leases free
+  capacity. Up to 100 different sessions can run independently; a claim for a
+  new 101st session is rejected with a retryable capacity result and retries
+  after capacity frees. Renewing, idempotently reclaiming, or replacing a page
+  for an existing session reuses its slot. Only turns within the same local
   session are serialized, because one chat has one ordered conversation.
 
 The design keeps the user's ordinary ChatGPT conversations separate. C2C owns
@@ -115,8 +120,8 @@ Tunnel. To disable it:
 c2c autostart disable --json
 ```
 
-Autostart is a machine convenience, not a page scheduler. It does not add a
-session or page limit.
+Autostart is a machine convenience, not a page scheduler. It does not change
+the machine-wide capacity of 100 active session/page leases.
 
 ## Runtime model
 

@@ -219,7 +219,14 @@ function errorResponse(error: unknown): { status: number; body: { error: string;
       ? error.code
       : "control_failed";
   return {
-    status: code.includes("NOT_FOUND") ? 404 : code.includes("MISMATCH") ? 409 : 400,
+    status:
+      code === "SESSION_CAPACITY_REACHED"
+        ? 429
+        : code.includes("NOT_FOUND")
+          ? 404
+          : code.includes("MISMATCH")
+            ? 409
+            : 400,
     body: { error: code.toLowerCase(), message: error instanceof Error ? error.message : String(error) },
   };
 }

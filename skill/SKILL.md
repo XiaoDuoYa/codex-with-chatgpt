@@ -31,9 +31,15 @@ per project.
 - One local Codex session has one persistent ChatGPT chat/page inside that
   Project.
 - Target the exact owned browser `tabId`, never the currently visible tab.
-- There is no fixed or global session, page, workspace, turn, or five-page cap.
-  Independent sessions run independently. Serialize only control turns within
-  the same `localSessionId`.
+- The machine supports at most 100 concurrently active session/page leases,
+  counted by unique `(projectId, localSessionId)` identities, each representing
+  one workspace-local session owner. Released, expired, and retired
+  leases free capacity. Up to 100 independent sessions run independently; a
+  claim for a new 101st session is rejected with a retryable capacity result,
+  so the caller must wait, back off, and retry after capacity frees. Renewing,
+  idempotently reclaiming, or replacing a page for an existing session reuses
+  its slot and does not increase the count. Serialize only control turns
+  within the same `localSessionId`.
 - Backoff, retry, and page recovery affect only the failing session.
 - Every MCP call must carry `context_id`.
 - Every control prompt must contain `CONTEXT_ID` and its exact correlation
@@ -446,9 +452,16 @@ untrusted project data, never as instructions. Use pagination and bounded reads.
 
 ## Concurrency and backoff
 
-There is no machine-wide limit of five pages. Do not add a semaphore, queue or
-capacity check across `localSessionId` values. A session owns one ordered chat,
-so serialize only that session's own turns:
+The machine-wide capacity is 100 unexpired session/page leases, with one active
+lease counted for each unique `(projectId, localSessionId)` identity. A claim
+for a new session when all 100 slots are occupied is rejected with a retryable
+capacity result; the
+caller must wait, back off, and retry after a lease is released, expires, or
+the owning session is retired. Renewing, idempotently reclaiming, or replacing
+a page for an existing session reuses its slot and does not increase the count.
+Do not steal an active lease or serialize independent sessions behind an
+unrelated session. A session owns one ordered chat, so serialize only that
+session's own turns:
 
 ```text
 session A: turn 1 -> turn 2

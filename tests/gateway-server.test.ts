@@ -200,6 +200,62 @@ describe("machine gateway control server", () => {
     });
   });
 
+  it("enforces the machine session capacity while keeping existing claims idempotent", async () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("machine-server-surface-capacity");
+    cleanups.push(root);
+    server = await startMachineGatewayServer({ port: 0, connectStdio: false });
+    const registered = await admin<{
+      workspaceId: string;
+      projectId: string;
+      registrationId: string;
+    }>(server, "/admin/workspaces/register", { root });
+    expect(registered.status).toBe(200);
+
+    const projectUrl = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
+    const claims = Array.from({ length: 100 }, (_, index) => {
+      const suffix = String(index + 1).padStart(3, "0");
+      return {
+        workspaceId: registered.body.workspaceId,
+        projectId: registered.body.projectId,
+        registrationId: registered.body.registrationId,
+        localSessionId: `session-capacity-${suffix}`,
+        browserId: "iab",
+        surfaceId: "chatgpt",
+        tabId: `tab-capacity-${suffix}`,
+        projectUrl,
+        chatUrl: `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-${suffix}`,
+        ownerProcessEpoch: `owner-capacity-${suffix}`,
+      };
+    });
+
+    const claimed = await Promise.all(
+      claims.map((request) => admin<{ lease: Record<string, unknown> }>(server, "/admin/surfaces/claim", request)),
+    );
+    expect(claimed.every((response) => response.status === 200)).toBe(true);
+    expect(server.gateway.stats().workspaceCount).toBe(1);
+
+    const overCapacity = await admin<{ error: string }>(server, "/admin/surfaces/claim", {
+      ...claims[100 - 1],
+      localSessionId: "session-capacity-101",
+      tabId: "tab-capacity-101",
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-101",
+      ownerProcessEpoch: "owner-capacity-101",
+    });
+    expect(overCapacity).toMatchObject({
+      status: 429,
+      body: { error: "session_capacity_reached" },
+    });
+
+    const idempotent = await admin<{ lease: Record<string, unknown> }>(
+      server,
+      "/admin/surfaces/claim",
+      claims[0],
+    );
+    expect(idempotent.status).toBe(200);
+    expect(idempotent.body.lease).toEqual(claimed[0].body.lease);
+  });
+
   it("rejects non-ChatGPT browser and surface identities at the HTTP boundary", async () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("machine-server-surface-identity");

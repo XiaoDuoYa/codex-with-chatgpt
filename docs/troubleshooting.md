@@ -132,9 +132,14 @@ Check these values:
   `--replace-generation` and `--replace-tab-id` pair.
 - The replacement generation equals the current lease exactly.
 
-The session owns one page, but the machine has no global page cap. A different
-session should create its own Project chat and claim its own tab instead of
-reusing this one.
+The session owns one page. The machine permits 100 unexpired session/page
+leases, counted by unique `(projectId, localSessionId)` identities, each
+representing one workspace-local session owner. A different session should
+create its own Project chat and claim its own tab instead of reusing this one.
+If all 100 leases are held, a new-session claim is rejected with a retryable
+capacity result; wait, back off, and retry after a lease is released, expires,
+or the owning session is retired. Renewing, idempotently reclaiming, or
+replacing a page for an existing session reuses its slot.
 
 ## `control open` reports `CONTROL_REQUEST_ALREADY_OPEN`
 
@@ -183,9 +188,13 @@ surface and workspace checks pass.
 ## One session is slow
 
 Backoff and retry only that session. Other sessions do not share its queue or
-page lease. C2C has no fixed “five pages” limit and does not introduce a global
-semaphore. ChatGPT or the browser may have external service limits; those must
-be diagnosed from the affected session's page and request.
+page lease. Up to 100 unique `(projectId, localSessionId)` identities can hold
+unexpired session/page leases concurrently. When all 100 slots are occupied, a new-session
+claim is rejected with a retryable capacity result and retries after a lease is
+released, expires, or the owning session is retired. Renewals, idempotent
+claims, and page replacements for an existing session reuse its slot. ChatGPT
+or the browser may have external service limits; those must be diagnosed from
+the affected session's page and request.
 
 ## The page was closed or moved
 

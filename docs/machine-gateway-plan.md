@@ -15,8 +15,13 @@ second connection path is required.
 6. Give every local Codex session one persistent Project chat and one owned
    browser page.
 7. Target the exact page `tabId`; never infer ownership from visibility.
-8. Allow unlimited cross-session pages and turns. Serialize only a single
-   session's ordered control turns.
+8. Allow up to 100 concurrently active cross-session pages, counted by unique
+   `(projectId, localSessionId)` identities, each representing one
+   workspace-local session owner. When all 100 unexpired leases are held, a
+   claim for a new 101st session is rejected with a retryable capacity result; it waits,
+   backs off, and retries after capacity frees. Renewing, idempotently claiming,
+   or replacing a page for an existing session does not consume another slot.
+   Serialize only a single session's ordered control turns.
 9. Scope backoff, retry and browser recovery to the affected session.
 10. Require `context_id` on every MCP call and `CONTEXT_ID` in every control
     prompt.
@@ -118,11 +123,19 @@ machine boots is rejected; mailbox failure never becomes a false completion.
 - Keep a machine-wide generation allocator monotonic across release, expiry,
   and session retirement while pruning inactive per-session entries.
 - Permit live replacement only with the exact current generation.
-- Do not impose a machine-wide tab or session count.
+- Limit concurrently active session/page leases to 100 unexpired leases held by
+  unique `(projectId, localSessionId)` identities, each representing one
+  workspace-local session owner. Released, expired, and retired leases free
+  capacity; a new-session claim in slot 101 is rejected with a retryable
+  capacity result and retries after a slot is available. Renewals, idempotent
+  claims, and page replacements for an existing session reuse its slot.
 
 Acceptance: two local sessions in one Project own different tabs and can submit
-independently; another workspace cannot reuse that Project or either tab; a
-stale session or edited workspace mirror cannot rotate or replay ownership.
+independently; 100 distinct session/page owners can run concurrently; a new
+101st claim is rejected and retries after capacity frees; renewal, idempotent
+claim, or page replacement for an existing session does not add a slot; another
+workspace cannot reuse that Project or either tab; a stale session or edited
+workspace mirror cannot rotate or replay ownership.
 
 ### Layer 7: Mailbox correlation
 
@@ -209,7 +222,7 @@ changed, while an uncertain gateway state fails closed.
 
 ## Non-goals
 
-- A fixed five-page or any global concurrency limit.
+- More than 100 concurrently active session/page leases.
 - A single global “active workspace” selected by whichever page is visible.
 - User-provided absolute paths as ChatGPT authorization.
 - A second MCP broker per workspace.
@@ -226,7 +239,7 @@ changed, while an uncertain gateway state fails closed.
 | Tests | Full Vitest suite, including machine, tunnel, gateway, mailbox and surface tests |
 | Tunnel | Official client checksum/version and child `serve-machine --stdio` |
 | Isolation | Two or more workspaces and sessions route to their own roots/pages |
-| Capacity | More than five session/page owners execute without scheduler rejection |
+| Capacity | 100 unique `(projectId, localSessionId)` identities execute concurrently; a new 101st claim is rejected and retries until a lease releases, expires, or retires |
 | Stale state | Old boot, registration, generation, epoch and context are rejected |
 | Mailbox | Duplicate open, late result, cancellation and write failure are covered |
 | Browser | Exact `tabId` targeting; ordinary user tabs are untouched |
@@ -246,4 +259,5 @@ changed, while an uncertain gateway state fails closed.
 8. Run the full suite, doctor, secret scan, diff check and documentation review.
 
 The rollout is complete only when the one-machine setup works for multiple
-workspaces and sessions without any hard-coded page or session cap.
+workspaces and sessions with the machine-wide 100-lease capacity, independent
+session execution, and retry-after-capacity behavior.

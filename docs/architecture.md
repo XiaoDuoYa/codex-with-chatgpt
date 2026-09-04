@@ -159,11 +159,16 @@ Workspace mirrors are never imported into this authority. A machine-wide
 allocator keeps generations monotonic across release, expiry, and session
 retirement while inactive per-session entries are pruned.
 
-There is deliberately no global page or session semaphore. Five pages may be
-visible in one example, but five is not a product limit. Ten, one hundred, or
-more independent local sessions are valid when the browser and ChatGPT account
-can handle them. Only messages belonging to the same `localSessionId` are
-serialized; independent sessions are never queued behind one another.
+The machine-wide capacity is 100 unexpired session/page leases, counted by
+unique `(projectId, localSessionId)` identities, each representing one
+workspace-local session owner. Up to 100 independent local sessions can own
+pages and run concurrently. When all 100 leases are held, a claim for a new
+101st session is rejected with a retryable capacity result; the caller must
+wait, back off, and retry after a lease is released, expires, or the owning
+session is retired. Renewing, idempotently reclaiming, or replacing a page for
+an existing session reuses its slot and does not increase the count. Only
+messages belonging to the same `localSessionId` are serialized; independent
+sessions are never queued behind one another.
 
 The Skill keeps the owned pages in the built-in browser. Computer Use targets
 the exact `tabId` and uses stable URLs plus semantic DOM operations. The CUA
@@ -223,10 +228,16 @@ Session C: turn 1 -> turn 2 -> ...
 A, B, and C execute independently.
 ```
 
-The mailbox has no global active-request quota. Capability storage has no
-cross-session capacity limit; bounded terminal tombstones and per-turn leases
-are cleanup protections, not a page-concurrency policy. Backoff, retry, and
-browser recovery are scoped to the affected session only.
+The mailbox and capability records do not consume additional page-capacity
+slots. Surface ownership has one machine-wide capacity of 100 unexpired
+session/page leases, with one slot per unique `(projectId, localSessionId)`
+identity. Released,
+expired, and retired leases free their slot; a new-session claim at capacity is
+rejected with a retryable result and retries only after one becomes available.
+Renewals, idempotent claims, and page replacements for an existing session
+reuse its slot. Bounded terminal tombstones and per-turn activity leases
+remain cleanup protections. Backoff, retry, and browser recovery are scoped
+to the affected session only.
 
 Normal mailbox `open`, `ack`, `cancel`, and result operations use a lifecycle
 lock for the specific `localSessionId`; they do not scan or serialize the whole

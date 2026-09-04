@@ -12,6 +12,7 @@ import {
   currentSurfaceBinding,
   currentSurfaceLease,
   listSurfaceLeases,
+  MAX_ACTIVE_SURFACE_SESSIONS,
   reapExpiredSurfaceLeases,
   releaseSurface,
   renewSurface,
@@ -801,17 +802,88 @@ describe("persistent ChatGPT surface ownership", () => {
     );
   });
 
-  it("allows more than five independent sessions without a capacity gate or queue", () => {
+  it("admits 100 active sessions and preserves same-session operations at capacity", () => {
     stateDir();
-    const leases = Array.from({ length: 8 }, (_, index) =>
-      claim(`session-${index + 1}`, `tab-${index + 1}`, {
-        chatUrl: `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-${index + 1}`,
+    expect(MAX_ACTIVE_SURFACE_SESSIONS).toBe(100);
+    const leases = Array.from({ length: MAX_ACTIVE_SURFACE_SESSIONS }, (_, index) =>
+      claimOnly(`session-capacity-${index + 1}`, `tab-capacity-${index + 1}`, {
+        chatUrl: `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-${index + 1}`,
       })
     );
 
-    expect(leases).toHaveLength(8);
-    expect(new Set(leases.map((lease) => lease.localSessionId)).size).toBe(8);
-    expect(listSurfaceLeases("project-alpha", START)).toHaveLength(8);
+    expect(leases).toHaveLength(MAX_ACTIVE_SURFACE_SESSIONS);
+    expect(new Set(leases.map((lease) => lease.localSessionId)).size).toBe(MAX_ACTIVE_SURFACE_SESSIONS);
+
+    const first = leases[0];
+    expect(claimOnly(first.localSessionId, first.tabId, { chatUrl: first.chatUrl })).toEqual(first);
+    const renewed = renewSurface({
+      lease: first,
+      leaseTtlMs: 60_000,
+      now: new Date(START.getTime() + 500),
+    });
+    const rotated = claimOnly(first.localSessionId, "tab-capacity-rotated", {
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-rotated",
+      replaces: renewed,
+      now: new Date(START.getTime() + 500),
+    });
+    expect(rotated.generation).toBe(MAX_ACTIVE_SURFACE_SESSIONS + 1);
+
+    expect(() =>
+      claimOnly("session-capacity-overflow", "tab-capacity-overflow", {
+        chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-overflow",
+      })
+    ).toThrowError(
+      expect.objectContaining<Partial<SurfaceOwnershipError>>({ code: "SESSION_CAPACITY_REACHED" }),
+    );
+    expect(() =>
+      claimOnly(first.localSessionId, "tab-capacity-cross-project", {
+        projectId: "project-beta",
+        projectUrl: OTHER_PROJECT_URL,
+        chatUrl: OTHER_CHAT_URL,
+      })
+    ).toThrowError(
+      expect.objectContaining<Partial<SurfaceOwnershipError>>({ code: "SESSION_CAPACITY_REACHED" }),
+    );
+    expect(listSurfaceLeases("project-alpha", START)).toHaveLength(MAX_ACTIVE_SURFACE_SESSIONS);
+
+    expect(releaseSurface(rotated, new Date(START.getTime() + 500))).toBe(true);
+    expect(claimOnly("session-capacity-after-release", "tab-capacity-after-release", {
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-after-release",
+      now: new Date(START.getTime() + 500),
+    }).localSessionId).toBe("session-capacity-after-release");
+
+    expect(retireSurfaceSession({
+      projectId: "project-alpha",
+      workspaceId: "workspace-alpha",
+      localSessionId: leases[1].localSessionId,
+    }).removedLeases).toBe(1);
+    expect(claimOnly("session-capacity-after-retire", "tab-capacity-after-retire", {
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-after-retire",
+      now: new Date(START.getTime() + 500),
+    }).localSessionId).toBe("session-capacity-after-retire");
+    expect(listSurfaceLeases("project-alpha", new Date(START.getTime() + 500))).toHaveLength(
+      MAX_ACTIVE_SURFACE_SESSIONS,
+    );
+  });
+
+  it("reclaims an expired capacity slot before admitting another session", () => {
+    stateDir();
+    const leases = Array.from({ length: MAX_ACTIVE_SURFACE_SESSIONS }, (_, index) =>
+      claimOnly(`session-expiry-${index + 1}`, `tab-expiry-${index + 1}`, {
+        chatUrl: `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-expiry-${index + 1}`,
+        leaseTtlMs: index === 0 ? 1_000 : 60_000,
+      })
+    );
+    const afterExpiry = new Date(START.getTime() + 1_001);
+
+    const admitted = claimOnly("session-expiry-replacement", "tab-expiry-replacement", {
+      chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-expiry-replacement",
+      now: afterExpiry,
+    });
+
+    expect(admitted.localSessionId).toBe("session-expiry-replacement");
+    expect(listSurfaceLeases("project-alpha", afterExpiry)).toHaveLength(MAX_ACTIVE_SURFACE_SESSIONS);
+    expect(currentSurfaceLease("project-alpha", leases[0].localSessionId, afterExpiry)).toBeNull();
   });
 
   it("reclaims expired leases on restart while preserving tab binding and generation", () => {

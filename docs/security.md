@@ -122,9 +122,15 @@ never imported as authority. A machine-wide monotonic generation allocator
 prevents a workspace edit or retired session from replaying an older page
 generation; inactive per-session entries can therefore be pruned safely.
 
-There is no cross-session page or concurrency quota. Resource pressure may come
-from the browser or ChatGPT service, but C2C does not silently serialize or
-drop unrelated sessions. Only one session's own turns are ordered.
+The machine permits 100 unexpired session/page leases, counted by unique
+`(projectId, localSessionId)` identities, each representing one workspace-local
+session owner. Released, expired, and retired leases free capacity.
+A claim for a new 101st session is rejected with a retryable capacity result and
+must wait, back off, and retry after a slot becomes available. Renewals,
+idempotent claims, and page replacements for an existing session reuse its slot
+and do not add capacity usage. Resource pressure may still come from the
+browser or ChatGPT service, but C2C does not silently serialize unrelated
+sessions. Only one session's own turns are ordered.
 
 ## Machine runtime security
 
