@@ -88,6 +88,9 @@ describe("checkGitUpdate", () => {
 
     const runner = (_command: string, args: string[], options: { cwd: string }) => {
       if (args.includes("build")) write(options.cwd, "dist/cli/index.js", "runtime\n");
+      if (args.includes("--prod")) {
+        fs.mkdirSync(path.join(options.cwd, "node_modules"), { recursive: true });
+      }
       return { status: 0, stdout: "deployed", stderr: "" };
     };
     installRuntime({ stateRoot, checkoutRoot: source, homeDir, runner });

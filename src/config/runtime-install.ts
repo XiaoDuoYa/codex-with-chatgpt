@@ -467,7 +467,15 @@ function buildRuntimeSource(
 ): void {
   copyTrackedSource(sourceRoot, buildStage, revision);
   validateBuildInputs(buildStage);
-  const packageManager = runtimePackageManager(options, ["install", "--frozen-lockfile", "--ignore-scripts"]);
+  const packageManager = runtimePackageManager(options, [
+    "install",
+    "--frozen-lockfile",
+    "--ignore-scripts",
+    "--store-dir",
+    path.join(buildStage, ".pnpm-store"),
+    "--package-import-method",
+    "copy",
+  ]);
   runRuntimeCommand(
     packageManager.command,
     packageManager.args,
@@ -497,92 +505,34 @@ function chmodCopiedPath(file: string, mode: number): void {
   }
 }
 
-/**
- * Copy a checkout dependency tree while resolving pnpm's internal symlinks.
- *
- * A clean HOME has neither pnpm's metadata mirror nor its content-addressable
- * store, but a checkout that was just built already has the exact dependency
- * tree required by the compiled runtime. Keep the copy confined to that
- * checkout's node_modules directory so a malicious dependency link cannot
- * make the machine installation copy arbitrary files.
- */
-function copyDereferencedTree(source: string, target: string, root: string, visiting = new Set<string>()): void {
-  const stat = fs.lstatSync(source);
-  if (stat.isSymbolicLink()) {
-    const resolved = canonicalPath(source);
-    if (!isWithin(root, resolved)) {
-      throw new Error(`Runtime dependency link points outside node_modules: ${source}`);
-    }
-    if (visiting.has(resolved)) {
-      throw new Error(`Runtime dependency tree contains a symlink cycle: ${source}`);
-    }
-    visiting.add(resolved);
-    try {
-      copyDereferencedTree(resolved, target, root, visiting);
-    } finally {
-      visiting.delete(resolved);
-    }
-    return;
+function validateDependencyLinks(nodeModules: string): void {
+  const stat = lstatIfExists(nodeModules);
+  if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("Runtime production dependencies were not installed into a private node_modules directory");
   }
-  if (stat.isDirectory()) {
-    fs.mkdirSync(target, { recursive: true, mode: 0o700 });
-    for (const entry of fs.readdirSync(source)) {
-      copyDereferencedTree(path.join(source, entry), path.join(target, entry), root, visiting);
+  const root = fs.realpathSync(nodeModules);
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory)) {
+      const file = path.join(directory, entry);
+      const entryStat = fs.lstatSync(file);
+      if (entryStat.isSymbolicLink()) {
+        let resolved: string;
+        try {
+          resolved = fs.realpathSync(file);
+        } catch {
+          throw new Error(`Runtime dependency link is broken: ${file}`);
+        }
+        if (!isWithin(root, resolved)) {
+          throw new Error(`Runtime dependency link points outside node_modules: ${file}`);
+        }
+      } else if (entryStat.isDirectory()) {
+        visit(file);
+      } else if (!entryStat.isFile()) {
+        throw new Error(`Runtime dependency is not a regular file: ${file}`);
+      }
     }
-    chmodCopiedPath(target, stat.mode);
-    return;
-  }
-  if (!stat.isFile()) throw new Error(`Runtime dependency is not a regular file: ${source}`);
-  fs.copyFileSync(source, target);
-  chmodCopiedPath(target, stat.mode);
-}
-
-function packageDependencyNames(sourceRoot: string): { required: string[]; optional: string[] } {
-  let packageJson: unknown;
-  try {
-    packageJson = JSON.parse(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8"));
-  } catch (error) {
-    throw new Error(`Runtime source has invalid package.json: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const manifest = packageJson as {
-    dependencies?: Record<string, unknown>;
-    optionalDependencies?: Record<string, unknown>;
   };
-  const names = (value: Record<string, unknown> | undefined): string[] =>
-    Object.keys(value ?? {}).filter((name) => name.trim() !== "").sort();
-  const optional = names(manifest.optionalDependencies);
-  const optionalSet = new Set(optional);
-  return {
-    required: names(manifest.dependencies).filter((name) => !optionalSet.has(name)),
-    optional,
-  };
-}
-
-/** Copy only the production dependency closure already materialized by pnpm. */
-function bundleProductionDependencies(sourceRoot: string, stage: string): boolean {
-  const sourceNodeModules = path.join(sourceRoot, "node_modules");
-  const nodeModulesStat = lstatIfExists(sourceNodeModules);
-  if (!nodeModulesStat || !nodeModulesStat.isDirectory() || nodeModulesStat.isSymbolicLink()) return false;
-
-  const { required, optional } = packageDependencyNames(sourceRoot);
-  const sourceRootCanonical = canonicalPath(sourceNodeModules);
-  const available = (name: string): boolean => {
-    const dependency = path.join(sourceNodeModules, name);
-    const stat = lstatIfExists(dependency);
-    return stat !== null && (stat.isDirectory() || stat.isFile() || stat.isSymbolicLink());
-  };
-  if (required.some((name) => !available(name))) return false;
-
-  const targetNodeModules = path.join(stage, "node_modules");
-  fs.mkdirSync(targetNodeModules, { recursive: true, mode: 0o700 });
-  for (const name of [...required, ...optional.filter(available)]) {
-    copyDereferencedTree(
-      path.join(sourceNodeModules, name),
-      path.join(targetNodeModules, name),
-      sourceRootCanonical,
-    );
-  }
-  return true;
+  visit(nodeModules);
 }
 
 function validateRuntimeTree(root: string): { packageVersion: string } {
@@ -650,20 +600,17 @@ function installProductionDependencies(
 ): void {
   const timeoutMs = options.timeoutMs ?? RUNTIME_INSTALL_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("runtime install timeout must be a positive integer");
-  if (bundleProductionDependencies(sourceRoot, stage)) {
-    commands.push({
-      status: 0,
-      stdout: "production dependencies copied from checkout node_modules",
-      stderr: "",
-    });
-    return;
-  }
+  const nodeModules = path.join(stage, "node_modules");
   const packageManager = runtimePackageManager(options, [
     "install",
     "--prod",
     "--offline",
     "--frozen-lockfile",
     "--ignore-scripts",
+    "--store-dir",
+    path.join(sourceRoot, ".pnpm-store"),
+    "--package-import-method",
+    "copy",
   ]);
   runRuntimeCommand(
     packageManager.command,
@@ -674,6 +621,18 @@ function installProductionDependencies(
     commands,
     "production dependency install failed",
   );
+  validateDependencyLinks(nodeModules);
+}
+
+function verifyRuntimeLaunch(stage: string, timeoutMs: number): void {
+  const result = defaultRunner(process.execPath, [path.join(stage, "bin", "c2c.js"), "--help"], {
+    cwd: stage,
+    timeoutMs: Math.min(timeoutMs, 30_000),
+  });
+  if (result.status !== 0) {
+    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    throw new Error(`Runtime startup verification failed${detail ? `: ${detail}` : ` (status ${result.status})`}`);
+  }
 }
 
 function publishStage(stage: string, current: string, installation: string): void {
@@ -958,6 +917,7 @@ export function installRuntime(options: RuntimeInstallOptions = {}): RuntimeInst
           contentDigest: computeContentDigest(stage, RUNTIME_DEPLOYMENT_INPUTS),
         });
         const stagedPackage = validateRuntimeTree(stage);
+        verifyRuntimeLaunch(stage, options.timeoutMs ?? RUNTIME_INSTALL_TIMEOUT_MS);
         publishStage(stage, current, installation);
         published = true;
         removePath(buildStage);

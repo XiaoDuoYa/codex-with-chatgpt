@@ -53,6 +53,9 @@ function successfulInstall() {
       const packageJson = JSON.parse(fs.readFileSync(path.join(options.cwd, "package.json"), "utf8")) as { version: string };
       write(options.cwd, "dist/cli/index.js", `built runtime ${packageJson.version}\n`);
     }
+    if (args.includes("--prod")) {
+      fs.mkdirSync(path.join(options.cwd, "node_modules"), { recursive: true });
+    }
     return { status: 0, stdout: "deployed", stderr: "" };
   });
 }
@@ -87,7 +90,7 @@ describe("machine runtime installation", () => {
     expect(linkDigest).not.toBe(computeContentDigest(sourceRoot, ["docs"]));
   });
 
-  it("uses the checkout production dependency bundle without pnpm metadata", () => {
+  it("installs a complete pnpm production dependency graph into the deployment", () => {
     const stateRoot = makeTmpDir("runtime-bundled-state");
     const sourceRoot = makeSource();
     const homeDir = makeTmpDir("runtime-bundled-home");
@@ -98,40 +101,126 @@ describe("machine runtime installation", () => {
       JSON.stringify({
         name: "codex-with-chatgpt",
         version: "0.1.1",
-        dependencies: { fixture: "1.0.0" },
+        dependencies: { "fixture-parent": "1.0.0" },
       }),
     );
-    git(sourceRoot, "add", "package.json");
+    write(sourceRoot, "bin/c2c.js", "#!/usr/bin/env node\nrequire('../dist/cli/index.js');\n");
+    git(sourceRoot, "add", "package.json", "bin/c2c.js");
     git(sourceRoot, "commit", "-m", "runtime dependency fixture");
+    const materializeGraph = (nodeModules: string): void => {
+      const parentStore = ".pnpm/fixture-parent@1.0.0/node_modules";
+      write(
+        nodeModules,
+        `${parentStore}/fixture-parent/package.json`,
+        JSON.stringify({ name: "fixture-parent", version: "1.0.0", main: "index.js" }),
+      );
+      write(nodeModules, `${parentStore}/fixture-parent/index.js`, "module.exports = require('fixture-child');\n");
+      write(
+        nodeModules,
+        ".pnpm/fixture-child@1.0.0/node_modules/fixture-child/package.json",
+        JSON.stringify({ name: "fixture-child", version: "1.0.0", main: "index.js" }),
+      );
+      write(nodeModules, ".pnpm/fixture-child@1.0.0/node_modules/fixture-child/index.js", "module.exports = 42;\n");
+      fs.symlinkSync(
+        "../../fixture-child@1.0.0/node_modules/fixture-child",
+        path.join(nodeModules, parentStore, "fixture-child"),
+        "dir",
+      );
+      fs.symlinkSync(
+        ".pnpm/fixture-parent@1.0.0/node_modules/fixture-parent",
+        path.join(nodeModules, "fixture-parent"),
+        "dir",
+      );
+    };
     const runner = vi.fn((_command: string, args: string[], options: { cwd: string; timeoutMs: number }) => {
-      if (args.includes("build")) write(options.cwd, "dist/cli/index.js", "built runtime 0.1.1\n");
+      if (args.includes("build")) {
+        write(
+          options.cwd,
+          "dist/cli/index.js",
+          "const value = require('fixture-parent'); if (value !== 42) throw new Error('transitive dependency missing');\n",
+        );
+      }
       if (args.includes("--frozen-lockfile") && !args.includes("--prod")) {
-        write(options.cwd, "node_modules/fixture/package.json", JSON.stringify({ name: "fixture", version: "1.0.0" }));
-        write(options.cwd, "node_modules/fixture/index.js", "module.exports = 42;\n");
+        materializeGraph(path.join(options.cwd, "node_modules"));
+      }
+      if (args.includes("--prod")) {
+        materializeGraph(path.join(options.cwd, "node_modules"));
       }
       return { status: 0, stdout: "deployed", stderr: "" };
     });
 
     const result = installRuntime({ stateRoot, checkoutRoot: sourceRoot, homeDir, runner });
 
-    expect(runner).toHaveBeenCalledTimes(2);
-    expect(result.commands).toEqual([
-      expect.objectContaining({ status: 0 }),
-      expect.objectContaining({ status: 0 }),
-      expect.objectContaining({
-        status: 0,
-        stdout: "production dependencies copied from checkout node_modules",
-      }),
+    expect(runner).toHaveBeenCalledTimes(3);
+    const productionCall = runner.mock.calls.find(([, args]) => args.includes("--prod"));
+    expect(productionCall).toBeDefined();
+    expect(productionCall?.[1]).toEqual([
+      "pnpm",
+      "install",
+      "--prod",
+      "--offline",
+      "--frozen-lockfile",
+      "--ignore-scripts",
+      "--store-dir",
+      expect.stringContaining(`${path.sep}.build-`),
+      "--package-import-method",
+      "copy",
     ]);
-    expect(result.commands).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        status: 0,
-        stdout: "production dependencies copied from checkout node_modules",
-      }),
-    ]));
-    expect(fs.readFileSync(path.join(runtimeCurrentPath(stateRoot), "node_modules/fixture/index.js"), "utf8")).toBe(
-      "module.exports = 42;\n",
+    expect(productionCall?.[2].cwd).toBe(fs.realpathSync(runtimeCurrentPath(stateRoot)));
+    expect(result.commands).toHaveLength(3);
+    expect(fs.lstatSync(path.join(runtimeCurrentPath(stateRoot), "node_modules/fixture-parent")).isSymbolicLink()).toBe(
+      true,
     );
+    expect(
+      fs.readFileSync(
+        path.join(runtimeCurrentPath(stateRoot), "node_modules/.pnpm/fixture-child@1.0.0/node_modules/fixture-child/index.js"),
+        "utf8",
+      ),
+    ).toBe("module.exports = 42;\n");
+  });
+
+  it("rejects a runtime that cannot load after its production install", () => {
+    const stateRoot = makeTmpDir("runtime-smoke-state");
+    const sourceRoot = makeSource();
+    const homeDir = makeTmpDir("runtime-smoke-home");
+    dirs.push(stateRoot, homeDir);
+    write(sourceRoot, "bin/c2c.js", "#!/usr/bin/env node\nrequire('../dist/cli/index.js');\n");
+    git(sourceRoot, "add", "bin/c2c.js");
+    git(sourceRoot, "commit", "-m", "runtime smoke fixture");
+    const runner = vi.fn((_command: string, args: string[], options: { cwd: string }) => {
+      if (args.includes("build")) write(options.cwd, "dist/cli/index.js", "require('missing-runtime-package');\n");
+      if (args.includes("--prod")) {
+        fs.mkdirSync(path.join(options.cwd, "node_modules"), { recursive: true });
+      }
+      return { status: 0, stdout: "deployed", stderr: "" };
+    });
+
+    expect(() => installRuntime({ stateRoot, checkoutRoot: sourceRoot, homeDir, runner })).toThrow(
+      /Runtime startup verification failed/,
+    );
+    expect(fs.existsSync(runtimeCurrentPath(stateRoot))).toBe(false);
+  });
+
+  it("rejects production dependency links outside the deployment", () => {
+    const stateRoot = makeTmpDir("runtime-dependency-link-state");
+    const sourceRoot = makeSource();
+    const homeDir = makeTmpDir("runtime-dependency-link-home");
+    const outside = makeTmpDir("runtime-dependency-link-outside");
+    dirs.push(stateRoot, homeDir, outside);
+    const runner = vi.fn((_command: string, args: string[], options: { cwd: string }) => {
+      if (args.includes("build")) write(options.cwd, "dist/cli/index.js", "runtime\n");
+      if (args.includes("--prod")) {
+        const nodeModules = path.join(options.cwd, "node_modules");
+        fs.mkdirSync(nodeModules, { recursive: true });
+        fs.symlinkSync(outside, path.join(nodeModules, "escape"), "dir");
+      }
+      return { status: 0, stdout: "deployed", stderr: "" };
+    });
+
+    expect(() => installRuntime({ stateRoot, checkoutRoot: sourceRoot, homeDir, runner })).toThrow(
+      /dependency link points outside node_modules/,
+    );
+    expect(fs.existsSync(runtimeCurrentPath(stateRoot))).toBe(false);
   });
 
   it("deploys the built package with pnpm --prod and publishes a fixed current link", () => {
@@ -147,7 +236,18 @@ describe("machine runtime installation", () => {
 
     expect(runner).toHaveBeenCalledWith(
       "corepack",
-      ["pnpm", "install", "--prod", "--offline", "--frozen-lockfile", "--ignore-scripts"],
+      [
+        "pnpm",
+        "install",
+        "--prod",
+        "--offline",
+        "--frozen-lockfile",
+        "--ignore-scripts",
+        "--store-dir",
+        expect.stringContaining(`${path.sep}.build-`),
+        "--package-import-method",
+        "copy",
+      ],
       { cwd: expect.stringContaining(`${path.sep}.stage-`), timeoutMs: expect.any(Number) },
     );
     expect(fs.readFileSync(path.join(sourceRoot, "package.json"), "utf8")).toBe(sourcePackage);
@@ -298,7 +398,9 @@ exec "$C2C_TEST_REAL_GIT" "$@"
     const previousEntry = fs.readFileSync(runtimeEntryPath(stateRoot), "utf8");
     const runner = vi.fn((_command: string, args: string[], options: { cwd: string }): RuntimeCommandResult => {
       if (args.includes("build")) write(options.cwd, "dist/cli/index.js", "built runtime 1.0.0\n");
-      if (options.cwd.includes(`${path.sep}.stage-`)) {
+      if (args.includes("--prod")) {
+        const nodeModules = path.join(options.cwd, "node_modules");
+        fs.mkdirSync(nodeModules, { recursive: true });
         fs.rmSync(path.join(options.cwd, "docs"), { recursive: true, force: true });
       }
       return { status: 0, stdout: "deployed", stderr: "" };
