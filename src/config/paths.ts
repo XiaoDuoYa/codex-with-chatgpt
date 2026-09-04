@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 
 /**
  * State directory resolution, following OS conventions.
@@ -33,13 +34,43 @@ export function stateSubdir(name: string): string {
 
 /** Write a JSON file with owner-only permissions. */
 export function writeSecureJson(file: string, data: unknown): void {
+  const payload = JSON.stringify(data, null, 2);
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const temp = `${file}.${process.pid}-${randomUUID()}.tmp`;
   try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // best effort on platforms without chmod semantics
+    const fd = fs.openSync(temp, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, payload);
+      fs.fdatasyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    renameWithRetry(temp, file);
+  } finally {
+    try {
+      fs.rmSync(temp, { force: true });
+    } catch {
+      // best effort; rename success already removed the temporary file
+    }
   }
+}
+
+function renameWithRetry(temp: string, file: string): void {
+  let lastError: unknown;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      fs.renameSync(temp, file);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY" && code !== "EEXIST") throw error;
+      lastError = error;
+      // Synchronous backoff for Windows sharing violations.
+      Atomics.wait(sleeper, 0, 0, 10 * 2 ** attempt);
+    }
+  }
+  throw lastError;
 }
 
 export function readJsonIfExists<T>(file: string): T | null {
