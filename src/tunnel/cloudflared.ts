@@ -10,6 +10,7 @@ const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
 const HEALTH_CHECK_INTERVAL_MS = 250;
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const DNS_PROPAGATION_DELAY_MS = 10_000;
 
 function isBridgeHealth(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
@@ -53,6 +54,7 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  dnsPropagationDelayMs?: number;
   spawnImpl?: (
     command: string,
     args: string[],
@@ -72,6 +74,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private url: string | null = null;
   private lastError: string | null = null;
   private readonly startTimeoutMs: number;
+  private readonly dnsPropagationDelayMs: number;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
   private starting: Promise<string> | null = null;
@@ -82,7 +85,8 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     private readonly binaryOverride?: string,
     options: CloudflaredQuickTunnelOptions = {}
   ) {
-    this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.startTimeoutMs = options.startTimeoutMs ?? 75_000;
+    this.dnsPropagationDelayMs = options.dnsPropagationDelayMs ?? DNS_PROPAGATION_DELAY_MS;
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
@@ -190,6 +194,11 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       const waitForHealth = async (): Promise<void> => {
         const publicUrl = candidateUrl;
         if (!publicUrl) return;
+        // A probe before the hostname resolves gets NXDOMAIN negative-cached by the OS
+        // resolver for minutes, which outlives the whole start window.
+        if (this.dnsPropagationDelayMs > 0) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, this.dnsPropagationDelayMs));
+        }
         while (!settled) {
           if (!isAlive()) {
             fail(new Error("cloudflared exited before the public health endpoint became ready"));

@@ -47,6 +47,7 @@ function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
     spawnImpl,
     fetchImpl,
     startTimeoutMs,
+    dnsPropagationDelayMs: 0,
   });
   return { child, spawnImpl, tunnel };
 }
