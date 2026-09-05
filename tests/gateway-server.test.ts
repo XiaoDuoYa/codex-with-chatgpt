@@ -478,7 +478,9 @@ describe("machine gateway control server", () => {
       tabId: surface.tabId, generation: surface.generation, chatUrl,
       bootEpoch: server.runtime.bootEpoch, observedAt: new Date().toISOString(),
       chatgptAccount: "fixture-account",
+      requestedOperations: [{ plugin: "GitHub", tool: "read_repository" }],
       plugins: [{ id: "GitHub", availability: "available", usesGitHub: true,
+        tools: [{ tool: "read_repository", availability: "available", effect: "read" }],
         githubActor: { login: "fixture-user", id: "123", source: "authenticated-profile" } }],
       github: { repository: { host: "github.com", owner: "fixture-user", name: "fixture-repo" },
         expectedActor: { login: "fixture-user", id: "123" } },
@@ -487,7 +489,7 @@ describe("machine gateway control server", () => {
       ...turn, phase: "RESEARCH", taskId: "task-profile", requestId: "request-profile",
       pluginIntent: "identity-discovery", scopes: ["c2c.result.write"],
       pluginPreflight: {
-        ...proof, phase: "RESEARCH", taskId: "task-profile", github: undefined,
+        ...proof, phase: "RESEARCH", taskId: "task-profile", github: undefined, requestedOperations: undefined,
         plugins: [{ id: "GitHub", availability: "available", usesGitHub: true, authenticatedProfileTool: "get_authenticated_user" }],
       },
     };
@@ -514,6 +516,8 @@ describe("machine gateway control server", () => {
       undefined,
       { ...proof, tabId: "another-tab" },
       { ...proof, bootEpoch: "another-epoch" },
+      { ...proof, requestedOperations: undefined },
+      { ...proof, plugins: [{ ...proof.plugins[0], tools: [{ tool: "read_repository", availability: "available", effect: "write" }] }] },
       { ...proof, plugins: [{ ...proof.plugins[0], githubActor: { login: "wrong-user", id: "456", source: "authenticated-profile" } }] },
     ]) {
       const rejected = await admin(server, "/admin/turns/issue", { ...turn, pluginPreflight });

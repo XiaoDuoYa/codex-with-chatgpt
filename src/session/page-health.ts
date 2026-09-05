@@ -26,6 +26,8 @@ export type PageRecoveryAction =
   | "resume-chat" | "verify-candidate" | "reopen-chat" | "create-project-chat"
   | "bind-project" | "wait" | "user-action" | "inspect-page";
 
+export type PageTabAction = "keep" | "navigate-owned" | "create" | "inspect";
+
 /** Browser observations come from the trusted host, never from a ChatGPT MCP call. */
 export function assessPageHealth(surface: PageRouteState, input: PageObservation) {
   const observation = pageObservationSchema.parse(input);
@@ -36,8 +38,12 @@ export function assessPageHealth(surface: PageRouteState, input: PageObservation
   }
   const projectUrl = surface.projectUrl ?? owned.projectUrl;
   const chatUrl = surface.lease ? surface.lease.chatUrl : surface.binding?.chatUrl;
-  const decision = (action: PageRecoveryAction, reason: string, targetUrl: string | null = null) => ({
+  const decision = (
+    action: PageRecoveryAction, reason: string, targetUrl: string | null = null,
+    tabAction: PageTabAction = "keep",
+  ) => ({
     action,
+    tabAction,
     reason,
     targetUrl,
     controlReady: action === "resume-chat",
@@ -48,17 +54,13 @@ export function assessPageHealth(surface: PageRouteState, input: PageObservation
     return decision("user-action", observation.state);
   }
   if (observation.state === "missing") {
-    return decision(chatUrl ? "reopen-chat" : "create-project-chat", "tab-missing", chatUrl ?? projectUrl);
+    return decision(chatUrl ? "reopen-chat" : "create-project-chat", "tab-missing", chatUrl ?? projectUrl, "create");
   }
   if (observation.state === "loading" || observation.state === "generating") {
     return decision("wait", observation.state);
   }
   if (!observation.url || observation.state === "unknown") {
-    return decision("inspect-page", "page-state-unconfirmed");
-  }
-  // An unavailable page can redirect home. Only the stored Project selects the replacement.
-  if (observation.state === "archived" || observation.state === "unavailable") {
-    return decision(projectUrl ? "create-project-chat" : "bind-project", observation.state, projectUrl);
+    return decision("inspect-page", "page-state-unconfirmed", null, "inspect");
   }
   const observedChat = normalizeChatUrl(observation.url);
   const routeMatches = chatUrl
@@ -66,7 +68,12 @@ export function assessPageHealth(surface: PageRouteState, input: PageObservation
     : normalizeProjectUrl(observation.url) === normalizeProjectUrl(projectUrl) ||
       (observedChat !== null && projectIdFromChatUrl(observedChat) === projectIdFromUrl(projectUrl));
   if (!routeMatches) {
-    return decision(chatUrl ? "reopen-chat" : "create-project-chat", "url-mismatch", chatUrl ?? projectUrl);
+    return decision(chatUrl ? "reopen-chat" : "create-project-chat", "url-mismatch", chatUrl ?? projectUrl, "create");
+  }
+  // Do not overwrite a user-navigated tab or infer failure of the saved chat from another URL.
+  if (observation.state === "archived" || observation.state === "unavailable") {
+    if (!chatUrl) return decision("inspect-page", "candidate-state-unconfirmed", null, "inspect");
+    return decision("create-project-chat", observation.state, projectUrl, "navigate-owned");
   }
   const committed = surface.lease && surface.binding &&
     surface.lease.generation === surface.binding.lastGeneration &&

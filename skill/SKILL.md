@@ -241,6 +241,23 @@ page in the background. Do not focus, activate, or bring a page to the
 foreground for a normal control turn. Mark handoff at the start and end of
 every turn, leave completed pages in standby, and do not close them.
 
+The marked progress page belongs to the **local session**, not to a task,
+phase, model or context token. A new task or PLAN/REVIEW turn reuses the same
+tab and chat; it never creates another page or repeats BOOT on a healthy,
+committed route. Call `tab.markHandoff()` on that same page each turn. A mark
+or title is only a retention aid, not ownership evidence. Different local
+sessions still keep separate pages.
+
+Avoid helper tabs during ordinary work; inspect the current chat's picker in
+place. If setup truly requires a settings tab, create at most one hidden,
+turn-local helper and keep its exact returned handle and purpose. Do not mark
+it for handoff. Close it with `helper.close()` when done (also on failure),
+after a fresh check confirms it is still the helper you created and no user
+has taken it over. Never close the progress page, another session's page, or
+an old tab whose creation/ownership cannot be established. Do not scan and
+close tabs by URL/title. No cross-turn helper cleanup is inferred from a
+route file; uncertain cleanup is reported, not retried against guessed tabs.
+
 Allowed ChatGPT destinations are direct URLs:
 
 ```text
@@ -370,9 +387,20 @@ independent browser probe; never invent observations from local route metadata.
 - `unknown`: ambiguous errors, missing composer alone, or unconfirmed UI; inspect
   again with bounded backoff. Never turn a timeout or null route into deletion.
 
-Follow the returned action. `reopen-chat` creates a hidden tab at the saved chat
-URL and rechecks it. `create-project-chat` creates a hidden candidate from the
-saved Project URL; an archived/unavailable chat must not be reopened in a loop.
+Follow the returned action and `tabAction`. `keep` reuses the exact page,
+including lease reacquisition and BOOT when needed after expiry/restart;
+expiry alone is not a missing tab. `create` opens one hidden candidate at the
+returned target; a missing tab reopens the saved chat. `inspect` makes no
+navigation or allocation. A mismatched URL is not proof that the saved chat
+was archived, and must not be overwritten or closed.
+
+For `create-project-chat` with `tabAction: navigate-owned`, reuse the exact
+still-matching archived/unavailable chat tab. After resolving its mailbox as
+below, claim a Project-only candidate using that **same** `--tab-id`, omit
+`--chat-url`, and supply the old exact replacement generation/tab. Only after
+claim succeeds, navigate that page to the saved Project URL, create the new
+chat there, then BOOT and commit the observed chat URL. This changes the chat
+and generation, not the physical tab. Keep the original chat archived.
 `user-action` needs the indicated user action on this page; resume with a fresh
 exact-tab check afterward. Limit automatic recreation to one verified replacement
 per recovery episode; a second failure is reported with its observed reason.
@@ -502,6 +530,24 @@ the selected set, identity match, page ownership, task correlation and freshness
 Include the returned `pluginPolicy` in the exact owned control prompt. Default
 policy permits no third-party plugins. Approved plugin use is read-only and
 restricted to the stated task and repository; all writes remain local.
+
+For ordinary plugin tasks, preflight must include `requestedOperations`
+(`plugin`, exact `tool`) separately from each plugin's observed `tools`
+(`tool`, `availability`, `effect`). Select only task-needed tools whose actual
+contract is available and read-only (`effect: read`); do not infer effects
+from tool names. Mixed read/write apps may supply selected reads, but writes,
+unknown effects, catalog-only tools and unlisted operations are rejected.
+There is no app-wide permission fallback. Include the returned exact
+`allowedOperations` in the control prompt. Identity discovery uses only its
+separate `authenticatedProfileTool`, never business `requestedOperations`.
+
+ChatGPT-native Web Search is separate from installed apps and may be used for
+RESEARCH without a third-party plugin grant. A Codex-installed plugin is not
+automatically installed or callable in ChatGPT. Check only task-needed apps,
+not the entire catalog. If a selected tool fails or disappears, report that
+operation as unavailable through the mailbox; do not open a trial/new chat,
+change modes, or substitute another app without a fresh task-scoped preflight.
+Unrelated C2C-only work can continue in the same progress page.
 
 Recheck actual account/tool availability immediately before use and after any
 account, connection, model or page change. The evidence is a host workflow gate,

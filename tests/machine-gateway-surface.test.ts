@@ -66,7 +66,7 @@ function turn(
 }
 
 describe("machine gateway surface invalidation", () => {
-  it("requires resolving the exact mailbox before rotating and preserves checkpoint and other sessions", () => {
+  it.each(["tab-old", "tab-new"])("requires resolving the exact mailbox before rotating to %s and preserves checkpoint and other sessions", (replacementTab) => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("gateway-surface-recovery");
     cleanups.push(root);
@@ -90,7 +90,7 @@ describe("machine gateway surface invalidation", () => {
       ...turn(registration, identity.localSessionId, first.generation, "keep-task"), iteration: 2,
     });
     const replacement = {
-      browserId: "iab", surfaceId: "chatgpt", tabId: "tab-new", projectUrl: PROJECT_URL,
+      browserId: "iab", surfaceId: "chatgpt", tabId: replacementTab, projectUrl: PROJECT_URL,
       ownerProcessEpoch: "owner-recover", replaces: first, leaseTtlMs: 60000,
     };
     expect(gateway.surfaceGet(identity).control).toMatchObject({ status: "pending", requestId: request.request.requestId });
@@ -109,11 +109,13 @@ describe("machine gateway surface invalidation", () => {
       taskId: "keep-task", iteration: 2, phase: "PLAN",
     });
     const candidate = gateway.surfaceClaim(identity, replacement);
+    expect(candidate.tabId).toBe(replacementTab);
     expect(candidate.generation).toBeGreaterThan(first.generation);
     expect(candidate.chatUrl).toBeUndefined();
     expect(gateway.turnStatus(context.token).status).toBe("revoked");
     expect(() => gateway.surfaceClaim(identity, { ...replacement, tabId: "stale-retry" })).toThrow();
     gateway.surfaceCommit(identity, candidate, { chatUrl: chatUrl("new") });
+    expect(gateway.surfaceGet(identity).binding?.tabId).toBe(replacementTab);
     expect(readSession(registration.workspaceId, identity.localSessionId)).toMatchObject({
       taskId: "keep-task", iteration: 2, url: chatUrl("new"),
       checkpoint: { originalGoal: "Keep completed work", completedSubtasks: "Tests ran" },

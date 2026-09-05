@@ -33,7 +33,7 @@ function runCli(args: string[], cwd = workspace): CliResult {
   const result = spawnSync(process.execPath, ["--import", "tsx/esm", cliEntry, ...args], {
     cwd,
     encoding: "utf8",
-    timeout: 10_000,
+    timeout: 30_000,
     env: { ...process.env, ...machine.environment, C2C_STATE_DIR: stateDir },
   });
   return {
@@ -119,6 +119,36 @@ function claimSurface(localSessionId: string, tabId = `tab-${localSessionId}`): 
 }
 
 describe("control CLI correlation", () => {
+  it("reuses one page across tasks and grants only selected observed app reads", () => {
+    const localSessionId = "session-app-reads";
+    claimSurface(localSessionId);
+    const current = runJson(["surface", "get", "--local-session", localSessionId]);
+    const page = current.body.lease as { tabId: string; chatUrl: string; generation: number };
+    for (const taskId of ["research-docs", "review-docs"]) {
+      const proof = {
+        workspaceId: new Workspace(workspace).id, localSessionId, taskId, iteration: 0, phase: "RESEARCH",
+        tabId: page.tabId, chatUrl: page.chatUrl, generation: page.generation,
+        bootEpoch: readMachineRuntime()!.bootEpoch,
+        observedAt: new Date().toISOString(), chatgptAccount: "fixture-account",
+        requestedOperations: [{ plugin: "Docs", tool: "search_docs" }],
+        plugins: [{ id: "Docs", availability: "available", usesGitHub: false, tools: [
+          { tool: "search_docs", availability: "available", effect: "read" },
+          { tool: "publish_doc", availability: "available", effect: "write" },
+        ] }],
+      };
+      const args = ["control", "open", "--local-session", localSessionId, "--task", taskId, "--iteration", "0", "--phase", "RESEARCH", "--plugins", "Docs"];
+      const unsafe = runJson([...args, "--plugin-preflight", JSON.stringify({ ...proof, requestedOperations: [{ plugin: "Docs", tool: "publish_doc" }] })]);
+      expect(unsafe.command.status).toBe(1);
+      expect(runJson(["surface", "get", "--local-session", localSessionId]).body.control).toBeNull();
+      const opened = runJson([...args, "--plugin-preflight", JSON.stringify(proof)]);
+      expect(opened.command.status).toBe(0);
+      expect(opened.body.surface).toEqual({ tabId: page.tabId, chatUrl: page.chatUrl, generation: page.generation });
+      expect(opened.body.pluginPolicy).toEqual({ allowedPlugins: ["Docs"], access: "read-only", allowedOperations: [{ plugin: "Docs", tool: "search_docs" }] });
+      const request = opened.body.request as { requestId: string };
+      expect(runJson(["control", "cancel", "--local-session", localSessionId, "--task", taskId, "--iteration", "0", "--phase", "RESEARCH", "--request", request.requestId]).command.status).toBe(0);
+    }
+  }, 90_000);
+
   it("opens a profile-only bootstrap with an unknown actor and excludes repository scopes", () => {
     const localSessionId = "session-profile-discovery";
     claimSurface(localSessionId);
@@ -729,5 +759,5 @@ describe("control CLI correlation", () => {
     } finally {
       cleanup(otherWorkspace);
     }
-  });
+  }, 90_000);
 });

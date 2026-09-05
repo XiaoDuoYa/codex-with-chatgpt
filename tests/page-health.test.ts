@@ -21,10 +21,10 @@ const observation: PageObservation = { tabId: "tab-a", generation: 7, state: "re
 describe("host page recovery decisions", () => {
   it("treats a reachable archived chat as unsendable and uses the stored Project", () => {
     expect(assessPageHealth(surface, { ...observation, state: "archived" })).toMatchObject({
-      action: "create-project-chat", targetUrl: projectUrl, controlReady: false,
+      action: "create-project-chat", targetUrl: projectUrl, controlReady: false, tabAction: "navigate-owned",
     });
     expect(assessPageHealth(surface, { ...observation, state: "unavailable", url: "https://chatgpt.com/" })).toMatchObject({
-      action: "create-project-chat", targetUrl: projectUrl,
+      action: "reopen-chat", targetUrl: chatUrl, tabAction: "create",
     });
   });
 
@@ -35,8 +35,24 @@ describe("host page recovery decisions", () => {
       { ...observation, url: chatUrl.replace("chat-a", "chat-b") },
     ]) {
       expect(assessPageHealth(surface, probe)).toMatchObject({
-        action: "reopen-chat", targetUrl: chatUrl, controlReady: false,
+        action: "reopen-chat", targetUrl: chatUrl, controlReady: false, tabAction: "create",
       });
+    }
+  });
+
+  it("reuses a confirmed unavailable chat tab but never navigates an unrelated or unverified page", () => {
+    expect(assessPageHealth(surface, { ...observation, state: "unavailable" }).tabAction).toBe("navigate-owned");
+    expect(assessPageHealth(surface, { ...observation, state: "archived", url: chatUrl.replace("chat-a", "other") })).toMatchObject({
+      action: "reopen-chat", tabAction: "create", targetUrl: chatUrl,
+    });
+    expect(assessPageHealth({ ...surface, binding: null, lease: { ...lease, chatUrl: undefined } }, {
+      ...observation, state: "unavailable", url: projectUrl,
+    })).toMatchObject({ action: "inspect-page", tabAction: "inspect" });
+    expect(assessPageHealth({ ...surface, lease: null }, observation)).toMatchObject({
+      action: "verify-candidate", tabAction: "keep",
+    });
+    for (const state of ["ready", "loading", "generating", "auth-required", "consent-required"] as const) {
+      expect(assessPageHealth(surface, { ...observation, state }).tabAction).toBe("keep");
     }
   });
 

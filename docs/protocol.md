@@ -263,6 +263,21 @@ These are Skill execution steps performed by the host CUA runtime. The
 TypeScript CLI cannot invoke `cua` directly; it persists and validates the
 surface lease that the Skill uses.
 
+The progress page is session-scoped. Keep its exact tab/chat across tasks,
+RESEARCH/PLAN/REVIEW and context renewal. Call `tab.markHandoff()` on that same
+page at each turn's start/end; a mark is not ownership evidence. Do not allocate
+another page, repeat BOOT, or retire/release the route merely because a healthy
+task finished. Independent sessions retain independent progress pages.
+
+Ordinary app discovery uses this chat's picker, not another catalog tab. Any
+exceptional settings helper is hidden, turn-local and unmarked, with its exact
+creation handle retained by the host. Close it after use/failure only after a
+fresh check confirms it remains that helper and has not been taken over. Never
+close user pages, current progress/candidate pages, another session's pages, or
+unrecorded historical tabs. There is no persistent helper cleanup service or
+ownership inference from title/URL; interrupted cleanup with uncertain ownership
+is reported. A successful new progress candidate alone receives the handoff mark.
+
 When a session has a saved route, the first browser operation is always the
 exact-tab lookup:
 
@@ -316,7 +331,7 @@ c2c surface check --local-session <id> --tab-id <id> --generation <n> \
 | --- | --- |
 | Ready composer in the exact committed chat | Resume if the mailbox has no unresolved request |
 | Exact tab missing/closed, or URL changed | Reopen the saved chat in a hidden owned candidate |
-| Explicit archived/unavailable conversation | Create a new chat from the saved Project URL |
+| Explicit archived/unavailable conversation at the exact saved chat URL | Create a new chat in the same owned tab from the saved Project URL, with a fresh generation |
 | Login, CAPTCHA, 2FA, consent | Request the required user action, then recheck the same page |
 | Loading/generating | Wait with bounded backoff and lease renewal |
 | Inconclusive UI or absent route | Inspect/pair; do not infer archived or deleted |
@@ -327,6 +342,15 @@ Omit the observed URL only for a missing tab or an inconclusive/loading probe.
 Stale tab/generation observations fail. The check is not a persistent attestation:
 the host must recheck immediately before and after each send.
 
+The decision also returns `tabAction`: `keep` retains the exact tab,
+`navigate-owned` rotates its chat in place, `create` allocates one hidden
+candidate, and `inspect` authorizes neither navigation nor allocation. An expired
+or restarted lease on a still-live matching page uses `keep` with reclaim/BOOT
+as needed. A mismatched URL, including a redirect home, does not establish that
+the saved chat is unavailable: preserve the navigated page and recheck the saved
+chat in the bounded replacement. A Project-only candidate's unavailable state
+requires inspection; it is not evidence that a session chat was archived.
+
 Before replacing a page, read the active `control` in `surface get/check`. This
 comes from the protected mailbox even when checkpoint persistence was interrupted.
 Consume a received result into the local checkpoint, then acknowledge it. Cancel
@@ -336,8 +360,12 @@ rotation while pending or received work is unresolved. Idempotent claims of the
 same live lease remain allowed. Received results are retained until ack, regardless
 of the original request TTL; request TTL only limits new submissions.
 
-Create one hidden candidate at the returned target, claim using the latest exact
-replacement tab/generation, and run the existing BOOT/commit sequence. A lost tab
+For `navigate-owned`, first claim a Project-only candidate with the **same**
+tab ID, no chat URL, and the latest exact replacement tab/generation. After the
+claim succeeds, navigate this owned tab to the saved Project and run the existing
+BOOT/commit sequence. This revokes old contexts before navigating and changes
+generation/chat, not tab ID. For `create`, create one hidden candidate at the
+returned target and claim it with the same replacement guards. A lost tab
 reuses the original chat; a confirmed archived/unavailable chat gets a new chat in
 the same Project. Do not unarchive automatically. After an interrupted claim,
 reuse the recorded candidate and repeat verification before committing. Failed
@@ -466,17 +494,36 @@ For a plugin-dependent control turn, add `--plugins '<id,...>'` and
   "bootEpoch": "<current-gateway-epoch>",
   "observedAt": "<current-ISO-timestamp>",
   "chatgptAccount": "<host-observed-account-and-workspace-key>",
+  "requestedOperations": [{"plugin": "GitHub", "tool": "<observed-read-tool-id>"}],
   "plugins": [{
     "id": "GitHub",
     "availability": "available",
     "usesGitHub": true,
+    "tools": [{"tool": "<observed-read-tool-id>", "availability": "available", "effect": "read"}],
     "githubActor": {"login": "<observed-login>", "id": "123", "source": "authenticated-profile"}
   }]
 }
 ```
 
 Availability is `available`, `unavailable`, `work-only`, `consent-required` or
-`unknown`. Bundles with GitHub dependencies set `usesGitHub: true`. The host must
+`unknown`, both for an app and for each observed tool. Ordinary task intent
+requires explicit `requestedOperations` separately from observed `tools`.
+Tool effects are `read`, `profile`, `write` or `unknown`; determine them from
+actual exposed tool contracts, never their names. Only requested, available
+`read` operations pass. The policy returns exact `allowedOperations`; it never
+grants every tool from an app. A mixed read/write app may contribute its selected
+reads without granting its writes. Missing, duplicate, wildcard, unrequested,
+unknown-effect and unavailable tools are rejected. Every selected app must have
+at least one requested operation. No app-wide compatibility path exists.
+
+ChatGPT-native Web Search is distinct from installed apps and can be used for
+RESEARCH without third-party grants. Codex plugin installation does not install
+that plugin in ChatGPT. If an allowed operation disappears or fails, report it
+as unavailable through the correlated mailbox. Do not open a trial tab, change
+mode/model, or substitute another app; a new selection requires fresh preflight.
+Unrelated C2C-only tasks remain usable in the same progress page.
+
+Bundles with GitHub dependencies set `usesGitHub: true`. The host must
 obtain login and stable ID from an authenticated own-profile tool in this chat;
 connection emails, display names, installed-account lists and local `gh` output
 do not establish the plugin actor. Without a profile tool, stop before repository
@@ -486,7 +533,8 @@ Its fresh preflight includes the actually exposed `authenticatedProfileTool`
 name in the plugin entry, with `availability: available` and `usesGitHub: true`;
 `githubActor` may be absent. The tool's observed contract must return the
 authenticated caller's own profile, not accept a chosen account or repository.
-Do not invent a tool name. This mode emits `access: authenticated-profile-only`,
+Do not invent a tool name or supply business `requestedOperations` in discovery.
+This mode emits `access: authenticated-profile-only`,
 the exact one-tool `allowedOperations`, and `repositoryAccess: none`.
 Only `c2c.result.write` is granted for C2C; additional scopes are rejected.
 No repository reads/searches, other app data or writes are permitted. Submit the

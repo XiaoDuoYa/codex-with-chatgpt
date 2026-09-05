@@ -7,7 +7,10 @@ const surface = { tabId: "tab-a", generation: 1, chatUrl: "https://chatgpt.com/g
 function proof(): PluginPreflight {
   return {
     ...turn, ...surface, bootEpoch: "epoch-a", observedAt: new Date(now).toISOString(), chatgptAccount: "observed-account-key",
-    plugins: [{ id: "GitHub", availability: "available", usesGitHub: true, githubActor: { id: "123", login: "expected-user", source: "authenticated-profile" } }],
+    requestedOperations: [{ plugin: "GitHub", tool: "read_repository" }],
+    plugins: [{ id: "GitHub", availability: "available", usesGitHub: true,
+      tools: [{ tool: "read_repository", availability: "available", effect: "read" }, { tool: "create_issue", availability: "available", effect: "write" }],
+      githubActor: { id: "123", login: "expected-user", source: "authenticated-profile" } }],
     github: { repository: { host: "github.com", owner: "an-organization", name: "repo" }, expectedActor: { id: "123", login: "expected-user" } },
   };
 }
@@ -19,6 +22,7 @@ describe("plugin dispatch preflight", () => {
     p.phase = "RESEARCH";
     delete p.plugins[0].githubActor;
     delete p.github;
+    delete p.requestedOperations;
     p.plugins[0].authenticatedProfileTool = "get_authenticated_user";
     const discovery = { ...turn, phase: "RESEARCH", pluginIntent: "identity-discovery" as const, scopes: ["c2c.result.write"], pluginPreflight: p };
     const policy = assessPluginPreflight(discovery, surface, "epoch-a", now);
@@ -33,8 +37,48 @@ describe("plugin dispatch preflight", () => {
   });
 
   it("allows only requested read-only apps and does not equate organization owner with actor", () => {
-    expect(check()).toMatchObject({ allowedPlugins: ["GitHub"], access: "read-only", repository: { owner: "an-organization" } });
+    expect(check()).toMatchObject({ allowedPlugins: ["GitHub"], allowedOperations: [{ plugin: "GitHub", tool: "read_repository" }], access: "read-only", repository: { owner: "an-organization" } });
     expect(assessPluginPreflight({ ...turn, plugins: [] }, null, "epoch-a")).toEqual({ allowedPlugins: [], access: "read-only" });
+  });
+  it("supports exposed reads from non-GitHub apps without granting sibling writes", () => {
+    const p = proof(); delete p.github;
+    p.plugins = [{ id: "Docs", availability: "available", usesGitHub: false, tools: [
+      { tool: "search_docs", availability: "available", effect: "read" },
+      { tool: "publish_doc", availability: "available", effect: "write" },
+    ] }];
+    p.requestedOperations = [{ plugin: "Docs", tool: "search_docs" }];
+    const assess = () => assessPluginPreflight({ ...turn, plugins: ["Docs"], pluginPreflight: p }, surface, "epoch-a", now);
+    expect(assess()).toEqual({ allowedPlugins: ["Docs"], access: "read-only", allowedOperations: p.requestedOperations });
+    p.requestedOperations[0].tool = "publish_doc";
+    expect(assess).toThrow(/read-only tool/);
+  });
+  it("rejects app-wide, missing, duplicate, wildcard and unrequested tool grants", () => {
+    const p = proof(); delete p.requestedOperations;
+    expect(() => check(p)).toThrow(/requestedOperations/);
+    const missing = proof(); delete missing.plugins[0].tools;
+    expect(() => check(missing)).toThrow(/read-only tool/);
+    const duplicate = proof(); duplicate.requestedOperations!.push(duplicate.requestedOperations![0]);
+    expect(() => check(duplicate)).toThrow(/Duplicate requested/);
+    const observed = proof(); observed.plugins[0].tools!.push(observed.plugins[0].tools![0]);
+    expect(() => check(observed)).toThrow(/duplicate observed/);
+    for (const tool of ["*", "read_*", "unknown_tool"]) {
+      const wrong = proof(); wrong.requestedOperations![0].tool = tool;
+      expect(() => check(wrong)).toThrow();
+    }
+    const other = proof(); other.requestedOperations!.push({ plugin: "Other", tool: "search" });
+    expect(() => check(other)).toThrow(/read-only tool/);
+  });
+  it("requires every selected app to have a requested operation", () => {
+    const p = proof(); p.plugins.push({ id: "Docs", availability: "available", usesGitHub: false });
+    expect(() => assessPluginPreflight({ ...turn, plugins: ["GitHub", "Docs"], pluginPreflight: p }, surface, "epoch-a", now)).toThrow(/no requested operation/);
+  });
+  it.each(["unavailable", "work-only", "consent-required", "unknown"] as const)("rejects an individually %s tool in an available app", (availability) => {
+    const p = proof(); p.plugins[0].tools![0].availability = availability;
+    expect(() => check(p)).toThrow(/read-only tool/);
+  });
+  it.each(["write", "profile", "unknown"] as const)("does not grant a %s effect in ordinary tasks", (effect) => {
+    const p = proof(); p.plugins[0].tools![0].effect = effect;
+    expect(() => check(p)).toThrow(/read-only tool/);
   });
   it.each(["unavailable", "work-only", "consent-required", "unknown"] as const)("blocks %s before dispatch", (availability) => {
     const p = proof(); p.plugins[0].availability = availability;
