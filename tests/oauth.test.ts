@@ -107,6 +107,39 @@ describe("discovery metadata", () => {
     expect(body.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     expect(body.registration_endpoint).toContain("/oauth/register");
   });
+
+  it("labels plan.write clearly instead of calling the grant read-only", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "workspace.read plan.write");
+    const response = await fetch(authorizeUrl);
+    const html = await response.text();
+    expect(html).toContain("Submit a plan to the separate C2C Plan Inbox");
+    expect(html).not.toContain("(read-only):");
+  });
+
+  it("rejects unsupported requested scopes instead of substituting a grant", async () => {
+    const clientId = await registerClient();
+    const { challenge } = pkceVerifierAndChallenge();
+    const authorizeUrl = new URL(`${base}/oauth/authorize`);
+    authorizeUrl.searchParams.set("client_id", clientId);
+    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URI);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("code_challenge", challenge);
+    authorizeUrl.searchParams.set("code_challenge_method", "S256");
+    authorizeUrl.searchParams.set("scope", "workspace.read unknown.scope");
+    const response = await fetch(authorizeUrl, { redirect: "manual" });
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location");
+    expect(location).not.toBeNull();
+    expect(new URL(location!).searchParams.get("error")).toBe("invalid_scope");
+  });
 });
 
 describe("authorization + token flow", () => {

@@ -11,12 +11,12 @@
 
 **中文** — ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的
 API 额度做规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，
-Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 默认只读的 MCP 桥接。
 
 **EN** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
 scarce API/Codex tokens on planning and review. This project moves the
 thinking to the subscription you already pay for; Codex only executes.
-No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
+No API keys, no reverse proxy — official web UI plus a read-only-by-default MCP bridge.
 
 ## What it is · 这是什么
 
@@ -27,8 +27,9 @@ OAuth 保护的**只读** MCP 连接，按需读取当前工作区里它真正�
 **EN** — Use the ChatGPT web app as the planning and review brain for your
 Codex coding sessions, while Codex keeps full ownership of execution. Your
 repository is never uploaded: ChatGPT reads exactly the lines it needs through
-a secure, OAuth-protected, **read-only** MCP connection to your current
-workspace.
+a secure, OAuth-protected MCP connection to your current workspace. Nine tools
+are read-only; an optional, separately scoped action can submit a plan only to
+a server-owned inbox outside the workspace.
 
 Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](README.zh-CN.md)**
 
@@ -155,11 +156,11 @@ Credentials stay in the OS app state directory, not in the project.
                         ▼          │
              ┌─────────────────────┐
              │      C2C Bridge     │   loopback-only HTTP server
-             │  read-only MCP      │   OAuth 2.1 + one-time pairing code
+             │  scoped MCP         │   OAuth 2.1 + one-time pairing code
              │  OAuth + Pairing    │   Cloudflare Quick Tunnel
              │  Tunnel Manager     │
              └──────────┬──────────┘
-                        │  read-only
+                        │  read-only workspace access
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
              │   Local Workspace   │◀─────────│    Codex Harness    │
@@ -173,15 +174,18 @@ Credentials stay in the OS app state directory, not in the project.
 - **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
   tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
   `git_status`, `git_diff`, `test_status`, `execution_summary`,
-  `execution_output`.
+  `execution_output`. On supported ChatGPT workspaces, the optional
+  `submit_plan` action can create a validated artifact only in the separate
+  C2C Plan Inbox. See [Constrained Plan Submission](docs/plan-submission.md).
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
 
 ## Security model (short version)
 
-- **Read-only by construction**: write/delete/shell/commit tools simply do not
-  exist on the server. No prompt injection can enable them.
+- **Workspace read-only by construction**: workspace write/delete/shell/commit
+  tools do not exist. The optional plan action writes only to a separate inbox
+  after an explicit scope grant and one-time local authorization.
 - **One workspace = one boundary**: every token is bound to a single workspace;
   path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
   are all blocked and tested).
@@ -190,9 +194,9 @@ Credentials stay in the OS app state directory, not in the project.
 - **Knowing the URL grants nothing**: the public MCP endpoint requires OAuth 2.1
   (PKCE S256, dynamic client registration, rotating refresh tokens). Without a
   token: 401. Wrong workspace: 403.
-- **The model never sees long-lived credentials**: the only secret that ever
-  touches a browser is a one-time pairing code (5-minute TTL, 5 attempts,
-  rate-limited, destroyed on use).
+- **The model never sees long-lived credentials**: browser-visible capabilities
+  are short-lived and one-time, including the pairing code and optional
+  digest-bound plan authorization.
 
 Full threat model: [docs/security.md](docs/security.md)
 
@@ -201,10 +205,11 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # path security, OAuth, pairing, MCP, and plan-inbox tests
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
+c2c authorize-plan  # optional one-time submit_plan authorization
 c2c status / doctor / pair / unpair / logs / stop
 ```
 
@@ -212,19 +217,22 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you).
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+[security](docs/security.md) · [plan submission](docs/plan-submission.md) ·
+[staging manifest v2](docs/staging-manifest-v2.md) ·
+[troubleshooting](docs/troubleshooting.md)
 
 ## Project layout
 
 ```
 src/
   bridge/     loopback HTTP server, port recovery, admin API
-  mcp/        9 read-only tools, stateless Streamable HTTP
+  mcp/        9 read-only tools + constrained plan inbox submission
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
   workspace/  path containment, sensitive-file policy, search, git
   tunnel/     TunnelProvider abstraction + Cloudflare Quick/Named Tunnel
   execution/  execution records for the review loop
+  plans/      digest-bound, create-only plan inbox
   process/    daemon lifecycle
   cli/        the c2c CLI
 skill/        the Codex Skill (the real UX layer)

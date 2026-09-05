@@ -76,7 +76,7 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all nine read-only tools", async () => {
+  it("lists nine read-only tools and the constrained plan submission action", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
@@ -87,10 +87,11 @@ describe("MCP tools over Streamable HTTP", () => {
       "list_directory",
       "read_file",
       "search_workspace",
+      "submit_plan",
       "test_status",
       "workspace_info",
     ]);
-    // no write tools in V1
+    // no general workspace mutation tools
     for (const forbidden of ["write_file", "delete_file", "execute_shell", "git_commit", "install_package"]) {
       expect(names).not.toContain(forbidden);
     }
@@ -104,6 +105,7 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    expectToolOutputSchema(tools, "submit_plan", ["path", "sha256", "bytes", "project", "stagedDigest", "createdAt"]);
   });
 
   it("documents git_diff pagination with its output field names", async () => {

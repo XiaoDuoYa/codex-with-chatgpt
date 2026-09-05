@@ -15,6 +15,7 @@ import { namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
+import { PlanInbox, PlanInboxError } from "../plans/inbox.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
@@ -89,6 +90,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
+  const planInbox = new PlanInbox({ workspaceRoot: workspace.root, workspaceId: workspace.id });
   const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
@@ -125,7 +127,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger, planInbox }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
@@ -155,6 +157,34 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     const session = pairing.create();
     logger.info("Created pairing session");
     res.json({ code: session.code, expiresAt: session.expiresAt });
+  });
+
+  app.post("/admin/plan-authorizations", adminGuard, express.json({ limit: "4kb" }), (req, res) => {
+    try {
+      const body = req.body as { project?: unknown; staged_digest?: unknown; ttl_ms?: unknown };
+      if (
+        typeof body?.project !== "string" ||
+        typeof body?.staged_digest !== "string" ||
+        (body.ttl_ms !== undefined && typeof body.ttl_ms !== "number")
+      ) {
+        res.status(400).json({ error: "INVALID_ARGUMENTS", message: "project and staged_digest are required." });
+        return;
+      }
+      const authorization = planInbox.authorize({
+        project: body.project,
+        digest: body.staged_digest,
+        ttlMs: body.ttl_ms,
+      });
+      logger.info(`Created one-time plan authorization for ${body.project}`);
+      res.status(201).json(authorization);
+    } catch (error) {
+      if (error instanceof PlanInboxError) {
+        res.status(400).json({ error: error.code, message: error.message });
+        return;
+      }
+      logger.error(`Plan authorization failed: ${error instanceof Error ? error.message : String(error)}`);
+      res.status(500).json({ error: "INTERNAL_ERROR", message: "Plan authorization failed." });
+    }
   });
 
   app.get("/admin/info", adminGuard, (_req, res) => {

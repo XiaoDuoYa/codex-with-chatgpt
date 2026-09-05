@@ -8,8 +8,11 @@ export const SUPPORTED_SCOPES = [
   "workspace.search",
   "git.read",
   "execution.read",
+  "plan.write",
   "offline_access",
 ] as const;
+
+export const DEFAULT_SCOPES = SUPPORTED_SCOPES.filter((scope) => scope !== "plan.write");
 
 export type Scope = (typeof SUPPORTED_SCOPES)[number];
 
@@ -271,8 +274,8 @@ export class AuthStore {
 }
 
 export function filterScopes(requested: string | undefined): string[] {
-  if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
+  if (!requested || requested.trim() === "") return [...DEFAULT_SCOPES];
   const asked = requested.split(/[\s+]+/).filter(Boolean);
-  const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  if (asked.some((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope))) return [];
+  return [...new Set(asked)];
 }
