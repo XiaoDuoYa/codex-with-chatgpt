@@ -8,6 +8,7 @@ import {
   acknowledgeControlResult,
   cancelControlResultRequest,
   getControlMailboxDir,
+  getActiveControlResultStatus,
   getControlResultStatus,
   openControlResultRequest,
   pruneControlMailbox,
@@ -85,6 +86,20 @@ afterEach(() => {
 });
 
 describe("control result mailbox", () => {
+  it("preserves unconsumed results beyond request TTL and discovers their exact correlation", () => {
+    const request = openControlResultRequest(WORKSPACE_A, { localSessionId: "session-a", ...correlation() });
+    const receipt = submitControlResult(WORKSPACE_A, planInput(request.requestId));
+    const eightDaysLater = Date.parse(request.expiresAt) + 8 * 24 * 60 * 60 * 1000;
+    expect(pruneControlMailbox(WORKSPACE_A, eightDaysLater)).toBe(0);
+    expect(getActiveControlResultStatus(WORKSPACE_A, "session-a")).toMatchObject({
+      status: "received", requestId: request.requestId, result: { resultId: receipt.resultId },
+    });
+    expect(getActiveControlResultStatus(WORKSPACE_A, "session-b")).toBeNull();
+    acknowledgeControlResult(WORKSPACE_A, request.requestId, "session-a", correlation());
+    expect(getActiveControlResultStatus(WORKSPACE_A, "session-a")).toBeNull();
+    expect(pruneControlMailbox(WORKSPACE_A, eightDaysLater)).toBe(1);
+  });
+
   it("opens a request and accepts one structured result", () => {
     const request = openControlResultRequest(WORKSPACE_A, {
       localSessionId: "session-a",

@@ -260,6 +260,62 @@ visible; return it to the background and repeat both checks after the user
 action. Screenshot-coordinate operations are not allowed for routine navigation
 or submission.
 
+## Page recovery
+
+The host owns browser observation and creation. The CLI cannot call the host's
+Computer Use runtime, and the Gateway cannot infer archival from a route file.
+After resolving the exact `tabId`, inspect its semantic state and pass the fresh
+observation to:
+
+```sh
+c2c surface check --local-session <id> --tab-id <id> --generation <n> \
+  --page-state <state> --observed-url <url> --json
+```
+
+| Observed state | Action |
+| --- | --- |
+| Ready composer in the exact committed chat | Resume if the mailbox has no unresolved request |
+| Exact tab missing/closed, or URL changed | Reopen the saved chat in a hidden owned candidate |
+| Explicit archived/unavailable conversation | Create a new chat from the saved Project URL |
+| Login, CAPTCHA, 2FA, consent | Request the required user action, then recheck the same page |
+| Loading/generating | Wait with bounded backoff and lease renewal |
+| Inconclusive UI or absent route | Inspect/pair; do not infer archived or deleted |
+
+`--page-state` is one of `ready`, `archived`, `unavailable`, `missing`,
+`auth-required`, `consent-required`, `loading`, `generating`, or `unknown`.
+Omit the observed URL only for a missing tab or an inconclusive/loading probe.
+Stale tab/generation observations fail. The check is not a persistent attestation:
+the host must recheck immediately before and after each send.
+
+Before replacing a page, read the active `control` in `surface get/check`. This
+comes from the protected mailbox even when checkpoint persistence was interrupted.
+Consume a received result into the local checkpoint, then acknowledge it. Cancel
+only the exact still-pending request on a confirmed page failure; if publication
+wins the race, consume the received result instead. The Gateway blocks generation
+rotation while pending or received work is unresolved. Idempotent claims of the
+same live lease remain allowed. Received results are retained until ack, regardless
+of the original request TTL; request TTL only limits new submissions.
+
+Create one hidden candidate at the returned target, claim using the latest exact
+replacement tab/generation, and run the existing BOOT/commit sequence. A lost tab
+reuses the original chat; a confirmed archived/unavailable chat gets a new chat in
+the same Project. Do not unarchive automatically. After an interrupted claim,
+reuse the recorded candidate and repeat verification before committing. Failed
+verification releases only that candidate. A second recreation failure stops the
+episode with a concrete diagnostic; it does not create an unbounded series of chats.
+
+Recovery preserves localSessionId, task, iteration and checkpoint progress; it
+does not use session retirement (which intentionally discards received results).
+Successful rotation revokes previous live contexts and existing generation guards
+reject late reads/results. Save the new route only after BOOT verification and
+issue a new control context only for the remaining question. Loading, generation
+or a mailbox wait timeout alone must not trigger cancellation or replay.
+
+The current page model is the default. Observe the selector's label; neither
+`modelId` nor `effort` changes the webpage. An explicit user model/effort request
+requires semantic selection and verification before sending. Do not assume a
+historical conversation automatically switches to the latest model.
+
 ## Session contract
 
 Read the session route at the beginning of a local task, and re-read the current

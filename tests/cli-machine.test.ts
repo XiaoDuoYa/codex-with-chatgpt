@@ -134,6 +134,21 @@ describe("machine CLI lifecycle", () => {
     expect(surface.body.projectUrl).toBe(
       "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
     );
+    const pageCheckArgs = [
+      "surface", "check", "--local-session", "session-cli-machine", "--tab-id", "tab-cli-machine",
+      "--generation", String(claimed.body.lease.generation),
+      "--observed-url", committed.body.binding.chatUrl,
+    ];
+    const archived = runJson(stateDir, [...pageCheckArgs, "--page-state", "archived"]);
+    expect(archived.command.status).toBe(0);
+    expect(archived.body).toMatchObject({
+      action: "create-project-chat", controlReady: false, targetUrl: surface.body.projectUrl, control: null,
+    });
+    const healthy = runJson(stateDir, [...pageCheckArgs, "--page-state", "ready"]);
+    expect(healthy.body).toMatchObject({ action: "resume-chat", controlReady: true });
+    const stale = runJson(stateDir, [...pageCheckArgs, "--page-state", "archived", "--generation", "999"]);
+    expect(stale.command.status).toBe(1);
+    expect(stale.body.error).toMatch(/tab and generation/);
 
     const missingRequest = runJson(stateDir, [
       "machine",

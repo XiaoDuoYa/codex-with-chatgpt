@@ -69,6 +69,7 @@ export interface SurfaceViewResponse {
   projectUrl: string | null;
   lease: SurfaceLease | null;
   binding: SurfaceBinding | null;
+  control: ControlStatus | null;
 }
 
 export type SurfaceRetireResponse = RetireSurfaceSessionResult & {

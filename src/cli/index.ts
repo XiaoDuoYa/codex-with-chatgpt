@@ -122,6 +122,7 @@ import {
 import { checkGitUpdate } from "../update/check.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { Workspace } from "../workspace/manager.js";
+import { assessPageHealth, PAGE_STATES, pageObservationSchema } from "../session/page-health.js";
 
 const program = new Command();
 const DEFAULT_TURN_TTL_MS = 30 * 60_000;
@@ -1026,14 +1027,49 @@ surface
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const localSessionId = resolveLocalSession(opts.localSession);
       const machine = await machineSurfaceContext(workspace, localSessionId);
-      const { projectUrl, lease, binding } = await getMachineSurface(machine.runtime, machine.identity);
-      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, projectUrl, lease, binding }));
+      const { projectUrl, lease, binding, control } = await getMachineSurface(machine.runtime, machine.identity);
+      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, projectUrl, lease, binding, control }));
       else if (lease) {
         const route = lease.chatUrl ? `ChatGPT page：${lease.chatUrl}` : "ChatGPT Project candidate page";
         say(`${route}（generation ${lease.generation}）`);
       }
       else if (projectUrl) say(`Project：${projectUrl}`);
       else say("当前本地会话尚未认领 ChatGPT page。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+surface
+  .command("check")
+  .description("Assess a fresh host browser observation against this session's owned page")
+  .option("-w, --workspace <path>")
+  .option("--local-session <id>")
+  .requiredOption("--tab-id <id>", "exact observed tab id")
+  .requiredOption("--generation <n>", "exact observed generation")
+  .requiredOption("--page-state <state>", PAGE_STATES.join(", "))
+  .option("--observed-url <url>", "URL observed on that exact page")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: {
+    workspace?: string; localSession?: string; tabId: string; generation: string;
+    pageState: string; observedUrl?: string; json: boolean;
+  }) => {
+    try {
+      const observation = pageObservationSchema.parse({
+        tabId: opts.tabId,
+        generation: parseIntegerOption(opts.generation, "generation", 1, Number.MAX_SAFE_INTEGER),
+        state: opts.pageState,
+        url: opts.observedUrl,
+      });
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const localSessionId = resolveLocalSession(opts.localSession);
+      const machine = await machineSurfaceContext(workspace, localSessionId);
+      const current = await getMachineSurface(machine.runtime, machine.identity);
+      const page = assessPageHealth(current, observation);
+      const control = current.control;
+      const controlReady = page.controlReady && control?.status !== "pending" && control?.status !== "received";
+      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, ...page, controlReady, control }));
+      else say(`${page.action}: ${page.reason}`);
     } catch (error) {
       handleCliError(error, opts.json);
     }

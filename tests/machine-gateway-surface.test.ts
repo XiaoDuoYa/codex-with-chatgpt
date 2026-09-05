@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { MachineGateway, requireCurrentTurnSurface } from "../src/gateway/machine-gateway.js";
 import { TurnCapabilityError, type TurnCapabilityBinding } from "../src/gateway/turn-capability.js";
-import { getControlResultStatus, openControlResultRequest } from "../src/control/mailbox.js";
+import { acknowledgeControlResult, getControlResultStatus, openControlResultRequest, submitControlResult } from "../src/control/mailbox.js";
+import { readSession, updateSession } from "../src/session/state.js";
 import {
   claimSurface,
   reapExpiredSurfaceLeases,
@@ -64,6 +65,62 @@ function turn(
 }
 
 describe("machine gateway surface invalidation", () => {
+  it("requires resolving the exact mailbox before rotating and preserves checkpoint and other sessions", () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("gateway-surface-recovery");
+    cleanups.push(root);
+    const gateway = new MachineGateway({ surfaceValidator: requireCurrentTurnSurface });
+    const registration = gateway.registerWorkspace(root);
+    const identity = { ...registration, localSessionId: "session-recover" };
+    const first = gateway.surfaceClaim(identity, {
+      browserId: "iab", surfaceId: "chatgpt", tabId: "tab-old", projectUrl: PROJECT_URL,
+      chatUrl: chatUrl("old"), ownerProcessEpoch: "owner-recover", leaseTtlMs: 60000,
+    });
+    gateway.surfaceCommit(identity, first, {});
+    updateSession(registration.workspaceId, identity.localSessionId, {
+      taskId: "keep-task", iteration: 2,
+      checkpoint: { protocolState: "EXECUTED_LOCAL", originalGoal: "Keep completed work", completedSubtasks: "Tests ran" },
+    });
+    const other = surface(registration.projectId, "session-other", "tab-other");
+    const otherContext = gateway.issueTurn(turn(registration, "session-other", other.generation, "other-task"));
+    const request = gateway.openControlResultRequest(identity, { taskId: "keep-task", iteration: 2, phase: "PLAN" });
+    const context = gateway.issueTurn({
+      ...turn(registration, identity.localSessionId, first.generation, "keep-task"), iteration: 2,
+    });
+    const replacement = {
+      browserId: "iab", surfaceId: "chatgpt", tabId: "tab-new", projectUrl: PROJECT_URL,
+      ownerProcessEpoch: "owner-recover", replaces: first, leaseTtlMs: 60000,
+    };
+    expect(gateway.surfaceGet(identity).control).toMatchObject({ status: "pending", requestId: request.request.requestId });
+    expect(() => gateway.surfaceClaim(identity, replacement)).toThrow(/Resolve the active mailbox/);
+    // An exact reclaim while generation is busy remains idempotent.
+    expect(gateway.surfaceClaim(identity, { ...replacement, tabId: first.tabId, chatUrl: first.chatUrl }).generation).toBe(first.generation);
+    expect(gateway.turnStatus(context.token).status).not.toBe("revoked");
+    submitControlResult(registration.workspaceId, {
+      requestId: request.request.requestId, localSessionId: identity.localSessionId,
+      taskId: "keep-task", iteration: 2, phase: "PLAN", kind: "BLOCKED",
+      payload: { reason: "Fixture result", needs: ["Consume this result before recovery"] },
+    });
+    expect(gateway.surfaceGet(identity).control?.status).toBe("received");
+    expect(() => gateway.surfaceClaim(identity, replacement)).toThrow(/consume and acknowledge/);
+    acknowledgeControlResult(registration.workspaceId, request.request.requestId, identity.localSessionId, {
+      taskId: "keep-task", iteration: 2, phase: "PLAN",
+    });
+    const candidate = gateway.surfaceClaim(identity, replacement);
+    expect(candidate.generation).toBeGreaterThan(first.generation);
+    expect(candidate.chatUrl).toBeUndefined();
+    expect(gateway.turnStatus(context.token).status).toBe("revoked");
+    expect(() => gateway.surfaceClaim(identity, { ...replacement, tabId: "stale-retry" })).toThrow();
+    gateway.surfaceCommit(identity, candidate, { chatUrl: chatUrl("new") });
+    expect(readSession(registration.workspaceId, identity.localSessionId)).toMatchObject({
+      taskId: "keep-task", iteration: 2, url: chatUrl("new"),
+      checkpoint: { originalGoal: "Keep completed work", completedSubtasks: "Tests ran" },
+    });
+    const otherClaim = gateway.claimTurn(otherContext.token, ["workspace.read"]);
+    gateway.releaseTurn(otherContext.token, otherClaim.lease);
+    expect(gateway.surfaceGet({ ...identity, localSessionId: "session-other" }).lease?.tabId).toBe("tab-other");
+  });
+
   afterEach(() => {
     while (cleanups.length > 0) cleanup(cleanups.pop()!);
     delete process.env.C2C_STATE_DIR;

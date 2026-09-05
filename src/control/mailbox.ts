@@ -870,6 +870,18 @@ export function reportControlProgress(workspaceId: string, input: unknown): Cont
   });
 }
 
+/** Locate recovery work even when the checkout checkpoint was never written. */
+export function getActiveControlResultStatus(workspaceId: string, localSessionId: string): ControlStatus | null {
+  const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
+  const resolvedLocalSessionId = validateLocalSessionId(localSessionId);
+  return withFileLock(sessionLifecycleLockFile(resolvedWorkspaceId, resolvedLocalSessionId), () => {
+    const request = readActiveRequest(resolvedWorkspaceId, resolvedLocalSessionId);
+    return request ? getControlResultStatus(
+      resolvedWorkspaceId, request.requestId, resolvedLocalSessionId, request,
+    ) : null;
+  });
+}
+
 export function getControlResultStatus(
   workspaceId: string,
   requestId: string,
@@ -1098,6 +1110,8 @@ function pruneControlMailboxUnlocked(resolvedWorkspaceId: string, now: number): 
           const request = readRequest(resolvedWorkspaceId, listedRequest.requestId);
           if (!request) return 0;
           const terminal = readTerminalState(resolvedWorkspaceId, request);
+          // Request TTL limits submission; a delivered result belongs to the consumer until ack.
+          if (!terminal && readResult(resolvedWorkspaceId, request)) return 0;
           const expiredAt = isExpired(request, now) ? Date.parse(request.expiresAt) : null;
           const terminalAt = terminal ? Date.parse(terminal.timestamp) : expiredAt;
           if (

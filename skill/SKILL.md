@@ -268,7 +268,9 @@ const tab = await cua.getTab(tabId, { browser: "iab" });
 ```
 
 Validate the returned tab's current URL against the saved `projectUrl` and
-`chatUrl` (the chat URL must belong to that Project). If `getTab` fails, the
+`chatUrl` (the chat URL must belong to that Project). Also inspect page sendability
+using the health gate below; a matching URL alone does not establish availability.
+If `getTab` fails, the
 tab is closed, or either URL is wrong, create a replacement only for this
 `localSessionId`:
 
@@ -277,7 +279,8 @@ const replacement = await cua.createBrowserTab("iab", targetUrl, { visible: fals
 ```
 
 Use the saved `chatUrl` as `targetUrl` when present, otherwise the saved
-`projectUrl`. Claim the returned exact tab id with this session's
+`projectUrl`. For an explicitly archived or unavailable conversation, use the
+saved Project URL instead and create a new chat. Claim the returned exact tab id with this session's
 `--local-session`; when a stored lease exists, replace it with the exact
 current `--replace-generation` and `--replace-tab-id`. Re-run `getTab` on the
 returned exact id and validate the Project/chat URL before sending anything.
@@ -334,6 +337,53 @@ for later turns. When this local Codex session is permanently discarded, run
 that session's mailbox work, revokes its contexts, and removes its page route.
 It must not retire another session or delete the workspace's shared ChatGPT
 Project binding.
+
+### Page health and recovery
+
+Before opening or sending a control turn, inspect the exact owned tab's current
+URL and semantic UI. Run `c2c surface check --local-session <localSessionId>
+--tab-id <tabId> --generation <generation> --page-state <state>
+--observed-url <observedUrl> --json`. This assesses a host observation, not an
+independent browser probe; never invent observations from local route metadata.
+
+- `ready`: Chat mode with an available composer and no blocking banner or generation.
+- `archived`: explicit archived banner or unarchive control. Keep it archived.
+- `unavailable`: explicit conversation-not-found/access-denied message after loading.
+- `missing`: exact `getTab` reports a closed/missing tab; omit `--observed-url`.
+- `auth-required` / `consent-required`: login, CAPTCHA, 2FA or explicit consent.
+- `loading` / `generating`: wait and renew the lease; do not duplicate a send.
+- `unknown`: ambiguous errors, missing composer alone, or unconfirmed UI; inspect
+  again with bounded backoff. Never turn a timeout or null route into deletion.
+
+Follow the returned action. `reopen-chat` creates a hidden tab at the saved chat
+URL and rechecks it. `create-project-chat` creates a hidden candidate from the
+saved Project URL; an archived/unavailable chat must not be reopened in a loop.
+`user-action` needs the indicated user action on this page; resume with a fresh
+exact-tab check afterward. Limit automatic recreation to one verified replacement
+per recovery episode; a second failure is reported with its observed reason.
+
+`surface get/check` includes the active `control` request even if the local
+checkpoint is missing. Before rotation, consume a `received` result, persist its
+resultId and task progress in the checkpoint, then ack. Cancel only the exact
+`pending` request when page failure is confirmed; on a concurrent receipt, reread
+and consume it. A generating page or a wait timeout alone does not permit cancel.
+The gateway refuses page replacement while pending/received work is unresolved.
+Preserve taskId, iteration, goal and completed work. Never use `surface retire`
+or clear the checkpoint for recoverable page failures.
+
+Use exact replacement generation/tab flags from the latest surface view. Reuse
+an already claimed candidate after interruption and revalidate it; reject stale
+observations and commits. Run BOOT on the candidate, cancel BOOT, then commit its
+verified chat URL. A replacement gets a fresh context; resume only the unresolved
+question. See `<checkout>/docs/protocol.md`, "Page recovery", for the lifecycle.
+
+### Page model selection
+
+Use the page's current model by default and observe its displayed label before
+sending. Do not hardcode a model version or claim that it is the newest available.
+`--model-id` and `--effort` record intent; they do not operate the page selector.
+When the user requests a specific model or reasoning mode, select and verify it
+through semantic UI before sending; if unavailable, report that limitation.
 
 ## Chat mode and boot check
 

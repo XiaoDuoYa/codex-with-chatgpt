@@ -21,6 +21,7 @@ import type { Workspace } from "../workspace/manager.js";
 import {
   acknowledgeControlResult,
   cancelControlResultRequest,
+  getActiveControlResultStatus,
   getControlResultStatus,
   openControlResultRequestWithStatus,
   reportControlProgress,
@@ -45,6 +46,7 @@ import {
   commitVerifiedSurfaceRoute,
   currentSurfaceBinding,
   currentSurfaceLease,
+  currentOwnerProcessEpoch,
   reconcileSurfaceSessionRoute,
   requireSurfaceGeneration,
   releaseSurface,
@@ -59,7 +61,9 @@ import {
   type SurfaceBinding,
   type RetireSurfaceSessionResult,
   type VerifiedSurfaceRouteCommit,
+  SurfaceOwnershipError,
 } from "../session/surface-ownership.js";
+import { normalizeChatUrl, normalizeProjectUrl } from "../session/state.js";
 
 export type SurfaceGenerationValidator = (binding: TurnCapabilityBinding) => void;
 
@@ -130,6 +134,7 @@ export interface MachineSurfaceView {
   projectUrl: string | null;
   lease: SurfaceLease | null;
   binding: SurfaceBinding | null;
+  control: ControlStatus | null;
 }
 
 export interface MachineSurfaceRetireResult extends RetireSurfaceSessionResult {
@@ -220,6 +225,7 @@ export class MachineGateway {
       projectUrl: currentProjectUrl(identity.projectId),
       lease: currentSurfaceLease(identity.projectId, identity.localSessionId),
       binding: currentSurfaceBinding(identity.projectId, identity.localSessionId),
+      control: getActiveControlResultStatus(identity.workspaceId, identity.localSessionId),
     };
   }
 
@@ -230,11 +236,29 @@ export class MachineGateway {
     assertChatGPTSurfaceIdentity(input.browserId, input.surfaceId);
     this.assertSurfaceMutationAllowed(identity.projectId, identity.localSessionId);
     this.registry.lookup(identity.workspaceId, identity.projectId, identity.registrationId);
-    return claimSurface({
+    const previous = currentSurfaceLease(identity.projectId, identity.localSessionId);
+    const idempotent = previous && previous.tabId === input.tabId &&
+      previous.ownerProcessEpoch === (input.ownerProcessEpoch ?? currentOwnerProcessEpoch()) &&
+      previous.projectUrl === normalizeProjectUrl(input.projectUrl) &&
+      previous.chatUrl === (input.chatUrl === undefined ? undefined : normalizeChatUrl(input.chatUrl));
+    if (!idempotent) {
+      const control = getActiveControlResultStatus(identity.workspaceId, identity.localSessionId);
+      if (control?.status === "pending" || control?.status === "received") {
+        throw new SurfaceOwnershipError(
+          "SURFACE_CONTROL_UNRESOLVED",
+          "Resolve the active mailbox request before replacing this page: cancel pending work or consume and acknowledge a received result.",
+        );
+      }
+    }
+    const claimed = claimSurface({
       ...input,
       projectId: identity.projectId,
       localSessionId: identity.localSessionId,
     });
+    if (previous?.generation !== claimed.generation) {
+      this.broker.revokeSession(identity.workspaceId, identity.projectId, identity.localSessionId);
+    }
+    return claimed;
   }
 
   surfaceCommit(
