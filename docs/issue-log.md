@@ -4,6 +4,14 @@
 
 状态只表示已实现和实际验证的范围；自动化测试与真实 ChatGPT 验证分别记录。
 
+## 本机收口结果
+
+- 代码提交 `61be691`：`corepack pnpm exec vitest run --maxWorkers=1` 完整通过，33 个文件、452 项测试；类型检查、构建、Skill 校验与生产依赖审计通过。
+- ChatGPT 的最终 REVIEW 已通过真实 MCP 到达本地 mailbox，未发现阻塞性实现缺陷；要求补齐的最终全量测试证据已完成并记录。
+- 同 Project 两个独立会话同时持有活动请求，测试会话在主会话 REVIEW 尚未完成时独立写回；两个结果均已确认并保存关联 checkpoint。
+- 新运行时受控重启后，两个会话的 Chat URL、tabId、generation、task、iteration 和 checkpoint 与重启前一致。一次全局安装仍为生效方式。
+- 测试会话租约已释放，路由和结果记录保留；原归档对话未取消归档。下列未实测范围继续保留，不视为已验收。
+
 ## 恢复与结果回写
 
 | ID | 问题 | 收口状态与证据 |
