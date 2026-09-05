@@ -59,7 +59,7 @@ function truncate(text: string): { text: string; truncated: boolean } {
   return { text: next, truncated };
 }
 
-/** Deterministic gate. Codex may nominate output; this decides if ChatGPT may read it. */
+/** Deterministic gate. The harness may nominate output; this decides if ChatGPT may read it. */
 export function sanitizeExecutionOutput(raw: string): SanitizeResult {
   if (HARD_REJECT.some((pattern) => pattern.test(raw))) {
     return { allowed: false, reason: "private_key" };

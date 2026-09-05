@@ -1049,13 +1049,14 @@ prefsCmd
 
 program
   .command("record", { hidden: true })
-  .description("Record a Codex execution summary (used by the Skill)")
+  .description("Record an execution summary (used by the Skill)")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
   .requiredOption("--iteration <n>", "non-negative execution iteration", parseNonNegativeInteger)
   .option("--changed-files <filesOrCount>", "comma-separated files or a count", "0")
   .option("--tests <summary>", "e.g. '27 passed'")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
+  .option("--executor <id>", "id of the executor that ran this iteration, e.g. codex")
   .option("--notes <text>")
   .option("--command <text>", "command whose output may be offered to ChatGPT")
   .option("--output <text>", "command output (prefer --output-file for long logs)")
@@ -1069,6 +1070,7 @@ program
       changedFiles: string;
       tests?: string;
       exitStatus: string;
+      executor?: string;
       notes?: string;
       command?: string;
       output?: string;
@@ -1101,6 +1103,7 @@ program
         tests: opts.tests ?? null,
         exitStatus: opts.exitStatus,
         timestamp: new Date().toISOString(),
+        executor: opts.executor?.slice(0, 80),
         notes: opts.notes?.slice(0, 400),
         outputId,
         outputAvailable,
