@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Workspace, WorkspaceError } from "../src/workspace/manager.js";
-import { makeTmpDir, cleanup, write, git, makeGitRepo } from "./helpers.js";
+import { makeTmpDir, cleanup, write, git, makeGitRepo, isolateStateDir } from "./helpers.js";
 import { getProjectDataDir, getWorkspaceDataDir } from "../src/config/paths.js";
 import { projectDataDirectory, projectIdMetadataPath } from "../src/workspace/identity.js";
 import { openControlResultRequest } from "../src/control/mailbox.js";
@@ -357,6 +357,8 @@ describe("workspace identity", () => {
   it("isolates checkout state for linked worktrees under the shared project root", () => {
     const repo = makeTmpDir("project-worktree-state");
     const linked = `${repo}-linked`;
+    const previousStateDir = process.env.C2C_STATE_DIR;
+    const stateDir = isolateStateDir();
     try {
       makeGitRepo(repo);
       git(repo, "worktree", "add", "-b", "linked-state", linked);
@@ -437,6 +439,12 @@ describe("workspace identity", () => {
         phase: "PLAN",
       });
       expect(linkedRequest.requestId).not.toBe(primaryRequest.requestId);
+      for (const request of [primaryRequest, linkedRequest]) {
+        const requestFile = path.join(
+          stateDir, "control-mailbox", request.workspaceId, "requests", `${request.requestId}.json`,
+        );
+        expect(JSON.parse(fs.readFileSync(requestFile, "utf8"))).toEqual(request);
+      }
     } finally {
       try {
         git(repo, "worktree", "remove", "--force", linked);
@@ -445,6 +453,9 @@ describe("workspace identity", () => {
       }
       cleanup(repo);
       cleanup(linked);
+      cleanup(stateDir);
+      if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
+      else process.env.C2C_STATE_DIR = previousStateDir;
     }
   });
 

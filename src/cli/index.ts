@@ -54,6 +54,7 @@ import {
   type ControlResultCorrelation,
 } from "../control/result-schema.js";
 import { saveExecutionOutput } from "../execution/output.js";
+import { controlResultContract } from "../control/result-contract.js";
 import {
   appendExecutionRecord,
   parseExecutionExitStatus,
@@ -1583,6 +1584,7 @@ control
         request: opened.request,
         contextId: grant.token,
         contextExpiresAt: grant.expiresAt,
+        resultContract: controlResultContract(correlation.phase),
         pluginPolicy,
         surface: {
           tabId: page.tabId,

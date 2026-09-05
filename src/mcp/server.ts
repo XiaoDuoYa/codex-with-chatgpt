@@ -762,6 +762,9 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `Submit one bounded C2C RESEARCH, PLAN, REVIEW, DONE, or BLOCKED result to the local control mailbox. ` +
         `This does not edit workspace files or run commands, cannot choose a write path, and has no diff/log fields. ` +
         `Each request represents exactly one Codex question and accepts exactly one answer. ` +
+        `For local-only RESEARCH use sources: [] and cite relative file paths/lines in conclusions. ` +
+        `External sources require title, a real HTTP(S) url, publishedDate (YYYY-MM-DD or null), and keyEvidence; ` +
+        `workspace:/ and file:// are not external sources. Never invent sources. ` +
         `Only use it when Codex supplied the active RESULT_REQUEST_ID and RESULT_PHASE. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         context_id: contextIdSchema,

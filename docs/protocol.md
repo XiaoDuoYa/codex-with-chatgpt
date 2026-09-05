@@ -431,7 +431,8 @@ c2c control open \
 ```
 
 The response contains `RESULT_REQUEST_ID`, `CONTEXT_ID`, expiration, exact
-`tabId`, and the surface `generation`. The capability is bound to:
+`tabId`, the surface `generation`, and `resultContract` (current-phase payload
+examples, required callback tool and dispatch instructions). The capability is bound to:
 
 ```text
 workspaceId, projectId, registrationId
@@ -593,6 +594,78 @@ get_control_result_status
 requires the exact request id, local session, task, iteration, phase, context
 id, and schema-valid result payload.
 
+## Result delivery preflight
+
+Machine health, a listed server tool and a successful BOOT read are separate
+from ChatGPT's current-message tool availability and accepted result delivery.
+Before each control send, inspect the exact owned chat's composer. Select the
+existing C2C connector when available in its picker and verify the selection
+after filling the prompt. A previous message's chip or successful call does not
+establish current selection. Do not open another chat or install another connector.
+
+Include `resultContract.instructions` and the relevant example from `control open`.
+Ask ChatGPT to check that `submit_control_result` is callable in this message
+before spending work on research/analysis. Tool names quoted in history and
+catalog membership are not proof. If `get_control_result_status` is exposed,
+call it with the exact correlation and proceed only for `pending`. Its absence
+alone does not block a usable callback; the host reads and acknowledges the
+authoritative mailbox. This is a host/prompt workflow, not a claim that the CLI
+can introspect or force the webpage's tool selection.
+
+Unavailable tools, explicit platform rejection or required approval stop this
+turn. Record phase, request ID, timestamp and sanitized observed error/trace;
+distinguish actual MCP error evidence from a model-reported error. Do not infer
+that missing selection caused a rejection, or that a safety check came from
+C2C. Do not bypass platform checks, change read/write annotations, switch
+accounts/models/apps, or forge a result from browser text. If the same callback
+is available and permitted it may submit `BLOCKED`; otherwise report locally.
+The host checks the mailbox before cancelling that exact failed pending request,
+and consumes any receipt that won the race. Do not cancel merely for a generation
+timeout. After resolution, use a fresh control request/context, not a resend of
+the failed authorization.
+
+## Result payloads
+
+`submit_control_result` takes `context_id`, `requestId`, `localSessionId`,
+`taskId`, `iteration`, `phase`, `kind` and `payload`. Copy the exact correlation
+from `control open`; do not send the whole CLI response as tool arguments.
+`resultContract.examples` contains schema-valid scaffolds for all allowed kinds
+of the requested phase. Replace their placeholders with actual findings. They
+are not evidence and must never be submitted verbatim as a successful answer.
+
+Local-only RESEARCH needs no external URL:
+
+```json
+{
+  "kind": "RESEARCH",
+  "payload": {
+    "question": "What is the sum in the local fixture?",
+    "summary": "17 + 25 = 42",
+    "conclusions": ["fixture.txt:1-4 contains 17 and 25; their sum is 42."],
+    "sources": [],
+    "openQuestions": []
+  }
+}
+```
+
+This is only a shape example; use the file and values actually read. `sources`
+contains external sources actually consulted, with `title`, `url`,
+`publishedDate` (real `YYYY-MM-DD` or `null`) and `keyEvidence`. Only HTTP(S)
+URLs without credentials are accepted. Cite local paths/lines in `conclusions`,
+not as `workspace:/`, `file://`, or invented public URLs. Empty `sources` is
+valid; empty `conclusions` is not. Web research still cites its real sources.
+
+`BLOCKED` uses `payload: {"reason": "<observed blocker>", "needs": ["<needed action>"]}`
+and the original request phase. It does not use the RESEARCH payload shape.
+PLAN accepts PLAN/BLOCKED; REVIEW accepts REVIEW/DONE/BLOCKED. Use DONE for
+a clean review instead of inventing findings to populate a REVIEW payload.
+
+Acceptance requires `pending -> received -> acknowledged` for each exact
+request. Test consecutive messages in one chat and concurrent requests in
+separate workspaces, not only a first read. Local SDK tests do not certify
+ChatGPT tool availability. Keep installed/healthy/readable and live round-trip
+verification as distinct outcomes.
+
 ## Boot prompt
 
 Send this to a newly created ChatGPT chat after confirming it is in Chat mode:
@@ -639,7 +712,11 @@ TASK_GOAL: <short goal without pasted repository content>
 
 Use MCP with context_id "<context-id>" for every call. Work only in the
 workspace identified by that context. Return the requested phase result using
-submit_control_result for this exact RESULT_REQUEST_ID. For RESEARCH, use
+submit_control_result for this exact RESULT_REQUEST_ID. Before starting, check
+that this callback is callable in the current message, not just in history.
+Follow the resultContract instructions and phase example from control open.
+For local-only RESEARCH, use sources: [] and cite relative files/lines in
+conclusions. For RESEARCH, use
 ChatGPT's built-in Web Search when current or external facts are needed and
 use MCP for bounded workspace reads. For PLAN and REVIEW, use MCP before
 synthesizing the answer. Do not repeat read-only discovery in Codex or paste

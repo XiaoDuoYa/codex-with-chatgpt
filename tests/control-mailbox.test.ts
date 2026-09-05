@@ -376,6 +376,37 @@ describe("control result mailbox", () => {
     ).toThrow(/exceeds 32768 bytes/);
   });
 
+  it("receives and acknowledges local-only research without invented external sources", () => {
+    const turn = { localSessionId: "session-research", ...correlation(0, "RESEARCH") };
+    const request = openControlResultRequest(WORKSPACE_A, turn);
+    const payload = {
+      question: "What is the local fixture sum?",
+      summary: "17 + 25 = 42",
+      conclusions: ["fixture.txt:1-4 contains 17 and 25; their sum is 42."],
+      sources: [],
+      openQuestions: [],
+    };
+    submitControlResult(WORKSPACE_A, researchInput(request.requestId, { payload }));
+    expect(getControlResultStatus(WORKSPACE_A, request.requestId, turn.localSessionId, turn))
+      .toMatchObject({ status: "received", result: { payload } });
+    acknowledgeControlResult(WORKSPACE_A, request.requestId, turn.localSessionId, turn);
+    expect(getControlResultStatus(WORKSPACE_A, request.requestId, turn.localSessionId, turn).status)
+      .toBe("acknowledged");
+  });
+
+  it.each(["workspace:/fixture.txt", "file:///tmp/fixture.txt", "https://user:password@example.com/"])(
+    "rejects non-external or credential-bearing research source %s without consuming the request",
+    (url) => {
+      const turn = { localSessionId: "session-research", ...correlation(0, "RESEARCH") };
+      const request = openControlResultRequest(WORKSPACE_A, turn);
+      const input = researchInput(request.requestId);
+      input.payload.sources[0]!.url = url;
+      expect(() => submitControlResult(WORKSPACE_A, input)).toThrow(/unsafe/);
+      expect(getControlResultStatus(WORKSPACE_A, request.requestId, turn.localSessionId, turn).status)
+        .toBe("pending");
+    },
+  );
+
   it("stores a standalone RESEARCH result with dated sources", () => {
     const request = openControlResultRequest(WORKSPACE_A, {
       localSessionId: "session-research",

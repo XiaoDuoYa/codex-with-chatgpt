@@ -28,7 +28,8 @@ large research and discovery contexts out of the local Codex conversation.
 - Use `RESEARCH` for current facts, external documentation, Web Search, source
   comparison, and workspace discovery. ChatGPT may use its built-in Web Search;
   that search is a ChatGPT capability, not a local MCP tool. Require concise
-  conclusions and HTTP(S) sources in the structured result.
+  conclusions and any external HTTP(S) sources actually consulted. Local-only
+  research uses `sources: []` and cites relative files/lines in `conclusions`.
 - Use `PLAN` for architecture, implementation options, API design, migration
   steps, documentation outlines, and other synthesis based on MCP reads.
 - Use `REVIEW` after local execution. Ask ChatGPT to inspect the recorded status,
@@ -573,6 +574,30 @@ c2c control open \
 Save both `RESULT_REQUEST_ID` and `CONTEXT_ID`. An already-open request is
 never silently replaced; inspect or cancel it instead.
 
+Use the returned `resultContract` when composing every control prompt: include
+its instructions and the needed phase example, replacing example placeholders
+with the task-specific question (ChatGPT supplies the evidence and answer).
+Never copy an example as an actual result. Detailed payloads and per-message
+connector checks are in `<checkout>/docs/protocol.md`, "Result delivery preflight"
+and "Result payloads"; read these before the first control turn.
+
+Select the existing C2C connector for the current message when its picker entry
+is available, and verify that the selection remains after filling the composer.
+Do not assume a previous message's selection persists. Require ChatGPT to check
+that `submit_control_result` is callable in this message before doing the task.
+`get_control_result_status` is useful when exposed but is not required: Codex
+checks the authoritative mailbox. BOOT reads and machine health do not prove
+result delivery, and a tool name in an old answer is not current availability.
+
+If the callback is unavailable or a platform confirmation/safety check blocks
+it, stop this turn. Preserve the request correlation and a sanitized observed
+error, distinguish actual tool errors from ChatGPT's description, and ask for
+the required user action when applicable. Do not silently reconnect, switch
+apps/models, mislabel writes as reads, or use another tool/path to bypass the
+block. Read the local mailbox before cancelling an exact pending failed turn;
+consume any concurrently received result instead. A timeout while generating
+alone still does not authorize cancellation or another send.
+
 Every control prompt must contain:
 
 ```text
@@ -584,9 +609,13 @@ TASK_ID: <task-id>
 ITERATION: <n>
 RESULT_PHASE: <phase>
 
+Use the "Codex with ChatGPT" connector in this message. Check that
+submit_control_result is callable now before starting the task.
 Use context_id "<context-id>" on every MCP call. Work only in the workspace
 bound to that context. Submit one schema-valid result for this exact request
-with submit_control_result. Codex owns all edits and execution.
+with submit_control_result. Follow resultContract.instructions and the
+phase-matching payload example supplied by control open. Codex owns all edits
+and execution.
 ```
 
 For `EXECUTED`, record command, changed files, tests and output locally, then

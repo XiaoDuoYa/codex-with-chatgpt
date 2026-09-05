@@ -59,6 +59,57 @@ afterEach(() => {
 });
 
 describe("machine MCP capability correlation", () => {
+  it("keeps result tools listed across consecutive local-only turns in two workspaces", async () => {
+    cleanups.push(isolateStateDir());
+    const gateway = new MachineGateway();
+    const registrations = [0, 1].map((index) => {
+      const root = makeTmpDir(`mcp-local-research-${index}`);
+      cleanups.push(root);
+      write(root, "fixture.txt", `marker-${index}\n17\n25\n`);
+      return gateway.registerWorkspace(root);
+    });
+    const connection = await connectedClient(gateway);
+    try {
+      for (const iteration of [0, 1]) {
+        const { tools } = await connection.client.listTools();
+        expect(tools.find((tool) => tool.name === "submit_control_result")?.annotations)
+          .toMatchObject({ readOnlyHint: false, destructiveHint: false, idempotentHint: true });
+        await Promise.all(registrations.map(async (registration, index) => {
+          const turn = { localSessionId: `session-local-${index}`, taskId: "local-research", iteration, phase: "RESEARCH" as const };
+          const request = openControlResultRequest(registration.workspaceId, { ...turn, ttlMs: 60_000 });
+          const grant = gateway.issueTurn({
+            ...registration, ...turn, requestId: request.requestId,
+            scopes: ["workspace.read", "c2c.result.write"], compactionEpoch: 0, generation: 1, ttlMs: 60_000,
+          });
+          const read = await connection.client.callTool({ name: "read_file", arguments: { context_id: grant.token, path: "fixture.txt" } });
+          expect(read.isError).not.toBe(true);
+          expect(JSON.stringify(read.structuredContent)).toContain(`marker-${index}`);
+          expect(JSON.stringify(read.structuredContent)).not.toContain(`marker-${1 - index}`);
+          const payload = {
+            question: "What is the fixture sum?", summary: "17 + 25 = 42",
+            conclusions: [`fixture.txt:1-3 has marker-${index}, 17 and 25. The sum is 42.`],
+            sources: [], openQuestions: [],
+          };
+          const receipt = await connection.client.callTool({
+            name: "submit_control_result",
+            arguments: { context_id: grant.token, requestId: request.requestId, ...turn, kind: "RESEARCH", payload },
+          });
+          expect(receipt.isError).not.toBe(true);
+          expect(receipt.structuredContent).toMatchObject({ accepted: true, requestId: request.requestId });
+          expect(getControlResultStatus(registration.workspaceId, request.requestId, turn.localSessionId, turn))
+            .toMatchObject({ status: "received", result: { payload } });
+          acknowledgeControlResult(registration.workspaceId, request.requestId, turn.localSessionId, turn);
+          expect(getControlResultStatus(registration.workspaceId, request.requestId, turn.localSessionId, turn).status)
+            .toBe("acknowledged");
+        }));
+      }
+      const { tools } = await connection.client.listTools();
+      expect(tools.some((tool) => tool.name === "submit_control_result")).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("documents git_diff pagination with its output field names", async () => {
     cleanups.push(isolateStateDir());
     const gateway = new MachineGateway();

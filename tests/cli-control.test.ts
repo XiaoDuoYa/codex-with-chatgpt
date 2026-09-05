@@ -339,6 +339,14 @@ describe("control CLI correlation", () => {
       generation: 1,
     });
     expect(opened.body.contextExpiresAt).toEqual(expect.any(String));
+    expect(opened.body.resultContract).toMatchObject({
+      phase: "RESEARCH",
+      requiredTools: ["submit_control_result"],
+      examples: [
+        { kind: "RESEARCH", payload: { sources: [] } },
+        { kind: "BLOCKED", payload: { reason: expect.any(String), needs: expect.any(Array) } },
+      ],
+    });
     const request = opened.body.request as {
       requestId: string;
       workspaceId: string;

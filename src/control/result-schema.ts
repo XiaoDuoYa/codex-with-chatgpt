@@ -147,8 +147,8 @@ const publishedDateSchema = z
 const researchSourceSchema = z
   .object({
     title: boundedText(300),
-    url: researchSourceUrlSchema,
-    publishedDate: publishedDateSchema,
+    url: researchSourceUrlSchema.describe("Real external HTTP(S) source URL without credentials; never workspace:/ or file://"),
+    publishedDate: publishedDateSchema.describe("YYYY-MM-DD when known, otherwise null"),
     keyEvidence: boundedText(1200),
   })
   .strict();
@@ -157,8 +157,10 @@ export const researchPayloadSchema = z
   .object({
     question: boundedText(1200),
     summary: boundedText(4000),
-    conclusions: z.array(boundedText(1200)).min(1).max(20),
-    sources: z.array(researchSourceSchema).min(1).max(20),
+    conclusions: z.array(boundedText(1200)).min(1).max(20)
+      .describe("Evidence-backed conclusions. Cite workspace-relative files and line numbers here for local reads."),
+    sources: z.array(researchSourceSchema).max(20)
+      .describe("External sources actually consulted. Use [] for local-only research; never invent a URL to cite a local file."),
     openQuestions: z.array(boundedText(600)).max(12).default([]),
   })
   .strict()
