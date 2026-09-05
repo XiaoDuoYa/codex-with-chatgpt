@@ -5,6 +5,8 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
+import { projectSelectionSchema } from "../session/project-selection.js";
+import { pluginIdsSchema, pluginIntentSchema, pluginPreflightSchema } from "../session/turn-preflight.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { CONTROL_PHASES, c2cIdSchema } from "../control/result-schema.js";
 import { Logger, nullLogger } from "../logger/index.js";
@@ -62,6 +64,9 @@ const issueTurnSchema = registrationIdentitySchema
     compactionEpoch: z.number().int().nonnegative(),
     generation: z.number().int().nonnegative(),
     ttlMs: z.number().int().min(1_000).max(60 * 60_000).optional(),
+    plugins: pluginIdsSchema.optional(),
+    pluginIntent: pluginIntentSchema.optional(),
+    pluginPreflight: pluginPreflightSchema.optional(),
   })
   .strict();
 const cancellationBindingSchema = z
@@ -104,6 +109,7 @@ const surfaceClaimSchema = surfaceIdentitySchema
     surfaceId: z.literal(CHATGPT_SURFACE_ID),
     tabId: c2cIdSchema,
     projectUrl: z.string().min(1).max(4_096),
+    projectSelection: projectSelectionSchema.optional(),
     chatUrl: z.string().min(1).max(4_096).optional(),
     ownerProcessEpoch: c2cIdSchema.optional(),
     replaces: surfaceLeaseRefSchema.optional(),

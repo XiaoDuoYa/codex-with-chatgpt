@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { projectSelectionSchema, validateProjectSelection, type ProjectSelection } from "./project-selection.js";
 import {
   C2C_ID_PATTERN,
 } from "../control/result-schema.js";
@@ -63,6 +64,8 @@ export interface SurfaceLease {
   surfaceId: string;
   tabId: string;
   projectUrl: string;
+  /** Trusted host's first-pairing observation, scoped by this lease's owner and generation. */
+  projectSelection?: ProjectSelection;
   /** Missing while the lease is a Project collection candidate. */
   chatUrl?: string;
   generation: number;
@@ -91,6 +94,9 @@ export interface ClaimSurfaceOptions {
   surfaceId: string;
   tabId: string;
   projectUrl: string;
+  projectSelection?: ProjectSelection;
+  /** Gateway-supplied local name; never accepted from the browser/admin payload. */
+  workspaceName?: string;
   /** Optional until ChatGPT creates the first conversation in the Project. */
   chatUrl?: string;
   /** Optional process identity for a daemon or a test simulating a restart. */
@@ -126,6 +132,7 @@ export interface CommitVerifiedSurfaceRouteOptions {
   workspaceId: string;
   chatUrl?: string;
   connectorName?: string;
+  requireProjectSelection?: boolean;
   now?: Date;
 }
 
@@ -429,6 +436,7 @@ function parseLease(value: unknown): SurfaceLease {
       "ownerPid",
       "claimedAt",
       "updatedAt",
+      "projectSelection",
     ],
     "surface lease"
   );
@@ -468,6 +476,7 @@ function parseLease(value: unknown): SurfaceLease {
     ownerPid,
     claimedAt,
     updatedAt,
+    ...(raw.projectSelection === undefined ? {} : { projectSelection: projectSelectionSchema.parse(raw.projectSelection) }),
   };
 }
 
@@ -1453,6 +1462,8 @@ function validateClaim(request: ClaimSurfaceOptions): {
       tabId,
       projectUrl,
       chatUrl,
+      projectSelection: request.projectSelection === undefined ? undefined : projectSelectionSchema.parse(request.projectSelection),
+      workspaceName: request.workspaceName,
       ownerProcessEpoch,
       replaces: request.replaces,
       leaseTtlMs: leaseTtl(request.leaseTtlMs),
@@ -1490,6 +1501,13 @@ export function claimSurface(options: ClaimSurfaceOptions): SurfaceLease {
     const activeForSession = state.leases.find(
       (lease) => sessionKey(lease.projectId, lease.localSessionId) === requestedSession
     );
+    if (!machine.projectUrls[request.projectId] && request.workspaceName !== undefined) {
+      request.projectSelection = validateProjectSelection(
+        request.projectSelection ?? (activeForSession && leaseMatchesRequest(activeForSession, request, request.ownerProcessEpoch)
+          ? activeForSession.projectSelection : undefined),
+        request.projectUrl, request.workspaceName, request.now.getTime(),
+      );
+    }
     const activeForPage = state.leases.find((lease) => leaseMatchesPage(lease, request.browserId, request.surfaceId, request.tabId));
     if (activeForPage && activeForPage.localSessionId !== request.localSessionId) {
       throw new SurfaceOwnershipError(
@@ -1583,6 +1601,7 @@ export function claimSurface(options: ClaimSurfaceOptions): SurfaceLease {
       tabId: request.tabId,
       projectUrl: request.projectUrl,
       chatUrl: request.chatUrl,
+      ...(request.projectSelection ? { projectSelection: request.projectSelection } : {}),
       generation,
       leaseExpiresAt,
       ownerProcessEpoch: request.ownerProcessEpoch,
@@ -1636,6 +1655,15 @@ export function commitVerifiedSurfaceRoute(
       );
     }
     const chatUrl = observedChatUrl ?? current.chatUrl;
+    if (options.requireProjectSelection && !machine.projectUrls[ref.projectId] && !current.projectSelection) {
+      throw new Error("First Project commit requires the current candidate's recorded selection evidence.");
+    }
+    if (current.chatUrl && chatUrl !== current.chatUrl) {
+      throw new SurfaceOwnershipError(
+        "STALE_SURFACE_GENERATION",
+        "Changing a known ChatGPT chat requires explicit page replacement and a fresh generation",
+      );
+    }
     if (!chatUrl) {
       throw new SurfaceOwnershipError(
         "INVALID_SURFACE_OWNERSHIP_STATE",

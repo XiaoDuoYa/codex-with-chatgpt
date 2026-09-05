@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { projectSelection } from "./helpers.js";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -95,6 +96,7 @@ describe("machine CLI lifecycle", () => {
     const claimed = runJson(stateDir, [
       "surface",
       "claim",
+      "--project-selection", JSON.stringify(projectSelection("https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project")),
       "-w",
       workspace,
       "--local-session",
@@ -335,6 +337,7 @@ describe("machine CLI lifecycle", () => {
 
     const claimed = runJson(stateDir, [
       "surface", "claim", "-w", workspace, "--local-session", localSessionId,
+      "--project-selection", JSON.stringify(projectSelection(projectUrl)),
       "--tab-id", "tab-cli-reconcile", "--project-url", projectUrl, "--chat-url", chatUrl,
     ]);
     expect(claimed.command.status).toBe(0);

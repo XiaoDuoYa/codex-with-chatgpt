@@ -1,3 +1,4 @@
+import { assessPluginPreflight } from "../session/turn-preflight.js";
 import {
   TurnCapabilityBroker,
   TurnCapabilityError,
@@ -235,7 +236,7 @@ export class MachineGateway {
   ): SurfaceLease {
     assertChatGPTSurfaceIdentity(input.browserId, input.surfaceId);
     this.assertSurfaceMutationAllowed(identity.projectId, identity.localSessionId);
-    this.registry.lookup(identity.workspaceId, identity.projectId, identity.registrationId);
+    const registration = this.registry.lookup(identity.workspaceId, identity.projectId, identity.registrationId);
     const previous = currentSurfaceLease(identity.projectId, identity.localSessionId);
     const idempotent = previous && previous.tabId === input.tabId &&
       previous.ownerProcessEpoch === (input.ownerProcessEpoch ?? currentOwnerProcessEpoch()) &&
@@ -252,6 +253,7 @@ export class MachineGateway {
     }
     const claimed = claimSurface({
       ...input,
+      workspaceName: registration.workspace.name,
       projectId: identity.projectId,
       localSessionId: identity.localSessionId,
     });
@@ -272,7 +274,7 @@ export class MachineGateway {
     if (lease.projectId !== identity.projectId || lease.localSessionId !== identity.localSessionId) {
       throw new Error("surface lease does not belong to the registered local session");
     }
-    return commitVerifiedSurfaceRoute({ lease, workspaceId: identity.workspaceId, ...options });
+    return commitVerifiedSurfaceRoute({ lease, workspaceId: identity.workspaceId, ...options, requireProjectSelection: true });
   }
 
   surfaceRenew(identity: MachineSurfaceIdentity, lease: SurfaceLeaseRef, leaseTtlMs?: number): SurfaceLease {
@@ -324,6 +326,9 @@ export class MachineGateway {
    */
   issueTurn(input: IssueTurnCapabilityInput): TurnCapabilityGrant {
     this.registry.lookup(input.workspaceId, input.projectId, input.registrationId);
+    if (input.plugins?.length) requireCurrentTurnSurface(input);
+    assessPluginPreflight(input, input.plugins?.length
+      ? currentSurfaceLease(input.projectId, input.localSessionId) : null, this.broker.bootEpoch);
     return this.broker.issueReplacingSession(input);
   }
 

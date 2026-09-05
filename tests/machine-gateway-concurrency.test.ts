@@ -14,7 +14,7 @@ import {
 import { startMachineGatewayServer, type MachineGatewayServer } from "../src/gateway/server.js";
 import { nullLogger } from "../src/logger/index.js";
 import { createMcpServer } from "../src/mcp/server.js";
-import { cleanup, isolateStateDir, makeTmpDir } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir, projectSelection } from "./helpers.js";
 
 const PROJECT_URL = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
 const SESSION_COUNT = 100;
@@ -126,6 +126,7 @@ describe("machine gateway session concurrency", () => {
         claimSurface(server!.runtime, session.identity, {
           tabId: session.tabId,
           projectUrl: PROJECT_URL,
+          projectSelection: projectSelection(PROJECT_URL),
           chatUrl: session.chatUrl,
           ownerProcessEpoch: `owner-${session.localSessionId}`,
           leaseTtlMs: FLOW_TTL_MS,

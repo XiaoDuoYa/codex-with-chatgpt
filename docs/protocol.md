@@ -125,6 +125,42 @@ required before the workspace can receive another turn.
 
 ## Surface lease contract
 
+### First Project selection
+
+An unpaired workspace must create its own Project through the host browser UI,
+or use an exact existing URL explicitly selected by the user. A sidebar title,
+foreground page, checkpoint URL or successful MCP workspace read does not prove
+that selection. Add this fresh host observation to the first claim:
+
+```sh
+c2c surface claim --local-session <id> --tab-id <returned-tab-id> \
+  --project-url <observed-project-url> --project-selection '<selection-json>' --json
+```
+
+```json
+{
+  "source": "created",
+  "projectUrl": "https://chatgpt.com/g/g-p-.../project",
+  "observedTitle": "<workspace.name>",
+  "observedAt": "<current-ISO-timestamp>"
+}
+```
+
+`source: user-confirmed` is reserved for a real user choice of that exact URL;
+it permits a different display title. Creation must have the expected workspace
+title. Observations expire after five minutes for new claims. The Gateway rejects
+missing/mismatched evidence before BOOT and stores accepted evidence inside the
+machine-owned candidate lease, scoped by its owner/session/tab/generation.
+Commit requires that recorded candidate evidence for a first association. An
+interrupted candidate can resume; it does not become a durable Project until
+BOOT and commit. Existing authoritative associations retain their exact URL.
+
+This is a trusted-host observation contract, like `surface check`, not an
+independent browser proof. The host must never manufacture the observation.
+The existing machine-wide uniqueness locks also reject a Project reserved by
+another workspace. On a conflict, inspect the winner and wait for its pairing;
+do not relabel, move chats, or adopt an unrelated Project to bypass the conflict.
+
 One local session first claims a temporary lease for the candidate ChatGPT
 page after opening the correct Project collection in the built-in browser. A
 new Project chat does not have a `/c/` URL yet, so `chatUrl` is optional during
@@ -186,6 +222,10 @@ c2c surface commit \
 ```
 
 Until this commit succeeds, no non-BOOT turn may be issued for the candidate.
+When the candidate already has a `chatUrl`, commit must preserve that exact
+canonical chat. A different chat inside the same Project still requires explicit
+replacement with a fresh generation. Only a Project-only candidate learns its
+first chat URL during commit.
 
 On verification failure, cancel the BOOT context and release the candidate
 instead. `generation` starts at 1 and increases on exact replacement. A replacement
@@ -391,6 +431,86 @@ before opening another.
 
 ## MCP request contract
 
+### Plugin dispatch preflight
+
+One C2C connector remains sufficient for local workspaces. ChatGPT's other
+plugins are separate app transports and are not exposed or authorized by the
+C2C tunnel. Select only task-needed installed plugins that are callable in the
+owned Project Chat. Catalog installation and Work-mode trial links are not
+evidence of Chat-mode availability. Do not switch modes, reconnect, install apps,
+or authorize external writes automatically.
+
+For GitHub, first run `c2c repository-identity --json` locally. It resolves the
+branch push remote / `remote.pushDefault` / branch remote / origin, in that order,
+unless `--remote` is explicit. It resolves SSH host aliases, lists sanitized fetch
+and push targets, and probes the effective `gh` actor for github.com only. Multiple
+push destinations and unsupported hosts remain unknown. Personal destinations
+require the matching owner; organization destinations require verified read
+access. Select the intended personal fork rather than treating upstream owner as
+the author. Git author/committer are separate metadata; Git transport identity is
+explicitly unknown and must be verified separately before a local push.
+
+For a plugin-dependent control turn, add `--plugins '<id,...>'` and
+`--plugin-preflight '<json>'`. Use the actual plugin IDs and observed state:
+
+```json
+{
+  "workspaceId": "<workspace-id>",
+  "localSessionId": "<session-id>",
+  "taskId": "<task-id>",
+  "iteration": 0,
+  "phase": "PLAN",
+  "tabId": "<owned-tab-id>",
+  "generation": 1,
+  "chatUrl": "https://chatgpt.com/g/g-p-.../c/...",
+  "bootEpoch": "<current-gateway-epoch>",
+  "observedAt": "<current-ISO-timestamp>",
+  "chatgptAccount": "<host-observed-account-and-workspace-key>",
+  "plugins": [{
+    "id": "GitHub",
+    "availability": "available",
+    "usesGitHub": true,
+    "githubActor": {"login": "<observed-login>", "id": "123", "source": "authenticated-profile"}
+  }]
+}
+```
+
+Availability is `available`, `unavailable`, `work-only`, `consent-required` or
+`unknown`. Bundles with GitHub dependencies set `usesGitHub: true`. The host must
+obtain login and stable ID from an authenticated own-profile tool in this chat;
+connection emails, display names, installed-account lists and local `gh` output
+do not establish the plugin actor. Without a profile tool, stop before repository
+operations. To discover an initially unknown identity, open a separate `RESEARCH`
+turn with `--plugin-intent identity-discovery --plugins <one-GitHub-plugin-id>`.
+Its fresh preflight includes the actually exposed `authenticatedProfileTool`
+name in the plugin entry, with `availability: available` and `usesGitHub: true`;
+`githubActor` may be absent. The tool's observed contract must return the
+authenticated caller's own profile, not accept a chosen account or repository.
+Do not invent a tool name. This mode emits `access: authenticated-profile-only`,
+the exact one-tool `allowedOperations`, and `repositoryAccess: none`.
+Only `c2c.result.write` is granted for C2C; additional scopes are rejected.
+No repository reads/searches, other app data or writes are permitted. Submit the
+observed login/stable ID to that mailbox, persist and ack it, then use a **new**
+business-turn request and fresh matching evidence. An empty ordinary plugin
+allowlist does not imply a discovery exception.
+
+For ordinary `--plugin-intent task` (the default), the CLI injects fresh
+`github: {repository, expectedActor}` from the selected
+local remote (`--github-remote` when explicitly needed). A supplied repository
+must match it. Owner API callers provide that same trusted-local snapshot. Both
+CLI and Gateway check the exact task, session, page/generation, boot epoch, selected
+plugin set and five-minute freshness before issuing a plugin-dependent turn.
+The CLI rejects before opening a mailbox when preflight fails. Read/status/ack and
+ordinary C2C-only work remain usable. Include returned `pluginPolicy` in the prompt:
+no unlisted plugin, only scoped reads in the selected repository, and no writes.
+
+These are host dispatch checks, not independent browser/account attestation or a
+permission sandbox for third-party tools. Re-observe immediately before use and
+after account, model, page or connection changes; never reuse another chat's proof.
+Provider/platform controls still own permission enforcement. Do not claim all
+plugins work with every model, or that a particular GitHub plugin is universally
+read-only: inspect its actual exposed tools and retain C2C's read-only policy.
+
 Every ChatGPT MCP call includes the tool's normal arguments plus:
 
 ```json
@@ -446,12 +566,12 @@ Then verify the route with:
 
 ```text
 Use the "Codex with ChatGPT" connector: call workspace_info and read one
-hello-style top-level file. Reply with the workspace name only after the values
-match the local workspace.
+hello-style top-level file. Reply with workspaceId, projectId and workspace name
+only after both IDs match the registration supplied by Codex.
 ```
 
-Only after the reply names the expected workspace may the local harness save or
-replace the session URL.
+Only after both IDs match and the independently observed Project/chat URLs match
+the selected Project may the local harness save or replace the session URL.
 
 ## Control prompt
 

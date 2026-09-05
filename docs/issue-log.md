@@ -6,6 +6,8 @@
 
 ## 本机收口结果
 
+- 本轮 Project/插件账号收口：36 个测试文件、469 项测试完整通过；类型检查、构建、Skill 校验和生产依赖审计通过。新增 Gateway 正向插件预检、身份发现及拒绝错误身份时保留原有效请求的测试。
+- ChatGPT 通过真实 MCP 回写本轮 REVIEW，提出的身份发现入口缺口已修复；iteration 1 定向复核返回 DONE。结果按精确关联保存 checkpoint 并确认，仍保留下述网页插件身份及 quant-insight 的实测边界。
 - 代码提交 `61be691`：`corepack pnpm exec vitest run --maxWorkers=1` 完整通过，33 个文件、452 项测试；类型检查、构建、Skill 校验与生产依赖审计通过。
 - ChatGPT 的最终 REVIEW 已通过真实 MCP 到达本地 mailbox，未发现阻塞性实现缺陷；要求补齐的最终全量测试证据已完成并记录。
 - 同 Project 两个独立会话同时持有活动请求，测试会话在主会话 REVIEW 尚未完成时独立写回；两个结果均已确认并保存关联 checkpoint。
@@ -33,6 +35,17 @@
 | C2C-010 | 注册表清理时复用同一个 Map/Set，先 clear 后遍历丢失其他项目 | 提交后复制新集合；覆盖注销一个项目、注册第三个项目、保留首个项目并重建注册表的回归测试。 |
 | C2C-011 | 部分 Gateway 单测未隔离机器状态，且临时非 Git 目录继承了真实仓库的项目身份 | 每项 Gateway 测试隔离机器状态；测试目录设置 Git 搜索边界，临时目录不再继承本仓库身份。该问题曾在本机测试时清除页面绑定，并中断一次 REVIEW；中断结果未计为通过。 |
 | C2C-012 | 一个会话首次绑定共享 Project 后，另一会话先前保存的无路由 checkpoint 被误判为损坏 | 读取时从共享 Project 状态刷新 checkpoint 的 Project 镜像，不从镜像生成路由；保留 task、iteration、goal 和结果 ID。覆盖双会话先存进度再分别绑定，以及旧镜像不能覆盖共享路由。 |
+| C2C-013 | 未配对工作区可能把任意 Project URL 当作首次绑定，例如用户报告的 quant-insight | 首次绑定必须有新建项目的真实宿主观察，或用户明确选择的精确 URL。创建标题需匹配工作区；五分钟内校验来源，并在归属锁内记录到候选租约，提交时再检查。既有权威绑定保留，不自动改绑或移动聊天。自动化已验证拒绝无来源、过期、错标题/URL及其他工作区占用；quant-insight 真实新建仍待验收。 |
+| C2C-014 | 已知 chatUrl 的候选可能在同一 generation 提交同 Project 内另一个 Chat | 提交必须保留已知的精确 Chat URL；换 Chat 必须显式替换并生成新的 generation。新增回归测试。 |
+| C2C-015 | 插件目录已安装不代表当前 Project Chat 可调用，目录试用可能跳入 Work 模式 | 增加逐任务插件集合和新鲜预检，核对工作区、会话、任务、阶段、页面、generation、Gateway epoch。只使用当前 Project Chat 可调用的所需插件；未知、Work-only 或需授权时阻止该插件任务。不自动安装、切模式或切账号。该预检是宿主分派约束，不是第三方插件权限沙箱。 |
+| C2C-016 | 仓库 owner、gh 登录人、提交署名、Git 传输凭据及 ChatGPT 插件身份混淆 | 新增 repository-identity，按实际推送 remote 优先级解析脱敏目标与 SSH 别名，分别检查 gh 的 login/稳定 ID、作者和提交者。GitHub 插件需经过认证的自身档案 login/ID 与本地 actor 匹配；个人 fork owner 错配阻止，组织仓库另查访问权。邮件/昵称不能替代身份，SSH/HTTPS 推送身份需独立核验。正向、错配、未知、跨任务和旧观察均有测试。 |
+| C2C-017 | ChatGPT REVIEW 指出：普通插件任务要求已知账号，但文档中的首次身份发现没有可表达的权限入口 | 新增 identity-discovery 意图，仅限 RESEARCH、一个 GitHub 相关插件和实际可用的认证自身档案工具；返回精确操作白名单、禁止仓库访问，C2C 仅授予结果回写。核验结果保存并确认后，普通任务使用新关联和真实匹配身份。空白插件白名单不隐含核验例外；新增 CLI、Gateway 和评估器回归测试。 |
+
+## 插件实测边界
+
+- 当前专属 Project Chat 使用页面显示的 `6 Pro`。GitHub 插件目录展示读、写工具，不能笼统称其为只读；本项目当前分派策略仍仅允许已核验的只读插件任务，写入和提交由本地执行。
+- 连接设置只展示连接邮件，当前 Chat 未暴露可用于核验的 GitHub 认证自身档案工具。插件账号仍为 UNKNOWN，没有执行 GitHub 插件仓库操作，也没有自动重连或切账号。
+- 本地本仓库目标为 `peak-xiong/codex-with-chatgpt`，有效 gh actor 为 `peak-xiong`，Git 作者和提交者均为 `Xiong Feng` 的对应 noreply 身份。此事实不证明网页插件账号相同。
 
 ## 保留的基础能力
 

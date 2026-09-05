@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { reportControlProgress, submitControlResult } from "../src/control/mailbox.js";
+import { readMachineRuntime } from "../src/gateway/runtime.js";
+import { Workspace } from "../src/workspace/manager.js";
 import {
   cleanup,
   isolateStateDir,
@@ -11,6 +13,7 @@ import {
   startManagedMachineFixture,
   type ManagedMachineFixture,
   write,
+  projectSelection,
 } from "./helpers.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -84,6 +87,7 @@ function claimSurface(localSessionId: string, tabId = `tab-${localSessionId}`): 
   const claimed = runJson([
     "surface",
     "claim",
+    "--project-selection", JSON.stringify(projectSelection("https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project")),
     "-w",
     workspace,
     "--local-session",
@@ -115,10 +119,45 @@ function claimSurface(localSessionId: string, tabId = `tab-${localSessionId}`): 
 }
 
 describe("control CLI correlation", () => {
+  it("opens a profile-only bootstrap with an unknown actor and excludes repository scopes", () => {
+    const localSessionId = "session-profile-discovery";
+    claimSurface(localSessionId);
+    const current = runJson(["surface", "get", "--local-session", localSessionId]);
+    const page = current.body.lease as { tabId: string; chatUrl: string; generation: number };
+    const proof = {
+      workspaceId: new Workspace(workspace).id, localSessionId,
+      taskId: "task-profile", iteration: 0, phase: "RESEARCH",
+      tabId: page.tabId, chatUrl: page.chatUrl, generation: page.generation,
+      bootEpoch: readMachineRuntime()!.bootEpoch,
+      observedAt: new Date().toISOString(), chatgptAccount: "fixture-account",
+      plugins: [{ id: "GitHub", availability: "available", usesGitHub: true, authenticatedProfileTool: "get_authenticated_user" }],
+    };
+    const args = ["control", "open", "--local-session", localSessionId, "--task", "task-profile", "--iteration", "0", "--phase", "RESEARCH", "--plugins", "GitHub", "--plugin-intent", "identity-discovery", "--plugin-preflight", JSON.stringify(proof)];
+    const unsafe = runJson([...args, "--scopes", "git.read"]);
+    expect(unsafe.command.status).toBe(1);
+    expect(runJson(["surface", "get", "--local-session", localSessionId]).body.control).toBeNull();
+    const opened = runJson(args);
+    expect(opened.command.status).toBe(0);
+    expect(opened.body.pluginPolicy).toEqual({ allowedPlugins: ["GitHub"], access: "authenticated-profile-only", repositoryAccess: "none", allowedOperations: [{ plugin: "GitHub", tool: "get_authenticated_user" }] });
+    const request = opened.body.request as { requestId: string };
+    const cancelled = runJson(["control", "cancel", "--local-session", localSessionId, "--task", "task-profile", "--iteration", "0", "--phase", "RESEARCH", "--request", request.requestId]);
+    expect(cancelled.command.status).toBe(0);
+  });
+
+  it("rejects plugin dispatch without fresh observations before opening a mailbox", () => {
+    claimSurface("session-plugin-gate");
+    const failed = runJson(["control", "open", "--local-session", "session-plugin-gate", "--task", "plugin-task", "--iteration", "0", "--phase", "PLAN", "--plugins", "GitHub"]);
+    expect(failed.command.status).toBe(1);
+    const current = runJson(["surface", "get", "--local-session", "session-plugin-gate"]);
+    expect(current.command.status).toBe(0);
+    expect(current.body.control).toBeNull();
+  });
+
   it("supports a Project-only candidate until the first chat URL is observed", () => {
     const claimed = runJson([
       "surface",
       "claim",
+      "--project-selection", JSON.stringify(projectSelection("https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project")),
       "-w",
       workspace,
       "--local-session",

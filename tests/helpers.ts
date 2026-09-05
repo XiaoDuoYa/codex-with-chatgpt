@@ -14,6 +14,10 @@ import {
 } from "../src/tunnel/openai-secure.js";
 import { machineMcpCommand } from "../src/process/machine-daemon.js";
 
+export function projectSelection(projectUrl: string) {
+  return { source: "user-confirmed" as const, projectUrl, observedTitle: "Explicit fixture Project", observedAt: new Date().toISOString() };
+}
+
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const testRoot = path.join(projectRoot, ".tooling", "test-tmp");
 

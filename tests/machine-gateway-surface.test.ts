@@ -8,7 +8,7 @@ import {
   reapExpiredSurfaceLeases,
   releaseSurface,
 } from "../src/session/surface-ownership.js";
-import { cleanup, isolateStateDir, makeTmpDir } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir, projectSelection } from "./helpers.js";
 
 const PROJECT_URL = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
 const START = new Date();
@@ -36,6 +36,7 @@ function surface(projectId: string, localSessionId: string, tabId: string, overr
     surfaceId: "chatgpt",
     tabId,
     projectUrl: PROJECT_URL,
+    projectSelection: projectSelection(PROJECT_URL),
     chatUrl: chatUrl(`chat-${localSessionId}`),
     ownerProcessEpoch: `owner-${localSessionId}`,
     now: START,
@@ -74,6 +75,7 @@ describe("machine gateway surface invalidation", () => {
     const identity = { ...registration, localSessionId: "session-recover" };
     const first = gateway.surfaceClaim(identity, {
       browserId: "iab", surfaceId: "chatgpt", tabId: "tab-old", projectUrl: PROJECT_URL,
+      projectSelection: projectSelection(PROJECT_URL),
       chatUrl: chatUrl("old"), ownerProcessEpoch: "owner-recover", leaseTtlMs: 60000,
     });
     gateway.surfaceCommit(identity, first, {});

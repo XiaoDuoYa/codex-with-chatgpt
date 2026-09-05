@@ -210,6 +210,21 @@ project-only memory when the user chooses that mode. Never match a Project by
 display name when a saved Project URL is available. The global connector is
 reused for all workspaces.
 
+First pairing must start with an observed **New Project** creation for this
+workspace. Verify its title and returned collection URL before BOOT. Do not
+select another sidebar Project, use the foreground Project, or infer intent
+from a matching name. If creation is unavailable, stop this workspace's pairing;
+an existing Project may be used only when the user explicitly approves its exact
+URL. Do not move existing chats or change an established binding automatically.
+
+On the first `surface claim`, add `--project-selection '<json>'` with `source`
+(`created` or `user-confirmed`), the exact `projectUrl`, `observedTitle`, and
+current ISO `observedAt`. Record the real UI action or user choice, never invent
+this observation to satisfy the gate. Created titles must match `workspace.name`.
+The Gateway records this host observation in the candidate lease with its
+session/tab/generation; it is not independent proof from ChatGPT or BOOT. See
+`<checkout>/docs/protocol.md`, "First Project selection", for the JSON shape.
+
 ## Built-in browser rules
 
 Use the in-app browser (`iab`) only. Drive each owned page through Computer Use
@@ -397,11 +412,13 @@ verify with:
 
 ```text
 Use the "Codex with ChatGPT" connector: call workspace_info and read one
-hello-style top-level file. Reply with the workspace name only after it matches
-the local workspace.
+hello-style top-level file. Reply with workspaceId, projectId and workspace name
+only after they match the expected registered workspace.
 ```
 
-Confirm the reply names the expected workspace. If it does not, cancel the BOOT
+Confirm both opaque IDs match the captured registration, and independently
+confirm the observed Project/chat URL. A workspace name alone is insufficient.
+If either check fails, cancel the BOOT
 context, release the candidate lease, and do not save the URL or issue a
 control turn. A boot check has no mailbox request; inspect only the answer
 paired with that exact prompt, never the latest answer.
@@ -445,6 +462,53 @@ If a route check fails, repair only this session's page and issue a new context.
 Never send to whichever tab happens to be visible.
 
 ## Control lifecycle
+
+### ChatGPT plugins and account checks
+
+For a task that needs a ChatGPT-side plugin/app, read
+`<checkout>/docs/protocol.md`, "Plugin dispatch preflight". Use only the requested
+installed plugins that are actually callable in this exact Project Chat. Inspect
+the current conversation's picker and exposed tools, not only the plugin catalog.
+A plugin bundle using GitHub requires GitHub identity verification too.
+
+Do not use catalog "try in chat" links that open Work mode or a different chat.
+If a plugin is unavailable here, report that limitation; do not silently switch
+mode/model, install, reconnect, grant permissions, or change accounts. A missing
+plugin blocks only the plugin-dependent work; normal C2C reads can continue.
+
+Before GitHub-dependent work, run `c2c repository-identity --json` from the
+trusted workspace. It separates the intended push remote, repository owner,
+effective `gh` actor, Git author/committer and unknown Git transport actor. An
+explicit `--remote` selects a user-intended remote; do not change Git config.
+Personal fork owner should match the actor; organization access is checked
+separately. Neither upstream ownership nor ChatGPT nickname establishes identity.
+
+Use an authenticated own-profile tool in the owned ChatGPT chat to obtain the
+plugin's GitHub login and stable user ID. If unavailable, only verification
+discovery is permitted, with no repository searches, reads or writes. Collect
+the proof through a `RESEARCH` mailbox turn with `--plugin-intent identity-discovery`
+and exactly one `--plugins` selection. Its fresh preflight must name the actually
+exposed `authenticatedProfileTool`; the returned policy permits only that
+authenticated own-profile operation and C2C result submission, with no repository
+access. An empty plugin allowlist is not an implicit exception. Persist and ack
+the result, then start a new business turn with real observed identity and fresh
+correlation. See the protocol for the exact discovery fields. A displayed
+connection email is not a substitute for the provider login/ID. Never copy local
+`gh` results into the plugin's observed identity fields.
+
+Pass `--plugins` and fresh `--plugin-preflight` evidence to `control open` as
+documented below. The CLI re-reads local GitHub identity; the Gateway validates
+the selected set, identity match, page ownership, task correlation and freshness.
+Include the returned `pluginPolicy` in the exact owned control prompt. Default
+policy permits no third-party plugins. Approved plugin use is read-only and
+restricted to the stated task and repository; all writes remain local.
+
+Recheck actual account/tool availability immediately before use and after any
+account, connection, model or page change. The evidence is a host workflow gate,
+not a sandbox for third-party transports. Never promise that C2C controls an
+independent plugin's permissions. Preserve platform confirmations. Before local
+commit/push, verify author and committer plus the actual Git transport separately;
+`gh api user` alone does not prove which SSH key or HTTPS helper a push will use.
 
 The protocol state loop is:
 

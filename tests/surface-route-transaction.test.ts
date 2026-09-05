@@ -32,7 +32,7 @@ import {
   currentSurfaceBinding,
   currentProjectUrl,
 } from "../src/session/surface-ownership.js";
-import { cleanup, isolateStateDir, makeTmpDir } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir, projectSelection } from "./helpers.js";
 
 const PROJECT_URL = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
 const CHAT_URL = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-retry";
@@ -99,6 +99,8 @@ describe("coordinated surface route commit", () => {
       surfaceId: "chatgpt",
       tabId: "tab-route-reconcile",
       projectUrl: PROJECT_URL,
+      projectSelection: projectSelection(PROJECT_URL),
+      workspaceName: registration.workspaceName,
       ownerProcessEpoch: "owner-route-reconcile",
       leaseTtlMs: 60_000,
     });
@@ -155,6 +157,8 @@ describe("coordinated surface route commit", () => {
       surfaceId: "chatgpt",
       tabId: "tab-retire-reconcile",
       projectUrl: PROJECT_URL,
+      projectSelection: projectSelection(PROJECT_URL),
+      workspaceName: registration.workspaceName,
       chatUrl: CHAT_URL,
       ownerProcessEpoch: "owner-retire-reconcile",
       leaseTtlMs: 60_000,
@@ -218,6 +222,7 @@ describe("coordinated surface route commit", () => {
       surfaceId: "chatgpt",
       tabId: "tab-project-unregister",
       projectUrl: PROJECT_URL,
+      projectSelection: projectSelection(PROJECT_URL),
       chatUrl: CHAT_URL,
       ownerProcessEpoch: "owner-project-unregister",
       leaseTtlMs: 60_000,

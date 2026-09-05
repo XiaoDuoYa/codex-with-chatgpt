@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
+import { inspectRepositoryIdentity } from "../workspace/repository-identity.js";
+import { assessPluginPreflight, pluginIntentSchema, pluginPreflightSchema } from "../session/turn-preflight.js";
 import {
   AUTOSTART_LABEL,
   autostartStatus,
@@ -1013,6 +1015,20 @@ program
     }
   });
 
+program
+  .command("repository-identity")
+  .description("Inspect repository targets, effective gh account and Git author separately (no credentials)")
+  .option("-w, --workspace <path>")
+  .option("--remote <name>", "explicit intended Git remote; otherwise resolve branch push configuration")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; remote?: string; json: boolean }) => {
+    try {
+      const root = resolveWorkspace(opts.workspace);
+      const identity = inspectRepositoryIdentity(root, opts.remote);
+      say(JSON.stringify({ ok: true, ...identity }));
+    } catch (error) { handleCliError(error, opts.json); }
+  });
+
 const surface = program
   .command("surface")
   .description("Manage the ChatGPT page owned by this local Codex session");
@@ -1079,6 +1095,7 @@ surface
   .command("claim")
   .requiredOption("--tab-id <id>", "exact in-app browser tab id")
   .requiredOption("--project-url <url>", "ChatGPT Project collection URL")
+  .option("--project-selection <json>", "first-pairing host observation: source, projectUrl, observedTitle, observedAt")
   .option("--chat-url <url>", "existing ChatGPT chat URL inside that Project")
   .option("-w, --workspace <path>")
   .option("--local-session <id>")
@@ -1089,6 +1106,7 @@ surface
   .action(async (opts: {
     tabId: string;
     projectUrl: string;
+    projectSelection?: string;
     chatUrl?: string;
     workspace?: string;
     localSession?: string;
@@ -1131,6 +1149,7 @@ surface
       const { lease } = await claimMachineSurface(machine.runtime, machine.identity, {
         tabId: opts.tabId,
         projectUrl: opts.projectUrl,
+        projectSelection: opts.projectSelection === undefined ? undefined : JSON.parse(opts.projectSelection),
         chatUrl: opts.chatUrl,
         ownerProcessEpoch: sessionOwnerEpoch(localSessionId),
         replaces,
@@ -1449,6 +1468,10 @@ control
   .option("--scopes <scope,...>")
   .option("--model-id <id>")
   .option("--effort <name>")
+  .option("--plugins <ids>", "comma-separated task-requested ChatGPT plugins")
+  .option("--plugin-intent <intent>", "task or identity-discovery (authenticated own-profile only)")
+  .option("--plugin-preflight <json>", "fresh host-observed plugin/account evidence for this exact turn")
+  .option("--github-remote <name>", "intended repository remote for GitHub-dependent plugins")
   .option("--compaction-epoch <n>", "compaction epoch", "0")
   .option("--json", "machine-readable output", false)
   .action(async (opts: {
@@ -1461,6 +1484,10 @@ control
     scopes?: string;
     modelId?: string;
     effort?: string;
+    plugins?: string;
+    pluginIntent?: string;
+    pluginPreflight?: string;
+    githubRemote?: string;
     compactionEpoch: string;
     json: boolean;
   }) => {
@@ -1486,6 +1513,22 @@ control
       ) {
         throw new Error("Commit this local session's verified ChatGPT page before opening a control turn.");
       }
+      const plugins = opts.plugins?.split(",").map((id) => id.trim());
+      const pluginIntent = pluginIntentSchema.parse(opts.pluginIntent ?? "task");
+      const scopes = pluginIntent === "identity-discovery" && opts.scopes === undefined
+        ? ["c2c.result.write"] : parseScopes(opts.scopes);
+      const pluginPreflight = opts.pluginPreflight === undefined ? undefined : pluginPreflightSchema.parse(JSON.parse(opts.pluginPreflight));
+      if (pluginIntent === "task" && pluginPreflight?.plugins.some((plugin) => plugin.usesGitHub || /github/i.test(plugin.id))) {
+        const identity = inspectRepositoryIdentity(workspace.root, opts.githubRemote);
+        if (!identity.target || !identity.ghActor || identity.accountStatus !== "matched") throw new Error("Repository owner and effective gh account are not verified; select the intended personal fork or verify organization access before plugin dispatch.");
+        if (pluginPreflight.github && (["host", "owner", "name"] as const).some((key) => pluginPreflight.github!.repository[key].toLowerCase() !== identity.target![key].toLowerCase())) {
+          throw new Error("GitHub plugin repository does not match the intended local remote.");
+        }
+        pluginPreflight.github = { repository: identity.target, expectedActor: identity.ghActor };
+      }
+      const pluginPolicy = assessPluginPreflight({
+        workspaceId: workspace.id, localSessionId, ...correlation, generation: page.generation, plugins, pluginIntent, scopes, pluginPreflight,
+      }, page, machine.runtime.bootEpoch);
       const opened = await openMailboxRequest(machine.runtime, machine.identity, {
         ...correlation,
         ttlMs,
@@ -1520,9 +1563,12 @@ control
         iteration: correlation.iteration,
         phase: correlation.phase,
         requestId: opened.request.requestId,
-        scopes: parseScopes(opts.scopes),
+        scopes,
         modelId: opts.modelId,
         effort: opts.effort,
+        plugins,
+        pluginIntent,
+        pluginPreflight,
         compactionEpoch: parseIntegerOption(
           opts.compactionEpoch,
           "compaction-epoch",
@@ -1537,6 +1583,7 @@ control
         request: opened.request,
         contextId: grant.token,
         contextExpiresAt: grant.expiresAt,
+        pluginPolicy,
         surface: {
           tabId: page.tabId,
           chatUrl: page.chatUrl,

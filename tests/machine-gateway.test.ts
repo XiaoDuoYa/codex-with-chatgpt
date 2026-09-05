@@ -18,7 +18,7 @@ import {
   currentProjectUrl,
   currentSurfaceLease,
 } from "../src/session/surface-ownership.js";
-import { cleanup, git, isolateStateDir, makeGitRepo, makeTmpDir, write } from "./helpers.js";
+import { cleanup, git, isolateStateDir, makeGitRepo, makeTmpDir, write, projectSelection } from "./helpers.js";
 
 function binding(
   registration: ReturnType<MachineGateway["registerWorkspace"]>,
@@ -644,6 +644,7 @@ describe("machine gateway", () => {
               surfaceId: "chatgpt",
               tabId: "tab-b",
               projectUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
+              projectSelection: projectSelection("https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project"),
               chatUrl: "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/b",
               ownerProcessEpoch: "owner-b-session",
             });

@@ -78,6 +78,9 @@ export type TurnRequestBinding = Pick<
 
 export interface IssueTurnCapabilityInput extends TurnCapabilityBinding {
   ttlMs?: number;
+  plugins?: string[];
+  pluginIntent?: import("../session/turn-preflight.js").PluginTurn["pluginIntent"];
+  pluginPreflight?: import("../session/turn-preflight.js").PluginPreflight;
 }
 
 export interface TurnCapabilityGrant {

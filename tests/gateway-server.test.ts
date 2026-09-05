@@ -11,7 +11,7 @@ import {
   writeMachineRuntime,
 } from "../src/gateway/runtime.js";
 import { claimSurface, commitVerifiedSurfaceRoute } from "../src/session/surface-ownership.js";
-import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
+import { cleanup, isolateStateDir, makeTmpDir, write, projectSelection } from "./helpers.js";
 
 async function admin<T>(
   server: MachineGatewayServer,
@@ -129,12 +129,17 @@ describe("machine gateway control server", () => {
     };
     const projectUrl = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
     const chatUrl = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-admin-surface";
+    const unproven = await admin(server, "/admin/surfaces/claim", {
+      ...identity, browserId: "iab", surfaceId: "chatgpt", tabId: "tab-unproven", projectUrl,
+    });
+    expect(unproven.status).not.toBe(200);
     const claimed = await admin<{ lease: Record<string, unknown> }>(server, "/admin/surfaces/claim", {
       ...identity,
       browserId: "iab",
       surfaceId: "chatgpt",
       tabId: "tab-admin-surface",
       projectUrl,
+      projectSelection: projectSelection(projectUrl),
       chatUrl,
       ownerProcessEpoch: "owner-admin-surface",
       leaseTtlMs: 60_000,
@@ -224,6 +229,7 @@ describe("machine gateway control server", () => {
         surfaceId: "chatgpt",
         tabId: `tab-capacity-${suffix}`,
         projectUrl,
+        projectSelection: projectSelection(projectUrl),
         chatUrl: `https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/c/chat-capacity-${suffix}`,
         ownerProcessEpoch: `owner-capacity-${suffix}`,
       };
@@ -440,6 +446,80 @@ describe("machine gateway control server", () => {
       registrationId: "registration-wrong",
     });
     expect(wrongRegistration.status).toBe(409);
+  });
+
+  it("issues a plugin turn only for fresh matching observations without revoking a valid turn on rejection", async () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("machine-server-plugin");
+    cleanups.push(root);
+    server = await startMachineGatewayServer({ port: 0, connectStdio: false });
+    const registration = server.gateway.registerWorkspace(root);
+    const identity = { ...registration, localSessionId: "session-plugin" };
+    const projectUrl = "https://chatgpt.com/g/g-p-11111111111111111111111111111111/project";
+    const chatUrl = projectUrl.replace("/project", "/c/plugin-chat");
+    const surface = server.gateway.surfaceClaim(identity, {
+      browserId: "iab", surfaceId: "chatgpt", tabId: "tab-plugin",
+      projectUrl, chatUrl, projectSelection: projectSelection(projectUrl),
+    });
+    server.gateway.surfaceCommit(identity, surface, { chatUrl });
+    const turn = {
+      workspaceId: registration.workspaceId,
+      projectId: registration.projectId,
+      registrationId: registration.registrationId,
+      localSessionId: identity.localSessionId,
+      taskId: "task-plugin", iteration: 0, phase: "PLAN",
+      generation: surface.generation, compactionEpoch: 0,
+      scopes: ["workspace.read", "c2c.result.write"], plugins: ["GitHub"],
+      requestId: "request-plugin",
+    };
+    const proof = {
+      workspaceId: turn.workspaceId, localSessionId: turn.localSessionId,
+      taskId: turn.taskId, iteration: turn.iteration, phase: turn.phase,
+      tabId: surface.tabId, generation: surface.generation, chatUrl,
+      bootEpoch: server.runtime.bootEpoch, observedAt: new Date().toISOString(),
+      chatgptAccount: "fixture-account",
+      plugins: [{ id: "GitHub", availability: "available", usesGitHub: true,
+        githubActor: { login: "fixture-user", id: "123", source: "authenticated-profile" } }],
+      github: { repository: { host: "github.com", owner: "fixture-user", name: "fixture-repo" },
+        expectedActor: { login: "fixture-user", id: "123" } },
+    };
+    const discovery = {
+      ...turn, phase: "RESEARCH", taskId: "task-profile", requestId: "request-profile",
+      pluginIntent: "identity-discovery", scopes: ["c2c.result.write"],
+      pluginPreflight: {
+        ...proof, phase: "RESEARCH", taskId: "task-profile", github: undefined,
+        plugins: [{ id: "GitHub", availability: "available", usesGitHub: true, authenticatedProfileTool: "get_authenticated_user" }],
+      },
+    };
+    const profileTurn = await admin<{ token: string }>(server, "/admin/turns/issue", discovery);
+    expect(profileTurn.status).toBe(200);
+    const profileLease = server.gateway.claimTurn(profileTurn.body.token, ["c2c.result.write"]);
+    server.gateway.releaseTurn(profileTurn.body.token, profileLease.lease);
+    expect(() => server!.gateway.claimTurn(profileTurn.body.token, ["workspace.read"])).toThrow();
+    const unauthorizedBusiness = await admin(server, "/admin/turns/issue", { ...discovery, pluginIntent: "task" });
+    expect(unauthorizedBusiness.status).not.toBe(200);
+    const excessiveScopes = await admin(server, "/admin/turns/issue", { ...discovery, scopes: ["git.read"] });
+    expect(excessiveScopes.status).not.toBe(200);
+    expect(server.gateway.turnStatus(profileTurn.body.token).status).toBe("active");
+    expect((await admin(server, "/admin/turns/cancel", { contextId: profileTurn.body.token })).status).toBe(200);
+
+    // A separately correlated business turn still needs the actual matching actor.
+    const issued = await admin<{ token: string }>(server, "/admin/turns/issue", { ...turn, pluginPreflight: proof });
+    expect(issued.status).toBe(200);
+    const claimed = server.gateway.claimTurn(issued.body.token, ["workspace.read"]);
+    expect(claimed.workspace.root).toBe(fs.realpathSync.native(root));
+    server.gateway.releaseTurn(issued.body.token, claimed.lease);
+
+    for (const pluginPreflight of [
+      undefined,
+      { ...proof, tabId: "another-tab" },
+      { ...proof, bootEpoch: "another-epoch" },
+      { ...proof, plugins: [{ ...proof.plugins[0], githubActor: { login: "wrong-user", id: "456", source: "authenticated-profile" } }] },
+    ]) {
+      const rejected = await admin(server, "/admin/turns/issue", { ...turn, pluginPreflight });
+      expect(rejected.status).not.toBe(200);
+      expect(server.gateway.turnStatus(issued.body.token).status).toBe("active");
+    }
   });
 
   it("rejects a second machine gateway even when it could choose another port", async () => {
