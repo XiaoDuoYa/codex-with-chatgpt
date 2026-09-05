@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
+import { adminFetch, adminPostJson, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
@@ -700,6 +700,50 @@ program
             : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
     );
     if (!allOk || namedRepair.needed) process.exitCode = 1;
+  });
+
+// ---------------------------------------------------------------- authorize-plan
+
+program
+  .command("authorize-plan")
+  .description("Create a short-lived, one-time authorization for submit_plan")
+  .requiredOption("--project <name>", "exact staged project directory name")
+  .requiredOption("--digest <sha256>", "exact approved staging SHA-256 digest")
+  .option("-w, --workspace <path>")
+  .option("--ttl-seconds <seconds>", "authorization lifetime, at most 600 seconds", parseInteger, 600)
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { project: string; digest: string; workspace?: string; ttlSeconds: number; json: boolean }) => {
+    try {
+      if (opts.ttlSeconds < 1 || opts.ttlSeconds > 600) {
+        throw new Error("ttl-seconds must be between 1 and 600");
+      }
+      const { runtime } = await ensureBridge(resolveWorkspace(opts.workspace));
+      const result = await adminPostJson<{ token: string; expiresAt: number }>(
+        runtime,
+        "/admin/plan-authorizations",
+        {
+          project: opts.project,
+          staged_digest: opts.digest,
+          ttl_ms: opts.ttlSeconds * 1000,
+        }
+      );
+      if (opts.json) {
+        say(JSON.stringify({
+          ok: true,
+          project: opts.project,
+          stagedDigest: opts.digest,
+          authorization: result.token,
+          expiresAt: result.expiresAt,
+        }));
+      } else {
+        say(`Project: ${opts.project}`);
+        say(`Staged digest: ${opts.digest}`);
+        say(`One-time authorization: ${result.token}`);
+        say(`Expires: ${new Date(result.expiresAt).toISOString()}`);
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
   });
 
 // ---------------------------------------------------------------- pair / unpair

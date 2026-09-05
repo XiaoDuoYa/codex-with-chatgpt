@@ -99,6 +99,34 @@ export async function adminFetch<T = unknown>(
   }
 }
 
+export async function adminPostJson<T = unknown>(
+  runtime: RuntimeState,
+  route: string,
+  body: Record<string, unknown>,
+  timeoutMs = 60_000
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`http://127.0.0.1:${runtime.port}${route}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${runtime.adminToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const responseBody = (await response.json().catch(() => ({}))) as T & { message?: string };
+    if (!response.ok) {
+      throw new Error(responseBody.message ?? `Admin request failed (${response.status})`);
+    }
+    return responseBody;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function stopBridge(workspaceRoot: string): Promise<boolean> {
   const workspace = new Workspace(workspaceRoot);
   const runtime = readRuntimeState(workspace.id);
