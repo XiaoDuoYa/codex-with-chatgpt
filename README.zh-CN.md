@@ -1,6 +1,6 @@
 # Codex with ChatGPT
 
-[English](README.md) | **简体中文**
+[English](README.md) | **简体中文** | [安装流程](#安装与配置)
 
 > ChatGPT 负责思考，Codex 负责干活。
 
@@ -45,65 +45,277 @@
 
 ## 安装与配置
 
-环境要求：Node.js 20 或更高版本、Git，以及支持连接器的 ChatGPT 账号。安装并
-构建仓库：
+这是供用户自行部署的开源项目。每位用户在自己的电脑上安装，并使用自己的 OpenAI
+账号、Tunnel 和密钥；公开 Git 仓库不代表共享维护者的电脑、Tunnel 或凭据。
 
-```sh
-corepack pnpm install
-corepack pnpm build
+当前使用 **OpenAI Secure MCP Tunnel**，不再部署本地 OAuth 服务或公网 MCP URL。
+本地客户端主动通过 HTTPS 连接 OpenAI，不需要开放入站端口、配置公网域名或为
+每个项目配置 OAuth。`Authentication: None` 只是不用连接器级 OAuth，不代表取消
+Tunnel 认证或 C2C 的短期任务授权。本项目不调用模型 API，但仍需要用于认证传输的
+**Tunnel runtime API key（运行密钥）**。
+
+### 让 Codex 执行安装
+
+首次安装使用 **Codex 桌面端的普通本地任务**，不要先调用 `$codex-with-chatgpt`：
+此时 Skill 还没有安装，也不能依赖尚未连通的 ChatGPT 来安装它自己。可以先发给 Codex：
+
+```text
+请为当前系统用户安装 https://github.com/peak-xiong/codex-with-chatgpt 的 main 分支。
+先阅读 README.zh-CN.md 的安装说明，检查操作系统、Git、Node.js、Corepack、
+当前任务的内置浏览器能力，以及已有的 C2C 安装。
+确认源码目录后再克隆和构建；保留已有修改、安装配置和会话，不覆盖或清理它们。
+完成前置检查和干净源码构建后暂停，指导我创建自己的官方 Secure MCP Tunnel，
+并等待我提供 Tunnel ID 和私有运行密钥文件的绝对路径。
+不要猜测账号、组织、工作区、Tunnel ID 或凭据，不要查看、回显或上传密钥内容。
+缺少权限或遇到登录、授权步骤时，说明需要我完成的操作；不要自行切换账号、
+扩大权限，或改用公网 URL、OAuth、其他隧道方案。
 ```
 
-创建或复用一个 OpenAI Secure MCP Tunnel，然后运行：
+下面第 1–6 步也是 Codex 应遵循的安装顺序。**Codex 已完成的本地命令不需要用户
+再执行一遍**；命令块供 Codex 执行或用户核对。
+
+| 操作 | 谁来完成 |
+| --- | --- |
+| 选择账号/组织/工作区，创建或选择云端 Tunnel，关联工作区 | 用户在 OpenAI 官方页面确认；缺少权限时联系管理员 |
+| 获取运行密钥并存入私有文件，完成登录和授权 | 用户操作；只把文件路径交给 Codex |
+| 检查环境、构建源码、全局安装、诊断 | Codex 在本地执行，不在 ChatGPT 对话中执行 |
+| 创建/复用 ChatGPT 连接器 | 用户在已确认的 ChatGPT 工作区中完成，随后由 Codex 验证 |
+
+### 1. 检查前置条件
+
+- Git、满足 Node.js >= 20 要求的受支持 Node.js LTS 版本，以及 Corepack。
+  先运行 `node --version`、`git --version`、`corepack --version`。缺少 Corepack
+  时，先安装适合当前 Node.js 版本的 Corepack；仓库的 `package.json` 已固定 pnpm 版本。
+- Codex 桌面端，当前会话能够使用内置浏览器和 Computer Use。只安装命令行工具
+  不会自动获得网页操作能力。
+- ChatGPT 账号/工作区能够使用开发者模式的自定义应用和 Secure Tunnel。
+  请在自己的账号中确认入口和管理员授权，不能仅凭订阅名称认定功能可用。
+- 在目标 Platform 组织中创建/使用 Tunnel，并将其关联到目标 ChatGPT 工作区的权限。
+- 电脑能够出站访问 `api.openai.com:443`，安装时还需访问 GitHub 和包仓库。
+  ChatGPT 调用本地工具期间，电脑必须保持唤醒、联网，相关服务持续运行。
+
+当前真实验证环境是 **macOS + Codex 桌面端**。代码包含其他平台目标，但 Windows/Linux
+原生安装和完整浏览器流程尚未完成验收。下面命令使用 macOS/POSIX Shell 语法，不能
+当作 PowerShell 命令直接执行。
+
+账号、权限和网络要求以 [OpenAI Secure MCP Tunnel 官方文档](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+为准。官方 Tunnel 用于私有连接和开发者模式应用，**不满足公开插件商店的提交要求**。
+“公开源码供别人自行部署”与“发布一个所有人都能直接安装的 ChatGPT 公共插件”是两件事。
+
+### 2. 下载并构建干净的源码仓库
+
+对于 [PR #409](https://github.com/XiaoDuoYa/codex-with-chatgpt/pull/409) 中的机器级方案预览，
+下面个人 fork 的 `main` 已包含实现。不要假设其他仓库或分支也已包含它。使用
+`git clone`，不要使用 Download ZIP；安装器要求从干净、已提交的 Git 版本构建。
+
+```sh
+git clone --branch main --single-branch https://github.com/peak-xiong/codex-with-chatgpt.git
+cd codex-with-chatgpt
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+node bin/c2c.js machine setup --help
+git status --short
+```
+
+保留这个源码目录以便后续升级。安装前 `git status --short` 应无输出。已有修改时，
+先妥善保存，或另外克隆一份干净源码；不要为通过安装检查而重置或删除自己的工作。
+
+### 3. 创建自己的 Tunnel 并准备密钥文件
+
+这一阶段在 OpenAI 官方页面完成，**不是本地 `machine setup` 的功能**。
+
+1. 打开 [Platform 的 Tunnel 设置](https://platform.openai.com/settings/organization/tunnels)，
+   确认当前账号和左上方/组织选择器中的目标组织。页面位置可能变化，应以实际 UI 为准。
+   为这台电脑创建一个 Tunnel，名称可自行设置；已有本机专用 Tunnel 则复用。
+   不要选用另一台电脑正在使用的 Tunnel。
+2. 在该 Tunnel 的配置中关联之后使用连接器的 **ChatGPT 工作区**。不要把 Platform
+   组织、Platform API Project 与 ChatGPT 工作区混为一谈；业务代码对应的 ChatGPT
+   Project 则在后续配对时创建，不是在这里创建。
+3. 保存配置后，记录页面返回的真实 `tunnel_id`，不要用显示名称、Project ID 或 URL
+   代替。仅完成这一步还没有启动本地客户端，不能据此判断连接已经可用。
+4. 按目标组织的凭据管理流程取得用于该 Tunnel 的 **runtime API key**。官方指南要求
+   运行密钥，但没有规定所有账号都在 Tunnel 页面提供“生成运行密钥”按钮；不要假定
+   创建 Tunnel 就会返回密钥。找不到入口或无法确认权限时，先请组织管理员确认。
+5. 用可信编辑器或密钥管理器，把**密钥本身**保存到所有仓库之外的私有 UTF-8 文本文件。
+   文件中不要包含 JSON、`export`、变量名或包裹密钥的引号。macOS 上可让 Codex
+   只检查文件存在性并执行 `chmod 600 "/absolute/private/path/tunnel-runtime.key"`，
+   无需通过 `cat` 等命令查看内容。安装器会在本地读取并私密保存该文件中的密钥。
+
+权限属于 **Platform 组织级**：创建/编辑需要 Tunnels `Read + Manage`，运行客户端
+和在 ChatGPT 选择 Tunnel 需要 `Read + Use`。只有 Platform Project 权限或 ChatGPT
+开发者模式权限并不够。详见 [官方权限说明](https://developers.openai.com/api/docs/guides/rbac)。
+缺少权限时停止安装并联系组织管理员，不要让 Codex 自动提升权限。
+
+将原始密钥安全保存，供后续升级使用。不要放入命令行参数、聊天提示词、Project
+指令、截图或 Git。不要复制维护者的密钥、Tunnel ID 或 ChatGPT Project URL。
+
+后续示例都是占位值：将 `<YOUR_TUNNEL_ID>` 替换为自己的 Tunnel ID，将示例文件路径
+替换为私有密钥文件的绝对路径。Tunnel ID 不是密钥，也不能用 ChatGPT 登录令牌替代
+运行密钥。`Authentication: None` 也不能省略这个密钥。
+
+### 4. 为当前系统用户全局安装一次
+
+完成第 3 步后，在**同一个 Codex 安装任务**中回复下面内容，先替换两个占位值，
+不要粘贴密钥正文：
+
+```text
+已确认目标账号、Platform 组织和 ChatGPT 工作区，并完成 Tunnel 的工作区关联。
+Tunnel ID：<YOUR_TUNNEL_ID>
+运行密钥文件（绝对路径）：/absolute/private/path/tunnel-runtime.key
+请从刚才构建的干净源码目录执行 machine setup，为当前系统用户安装。
+仅将密钥文件路径传给安装器，不要输出、上传或在聊天中展示文件内容。
+然后检查全局 Skill、machine status 和 machine doctor --no-fix，报告实际结果。
+本地安装完成后，等待我在 ChatGPT 创建或确认连接器，再进行工作区配对和回传验收。
+```
+
+Codex 应在第 2 步构建好的源码目录执行下面命令，不使用 `sudo`。首次安装时全局
+`c2c` 可能不存在，必须使用源码入口。所有占位值须先替换；路径带空格时保留引号：
 
 ```sh
 node bin/c2c.js machine setup \
-  --tunnel-id <OPENAI_TUNNEL_ID> \
-  --runtime-key-file <RUNTIME_KEY_FILE>
+  --tunnel-id "<YOUR_TUNNEL_ID>" \
+  --runtime-key-file "/absolute/private/path/tunnel-runtime.key" --json
 ```
 
-`machine setup` 会自动安装或更新唯一的全局 Skill，不需要为每个工作区重复安装。
-可随时运行 `c2c skill status --json` 验证安装状态。
+预期返回 `ok: true`、`configured: true`。安装器会部署经校验的运行时，安装全局
+Skill 和 `c2c` 命令入口，安装本项目固定版本的官方 Tunnel 客户端，私密复制密钥，
+并启动唯一的 Tunnel 托管网关。**它不会创建云端 Tunnel、关联 ChatGPT 工作区，
+也不会在 ChatGPT 中创建连接器**；前两项必须已在第 3 步完成。
 
-在 ChatGPT 的连接器设置中只创建以下连接器：
+官方通用教程中的 `tunnel-client init/run` 和示例 MCP 服务用于独立接入。
+本项目由 `machine setup` 管理这些本地组件，**不要再并行执行那套示例**，也不要为
+单个项目另外启动 `tunnel-client` 或 `serve-machine`。
+
+命令入口位于 `~/.local/bin/c2c`。若终端找不到 `c2c`，在自己的 Shell 启动配置中
+加入下面一行，再重新加载该 Shell：
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+也可以不改 PATH，直接执行 `"$HOME/.local/bin/c2c" machine status --json` 检查。
+
+### 5. 在 ChatGPT 中连接一次
+
+切换到预期的 ChatGPT 账号/工作区，按需开启开发者模式（当前入口为设置中的
+Security and login，可能需管理员先授权）。打开 [ChatGPT 插件页](https://chatgpt.com/plugins)，
+通过加号/创建入口新建开发者模式应用，配置如下。不同 UI 版本可能称其为应用、
+插件或连接器。
 
 | 字段 | 值 |
 | --- | --- |
 | 名称 | `Codex with ChatGPT` |
-| OpenAI Secure Tunnel | 选择 `machine setup` 配置的 Tunnel |
+| Connection（连接方式） | `Tunnel` |
+| OpenAI Secure Tunnel | 选择第 4 步配置的同一个 Tunnel |
 | Authentication | `None` |
 
-ChatGPT 会选择已经配置的 Secure Tunnel；没有需要复制或粘贴到连接器中的公网
-Server URL。
+已有该连接器时直接复用，不重复创建。这里不需要公网 Server URL，运行密钥应留在
+本机，不能填进这个表单。工具发现期间保持网关运行。列表中没有 Tunnel 时，先检查
+ChatGPT 工作区关联和 Read + Use 权限。页面若支持手动输入 Tunnel ID，也必须填同一个
+已关联且有权使用的真实 ID；手动输入不能绕过权限。没有 Tunnel 连接方式时停止并确认
+账号功能/管理员设置，不改选公网 URL 或 OAuth。完成后通知 Codex“连接器已配置”，
+再继续第 6 步；看到连接器卡片不等于回传验收已通过。
 
-运行时密钥会复制到机器状态目录，绝不打印或提交到 Git。Tunnel 会托管网关，因而
-不要为某个工作区另起一个 MCP 网关。
+### 6. 先验证安装，再验证真实回传
 
-请在工作区根目录中运行。工作区命令根据当前 `cwd` 确定目标；即使传入
-`-w` 也只能指向同一个目录，不能用它选择其他路径。需要时注册当前工作区：
-
-```sh
-node bin/c2c.js machine workspace register --json
-node bin/c2c.js machine status --json
-node bin/c2c.js machine doctor --no-fix --json
-```
-
-每个工作区流程开始时，先检查更新并清理旧版全局沙箱写权限：
+从现在起使用全局命令：
 
 ```sh
-node bin/c2c.js update-check -w <workspace-root> --json
-node bin/c2c.js sandbox-clean --json
+c2c skill status --json
+c2c machine status --json
+c2c machine doctor --no-fix --json
 ```
 
-项目可变状态始终位于仓库自身边界内：Git checkout 使用
-`<git-common-dir>/codex-with-chatgpt`，非 Git 工作区使用
-`<workspace-root>/.codex-with-chatgpt`。项目元数据由链接 worktree 共享；会话路由和
-执行记录按 `workspaces/<workspaceId>/` 隔离。结果箱以及跨工作区的 Project URL、
-物理 tab 与 generation 权威索引由 Gateway 保存在受保护的机器状态中；C2C checkout
-也不在工作区边界内。
+预期 Skill 的 `installed`、`matches` 为 `true`，机器 `ready: true`，doctor
+`ok: true`。这些检查不能证明 ChatGPT 已经能够回写结果。
 
-Skill 会在内置 ChatGPT 浏览器中完成 Project 和会话页面配置：机器已有该工作区的
-Project URL 时直接复用，否则才要求创建一个 Project。每个本地 Codex 会话会在该
-Project 中新建一个 ChatGPT 对话并独占一个页面。
+在 Codex 桌面端打开实际要使用的项目，新建本地会话并提出：
+
+```text
+请使用 $codex-with-chatgpt 配对当前工作区，验证本地读取和结构化结果回传。
+在本会话专属的 ChatGPT 对话中连续完成两轮只读问题，每轮都必须从精确关联的
+本地 mailbox 收到并确认结果。不要修改业务代码，不要把网页文字当作回传成功。
+```
+
+Skill 会注册当前工作区，在首次配对时为它创建 ChatGPT Project，或者使用用户明确
+认可的现有精确 Project URL，再验证本地会话专属的 Chat。已有权威绑定时直接复用。
+控制问题使用 Chat 模式，且当前消息能调用这个连接器。若找不到 Skill，可重新打开
+Codex 桌面端；已有会话需要重新读取新版 Skill，而不是逐项目重新安装。
+
+验收分为三个独立层级：
+
+| 层级 | 必须看到的证据 |
+| --- | --- |
+| 已安装并连接 | 全局 Skill 匹配、机器 ready、doctor 通过 |
+| 本地读取可用 | BOOT 返回预期 workspace/project ID 和真实本地证据 |
+| 回传可用 | 每个精确请求都达到 `received` 后再 `acknowledged`，包括同一 Chat 的后续消息 |
+
+历史上已有真实回传成功记录，但最近验收也出现了后续 ChatGPT 消息无法调用
+`submit_control_result` 的情况。本地格式修复和自动化测试不能解决或证明网页侧工具
+可用性。工具不可用或平台授权受阻时应停止并如实报告，不能绕过检查或用页面文字
+替代回执。详见 [当前验收边界](docs/issue-log.md#最新回传验收修复)。
+
+### 在其他项目或会话中使用
+
+“全局”指**当前系统用户和 Codex 配置下共用一份安装**，不是所有用户、电脑和
+ChatGPT 账号自动共享。
+
+| 范围 | 要做什么 |
+| --- | --- |
+| 当前机器/系统用户 | 一份运行时、Skill、Tunnel 和连接器 |
+| 新工作区 | 首次注册并配对自己的 ChatGPT Project |
+| 新本地会话 | 在该 Project 中绑定一个专属 Chat/页面 |
+| 同一会话的后续任务 | 复用页面，只生成新的任务授权 |
+
+在实际要让 ChatGPT 访问的项目根目录中执行：
+
+```sh
+cd /absolute/path/to/your-project
+c2c machine workspace register --json
+c2c workspace --json
+```
+
+Skill 会按需执行注册，上面的命令用于检查。不要在不包含 C2C 源码的业务项目中
+运行 `node bin/c2c.js`。工作区命令按可信的当前目录确定目标，`-w` 不能选择其他路径。
+其他项目不需要新的连接器、Tunnel 或复制 Skill；换电脑/系统用户则需各自配置。
+
+### 安装位置与升级
+
+macOS 默认位置如下，均属于当前系统用户：
+
+| 项目 | 位置 |
+| --- | --- |
+| 命令入口 | `~/.local/bin/c2c` |
+| 全局 Skill | `~/.codex/skills/codex-with-chatgpt/SKILL.md` |
+| 托管运行时 | `~/Library/Application Support/codex-with-chatgpt/installation/current` |
+| Git 项目状态 | `<git-common-dir>/codex-with-chatgpt` |
+| 非 Git 项目状态 | `<workspace-root>/.codex-with-chatgpt` |
+
+`CODEX_HOME` 可改变 Skill 的配置根目录。`C2C_STATE_DIR` 改变机器状态位置，不改变
+已注册的仓库本地状态；通常无需设置。托管运行时不是 Git 源码目录，不要直接修改或
+在其中 `git pull`。Gateway 管理受保护的结果箱和跨工作区页面索引；项目自身保存
+路由、checkpoint 和执行记录。
+
+升级前先让活动任务结束：安装可能重启共享网关，使旧授权失效。在最初克隆的干净
+源码目录中执行：
+
+```sh
+cd /absolute/path/to/codex-with-chatgpt
+git status --short
+git pull --ff-only
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+node bin/c2c.js machine setup \
+  --tunnel-id "<YOUR_TUNNEL_ID>" \
+  --runtime-key-file "/absolute/private/path/tunnel-runtime.key" --json
+c2c skill status --json
+c2c machine doctor --no-fix --json
+```
+
+只有状态检查无输出时才继续。使用同一个 Tunnel 和密钥，保留现有连接器，不必逐项目
+升级。安装命令必须使用上述**更新后源码的入口**，不要改为旧的全局 `c2c`，否则会
+复用它自身的旧运行时。重启后 Skill 取得新授权，既有 Project/Chat 映射仍保留。
+`c2c update-check --json` 只检查更新，不执行安装；`checked: false` 也不能证明已是最新版。
 
 ### macOS 登录后自动启动（可选）
 
@@ -124,6 +336,19 @@ c2c autostart disable --json
 
 自动启动只是机器级保活机制，不是页面调度器，也不会改变机器级 100 个活动会话/页面
 租约的容量。
+
+### 常见安装问题
+
+| 现象 | 先检查什么 |
+| --- | --- |
+| 找不到 `corepack` 或 `c2c` | 安装适合当前 Node.js 的 Corepack；检查第 4 步的入口和 PATH |
+| 没有 `machine setup` 命令 | 检查仓库/分支并按第 2 步重新构建；旧 OAuth 版本是另一套架构 |
+| 安装器要求干净 Git 源码 | 使用 Git 克隆并先保存自己的修改，不能用 ZIP 代替 |
+| ChatGPT 中看不到 Tunnel | 检查账号/工作区、Tunnel 关联和 Read + Use 权限 |
+| 机器未 ready | 执行 `c2c machine doctor --no-fix --json`，检查网络、密钥权限和唯一的托管客户端 |
+| 能读文件但收不到结果 | 检查当前消息的回传工具可用性，不能宣称完整成功或绕过平台授权 |
+
+受控修复和精确会话恢复详见 [故障排查](docs/troubleshooting.md)。
 
 ## 运行结构
 
@@ -238,18 +463,20 @@ generation 不能继续写回。一次恢复只自动创建一个替代页面，
 ## 常用命令
 
 ```sh
-node bin/c2c.js machine start
-node bin/c2c.js machine status --json
-node bin/c2c.js machine doctor --no-fix --json
-node bin/c2c.js machine stop
-node bin/c2c.js workspace --json
-node bin/c2c.js surface --json
-node bin/c2c.js session --json
-node bin/c2c.js control status \
-  --request <id> --task <id> --iteration <n> --phase <phase> --json
+c2c machine start
+c2c machine status --json
+c2c machine doctor --no-fix --json
+c2c machine stop
+c2c workspace --json
+c2c surface get --local-session <session-id> --json
+c2c session get --local-session <session-id> --json
+c2c control status \
+  --local-session <session-id> --request <id> --task <id> \
+  --iteration <n> --phase <phase> --json
 ```
 
-检查命令：
+`machine stop` 会停止所有工作区共享的连接，请先等待活动任务结束。
+下面源码检查命令应在 C2C 源码目录中执行：
 
 ```sh
 corepack pnpm typecheck
