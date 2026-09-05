@@ -45,4 +45,3 @@
 4. 旧 context、lease、未完成 mailbox request 的处理结果可审计；不得继续使用旧 context_id。
 5. 至少两个独立 session 并行测试通过，结果只能通过对应 mailbox request 关联回本地会话。
 6. 归档、关闭、URL 错配、Gateway 重启和页面生成号变化均能触发同一套安全恢复门禁。
-
