@@ -3,9 +3,15 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import readline from "node:readline";
 import { IgnoreRules } from "./ignore.js";
-import { readJsonIfExists } from "../config/paths.js";
+import {
+  readJsonIfExists,
+  registerProjectDataDir,
+  registerWorkspaceDataDir,
+} from "../config/paths.js";
+import { projectDataDirectory, resolveProjectId } from "./identity.js";
 
 export type WorkspaceErrorCode =
+  | "INVALID_CONFIG"
   | "INVALID_PATH"
   | "PATH_OUTSIDE_WORKSPACE"
   | "ACCESS_DENIED_SENSITIVE_FILE"
@@ -13,7 +19,9 @@ export type WorkspaceErrorCode =
   | "NOT_A_FILE"
   | "NOT_A_DIRECTORY"
   | "BINARY_FILE"
-  | "FILE_TOO_LARGE";
+  | "FILE_TOO_LARGE"
+  | "SEARCH_QUERY_TOO_LARGE"
+  | "REGEX_ENGINE_UNAVAILABLE";
 
 export class WorkspaceError extends Error {
   constructor(
@@ -24,9 +32,6 @@ export class WorkspaceError extends Error {
     this.name = "WorkspaceError";
   }
 }
-
-const CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
-const normCase = (p: string): string => (CASE_INSENSITIVE ? p.toLowerCase() : p);
 
 export interface ReadFileResult {
   path: string;
@@ -84,6 +89,7 @@ const DEFAULT_MAX_BYTES = 256 * 1024;
 export class Workspace {
   readonly root: string;
   readonly id: string;
+  readonly projectId: string;
   readonly name: string;
   readonly ignoreRules: IgnoreRules;
   readonly projectConfig: ProjectConfig;
@@ -100,16 +106,18 @@ export class Workspace {
       throw new WorkspaceError("NOT_A_DIRECTORY", `Workspace root is not a directory: ${rootInput}`);
     }
     this.root = real;
-    this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
+    this.id = createHash("sha256").update(real).digest("hex").slice(0, 12);
+    this.projectId = resolveProjectId(real);
+    const dataDir = projectDataDirectory(real);
+    registerProjectDataDir(this.projectId, dataDir);
+    registerWorkspaceDataDir(this.id, path.join(dataDir, "workspaces", this.id));
     this.ignoreRules = new IgnoreRules(real);
     this.projectConfig = parseProjectConfig(readJsonIfExists<unknown>(path.join(real, ".c2c.json")));
     this.name = this.projectConfig.name ?? path.basename(real);
   }
 
   private contains(candidate: string): boolean {
-    const r = normCase(this.root);
-    const c = normCase(candidate);
-    return c === r || c.startsWith(r + path.sep);
+    return candidate === this.root || candidate.startsWith(this.root + path.sep);
   }
 
   /**

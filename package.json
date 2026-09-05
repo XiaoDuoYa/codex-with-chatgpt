@@ -7,6 +7,15 @@
   "bin": {
     "c2c": "./bin/c2c.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "skill",
+    "docs",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -22,7 +31,9 @@
     "@modelcontextprotocol/sdk": "latest",
     "commander": "^14.0.0",
     "express": "^5.1.0",
+    "fflate": "^0.8.3",
     "ignore": "^7.0.5",
+    "smol-toml": "1.8.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {

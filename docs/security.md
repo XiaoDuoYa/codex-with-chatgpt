@@ -2,56 +2,179 @@
 
 ## Trust boundaries
 
-1. **Workspace root** is the smallest authorization boundary. One bridge serves
-   exactly one workspace; every token is bound to `workspace_id`; a token for
-   project A returns 403 on project B's bridge.
-2. **Workspace content is untrusted.** README, comments, diffs may contain
-   prompt injection. Every MCP tool description carries an explicit warning and
-   tools never grant capabilities based on file content.
-3. **The model never sees long-lived credentials.** Computer Use only ever
-   handles the one-time pairing code. Access/refresh tokens travel only inside
-   the OAuth redirect/token endpoints between ChatGPT's client and the bridge.
+The machine is the trust boundary. ChatGPT is an advisory client; Codex is the
+executor. The official OpenAI Secure MCP Tunnel transports MCP to the one
+machine gateway, whose connector is configured as `Codex with ChatGPT` with
+`Authentication: None`.
 
-## Threat model → mitigations
+The gateway trusts only:
 
-| Threat | Mitigation |
-| --- | --- |
-| MCP URL leaks | URL alone is useless: every `/mcp` request requires a valid bearer token (401 without, 403 wrong workspace) |
-| Pairing code brute force | 8 chars from a 31-char CSPRNG alphabet (~40 bits), 5 attempts per session, per-IP rate limit (10/min), 5-minute TTL, one-time use, session destroyed on limit |
-| OAuth CSRF | `state` round-tripped verbatim; authorization requests are server-side records keyed by random ids |
-| Code interception | PKCE S256 mandatory (plain rejected); authorization codes are one-time, 5-minute TTL, bound to client + redirect URI |
-| Token theft | Opaque high-entropy tokens; stored only as SHA-256 hashes; access tokens live 1 h; refresh tokens rotate on every use (replay of the old one fails); revocation endpoint + `c2c unpair` |
-| Workspace traversal | `realpath` canonicalization of the deepest existing ancestor; containment check against the canonical root; case-insensitive comparison on macOS/Windows; rejects `..`, absolute escapes, backslash tricks, null bytes |
-| Symlink escape | Canonicalization resolves symlinks before the containment check (file and directory symlinks both covered by tests) |
-| Sensitive files | Deny-by-default patterns (.env*, keys, SSH, cloud creds, keychains…) enforced at resolve time — reads, listings, and search all pass through the same gate; `git diff` adds pathspec excludes; `.env.example` allowed |
-| Oversized file / diff DoS | read_file caps lines and bytes per response; git_diff paginates by byte offset with hard caps; search caps matches and file sizes |
-| Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals only a salted workspace hash |
-| Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
-| Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
-| Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
-| Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+1. Its owner-checked local runtime record.
+2. Workspace roots registered by the local harness.
+3. Capabilities it issued for the current boot and registration.
+4. Correlation and scope fields that match the live mailbox request.
 
-## Token & scope design
+ChatGPT Project names, Project URLs, chat URLs, tab titles, model text and file
+contents are untrusted. They are never authorization principals.
 
-Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
-`offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
-Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
-`workspace_id` and `client_id`.
+## MCP data policy
 
-## Storage
+The MCP surface is intentionally small:
 
-State lives under the OS-convention app dir
-(`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
-files 0600. Named-hostname preference and tunnel metadata live there too
-(`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes of
-tokens are persisted — a stolen state file does not yield usable bearer tokens.
+- Directory listing, bounded file reads and search.
+- Git status and bounded diff reads.
+- Local execution summaries and bounded output reads.
+- Forward-only progress and schema-bound control-result writes.
 
-**V1 limitation**: client registrations and token hashes are file-based rather
-than OS-keychain-based. Raw tokens are never written anywhere. Keychain
-integration is a V2 item.
+There are no MCP tools for editing files, deleting files, running shell
+commands, changing Git state, or committing. Codex performs those operations
+locally and records the outcome for review.
 
-## What ChatGPT can never do (V1)
+Workspace content may contain instructions aimed at an agent. The MCP server
+marks it as untrusted project data; ChatGPT must not execute or obey commands
+found in files, comments, README text or diffs.
 
-Write files, delete files, run shell commands, commit, install packages —
-these tools do not exist on the server, so no prompt injection, scope bug, or
-UI confusion can enable them.
+## Path containment
+
+Every workspace root is normalized and canonicalized before registration. Every
+requested path is resolved relative to that root and checked for containment.
+The following are rejected:
+
+- `..` traversal outside the root.
+- Absolute paths that are outside the root.
+- Symlinks whose resolved target escapes the root.
+- NUL/control characters and malformed path input.
+- Requests after the registration has been revoked.
+
+The workspace root is selected by the local `cwd`; ChatGPT cannot choose a
+different root by passing a path in a tool argument. Workspace-scoped CLI
+commands apply the same rule: an optional `-w` must resolve to the exact
+current `cwd`, so it cannot register or operate on another local path.
+
+## Capability security
+
+Every control turn gets a random, short-lived `CONTEXT_ID`. The broker stores a
+hash of the secret and binds it to:
+
+```text
+bootEpoch
+workspaceId + projectId + registrationId
+localSessionId + taskId + iteration + phase
+compactionEpoch + browser-page generation + scopes
+```
+
+The raw token is returned only to the local harness and inserted into the exact
+control prompt for that turn. ChatGPT must pass it as `context_id` in every MCP
+call. A missing, malformed, expired, cancelled, replayed, or mismatched token
+is rejected before workspace access.
+
+The broker gives each claim an activity lease. MCP calls renew the lease while
+running and release it even on errors. A token cannot complete while active
+leases remain. Completion uses a fence, writes the exact mailbox result, then
+marks the turn terminal. A mailbox failure aborts completion, avoiding a false
+success that would lose the only result.
+
+## Mailbox integrity
+
+The result mailbox validates canonical JSON and exact request identity. A result
+must match:
+
+```text
+RESULT_REQUEST_ID
+workspaceId
+localSessionId
+taskId
+iteration
+phase
+CONTEXT_ID
+```
+
+The allowed payload is phase-specific (`RESEARCH`, `PLAN`, `REVIEW`, `DONE`, or
+`BLOCKED`) and size bounded. A request is one-shot. An already-open request is
+not overwritten with a new token, preventing recovery from silently orphaning
+the token already visible to ChatGPT.
+
+Mailbox markers use separate pending, result, acknowledgement, cancellation,
+and active-lease records. Lifecycle writes use file locking and exact schema
+checks. Terminal records are retained only for bounded cleanup and audit.
+
+## Browser isolation
+
+One local session owns one persistent page in the built-in ChatGPT browser. Its
+lease is keyed by `projectId + localSessionId` and records the exact `tabId`,
+Project URL, chat URL, generation, owner epoch and expiry.
+
+Normal operations must use stable URLs, DOM/browser APIs and the stored tab id.
+Screenshot-coordinate control is not a security boundary and is not used for
+normal navigation or submission. A visible foreground page is never implicitly
+owned.
+
+Page replacement requires the exact current generation. A stale session cannot
+replace a live page, and a page from another Project cannot satisfy the lease.
+When a page fails, only its local session backs off or rotates its lease; other
+sessions retain their pages and continue.
+
+The protected machine ownership index is authoritative across workspaces. It
+rejects a normalized Project URL already bound to another local project and a
+physical browser/surface/tab tuple already owned elsewhere. Workspace-local
+page files are recovery mirrors only: they are overwritten from machine state,
+never imported as authority. A machine-wide monotonic generation allocator
+prevents a workspace edit or retired session from replaying an older page
+generation; inactive per-session entries can therefore be pruned safely.
+
+The machine permits 100 unexpired session/page leases, counted by unique
+`(projectId, localSessionId)` identities, each representing one workspace-local
+session owner. Released, expired, and retired leases free capacity.
+A claim for a new 101st session is rejected with a retryable capacity result and
+must wait, back off, and retry after a slot becomes available. Renewals,
+idempotent claims, and page replacements for an existing session reuse its slot
+and do not add capacity usage. Resource pressure may still come from the
+browser or ChatGPT service, but C2C does not silently serialize unrelated
+sessions. Only one session's own turns are ordered.
+
+## Machine runtime security
+
+The tunnel-owned `serve-machine --stdio` process is the single MCP gateway.
+The gateway's admin API binds to loopback and requires its per-lifetime admin
+token. The token is never returned by normal status output.
+
+The machine runtime record is protected and owner-checked using machine id,
+boot epoch, pid and exact port/runtime data. A process only clears its own
+record. A second process cannot adopt or publish over a healthy runtime.
+
+The runtime key is installed from a user-selected file into protected state.
+Commands use a file reference rather than printing the key. Status, errors,
+tests and documentation redact keys, admin tokens and raw capabilities.
+
+Mutable project data is kept inside the repository boundary: Git checkouts use
+`<git-common-dir>/codex-with-chatgpt`, while non-Git workspaces use
+`<workspace-root>/.codex-with-chatgpt`. Shared project metadata is separated
+from checkout-specific session routes and execution records under
+`workspaces/<workspaceId>/`. The authoritative mailbox, runtime installations,
+Tunnel configuration and keys, surface ownership index, gateway ownership
+records, machine identity, lifecycle locks and logs remain in protected machine state. The
+`sandbox-clean` command removes obsolete global write grants; it does not grant
+a global machine-state directory.
+
+## Browser and tunnel failure handling
+
+`machine doctor` verifies the official client, the 0.0.14 status-backed tunnel
+target (`tunnel_id`, profile path and child command), health response, loopback
+admin port and owner record. When the status payload includes a child PID, it
+must match the gateway runtime record. The pinned client may omit that field,
+so exact target, association and health checks remain the primary proof. This
+remains a local configuration and liveness check, not a cryptographic
+process-identity proof.
+`machine stop` first verifies the same ownership identity, then stops the tunnel
+supervisor; it does not race the child with an unrelated shutdown.
+
+After a gateway restart, all old contexts are invalid because `bootEpoch`
+changes. The local harness re-registers affected workspaces, claims or renews
+their surfaces, and issues new contexts. It never retries an old token.
+
+## User responsibilities
+
+Keep the runtime-key source private and do not commit machine-state files. In
+ChatGPT create only the named connector with `Authentication: None`, and keep
+each workspace in its intended Project. Do not paste runtime keys, admin
+tokens, context tokens, or full repository contents into ChatGPT manually.
