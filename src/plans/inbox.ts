@@ -14,6 +14,26 @@ const MAX_ACTIVE_AUTHORIZATIONS = 100;
 const SECTION_NAMES = ["FILES_USED", "ASSUMPTIONS", "PLAN", "OPEN_QUESTIONS"] as const;
 const SECTION_RE = /^(FILES_USED|ASSUMPTIONS|PLAN|OPEN_QUESTIONS):\s*$/gm;
 const HASH_RE = /^[0-9a-f]{64}$/;
+const ALLOWED_SUFFIXES = new Set([
+  ".css", ".csv", ".go", ".graphql", ".html", ".java", ".js", ".json", ".jsx", ".md", ".mjs",
+  ".py", ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml",
+]);
+const ALLOWED_EXTENSIONLESS = new Set(["Dockerfile", "Makefile", "README", "LICENSE"]);
+const SENSITIVE_EXACT = new Set([
+  ".env", ".git", ".ssh", ".aws", ".npmrc", ".pypirc", "id_rsa", "id_ed25519", "credentials",
+  "credentials.json", "secrets", "secrets.json", "auth.json",
+]);
+const SENSITIVE_PART = /(^|[._-])(secret|credential|password|passwd|private[-_]?key|access[-_]?token|refresh[-_]?token)([._-]|$)/i;
+const SECRET_PATTERNS = [
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
+  /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/,
+  /\b(?:ghp|github_pat|xox[baprs])[_-][A-Za-z0-9_-]{16,}\b/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+  /\bauthorization\s*:\s*bearer\s+[A-Za-z0-9._~+/-]{16,}={0,2}/i,
+  /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s:/]+:[^\s@/]{4,}@/i,
+  /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|private[_-]?key)\b\s*[:=]\s*["']?[^\s"']{8,}/i,
+];
 
 export class PlanInboxError extends Error {
   constructor(
@@ -106,6 +126,29 @@ function assertPrivateDirectory(directory: string, label: string): string {
     }
   }
   return fs.realpathSync.native(directory);
+}
+
+function assertNoSymlinkAncestors(directory: string): void {
+  const absolute = path.resolve(directory);
+  const parsed = path.parse(absolute);
+  let current = parsed.root;
+  const parts = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  for (const part of parts) {
+    current = path.join(current, part);
+    let info: fs.Stats;
+    try {
+      info = fs.lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new PlanInboxError("UNSAFE_INBOX", "The C2C state-directory ancestry could not be validated.");
+    }
+    if (info.isSymbolicLink()) {
+      throw new PlanInboxError("UNSAFE_INBOX", "The C2C state-directory ancestry must not contain symlinks.");
+    }
+    if (!info.isDirectory()) {
+      throw new PlanInboxError("UNSAFE_INBOX", "The C2C state-directory ancestry must contain only directories.");
+    }
+  }
 }
 
 function secureRoot(directory: string): string {
@@ -205,7 +248,24 @@ function validProject(project: string): boolean {
 function validRelativeFile(relative: string): boolean {
   if (!relative || relative.includes("\0") || relative.includes("\\") || path.posix.isAbsolute(relative)) return false;
   const parts = relative.split("/");
-  return parts.every((part) => part !== "" && part !== "." && part !== "..");
+  if (!parts.every((part) => part !== "" && part !== "." && part !== "..")) return false;
+  if (parts.length === 1 && parts[0].toLowerCase() === "context-manifest.json") return false;
+  for (const component of parts) {
+    const lowered = component.toLowerCase();
+    if (SENSITIVE_EXACT.has(lowered) || lowered.startsWith(".env.") || SENSITIVE_PART.test(component)) return false;
+  }
+  const name = parts[parts.length - 1];
+  return ALLOWED_SUFFIXES.has(path.posix.extname(name).toLowerCase()) || ALLOWED_EXTENSIONLESS.has(name);
+}
+
+function validateStagedText(data: Buffer): void {
+  const text = data.toString("utf8");
+  if (data.includes(0) || Buffer.from(text, "utf8").compare(data) !== 0) {
+    throw new PlanInboxError("STAGED_CONTENT_CHANGED", "Every staged file must be UTF-8 text without NUL bytes.");
+  }
+  if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) {
+    throw new PlanInboxError("STAGED_CONTENT_CHANGED", "A staged file contains secret-like content.");
+  }
 }
 
 function readManifest(file: string): StagedManifest {
@@ -308,7 +368,10 @@ function listRegularFiles(root: string, prefix = ""): string[] {
 
 function sections(content: string): Map<string, string> {
   const matches = [...content.matchAll(SECTION_RE)];
-  if (matches.map((match) => match[1]).join("\0") !== SECTION_NAMES.join("\0")) {
+  if (
+    matches[0]?.index !== 0 ||
+    matches.map((match) => match[1]).join("\0") !== SECTION_NAMES.join("\0")
+  ) {
     throw new PlanInboxError("INVALID_PLAN", "The plan sections are missing, duplicated, or out of order.");
   }
   const result = new Map<string, string>();
@@ -358,6 +421,7 @@ export class PlanInbox {
     if (isInside(requestedStateRoot, this.workspaceRoot) || isInside(this.workspaceRoot, requestedStateRoot)) {
       throw new PlanInboxError("UNSAFE_INBOX", "The plan inbox must be separate from the connected workspace.");
     }
+    assertNoSymlinkAncestors(requestedStateRoot);
     const stateRoot = secureRoot(requestedStateRoot);
     const planRoot = secureChild(stateRoot, "plan-inbox");
     this.inboxRoot = secureChild(planRoot, opts.workspaceId);
@@ -465,6 +529,7 @@ export class PlanInbox {
     for (const item of manifest.files) {
       const absolute = path.join(canonicalProject, ...item.path.split("/"));
       const data = readRegularFile(absolute, MAX_FILE_BYTES, "STAGED_CONTENT_CHANGED");
+      validateStagedText(data);
       if (data.length !== item.bytes || !safeEqual(sha256Hex(data), item.sha256)) {
         throw new PlanInboxError("STAGED_CONTENT_CHANGED", "A staged file no longer matches the manifest.");
       }

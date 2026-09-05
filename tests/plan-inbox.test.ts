@@ -40,6 +40,23 @@ function stagedProject(root: string, project = "sample-project"): { digest: stri
   return { digest, project };
 }
 
+function stagedProjectWithFile(root: string, relative: string, data = "safe text\n"): { digest: string; project: string } {
+  const project = "policy-project";
+  write(root, `${project}/${relative}`, data);
+  const payload = {
+    schema: 2,
+    project,
+    classification: "synthetic",
+    files: [{ path: relative, bytes: Buffer.byteLength(data), sha256: sha256Hex(data) }],
+    limits: { max_file_bytes: 1_000_000, max_total_bytes: 10_000_000 },
+  };
+  const digest = sha256Hex(canonicalJson(payload) + "\n");
+  write(root, `${project}/CONTEXT-MANIFEST.json`, JSON.stringify({ ...payload, approval_digest: digest }));
+  fs.chmodSync(root, 0o700);
+  fs.chmodSync(path.join(root, project), 0o700);
+  return { digest, project };
+}
+
 const PLAN = `FILES_USED:\n- PROJECT.md\n\nASSUMPTIONS:\n- None\n\nPLAN:\n- Make the safe change.\n\nOPEN_QUESTIONS:\n- None\n`;
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "manifest-v2-golden");
 
@@ -122,6 +139,45 @@ describe("PlanInbox", () => {
         /FILES_USED/i
       );
       expect(fs.existsSync(path.join(stateDir, "plan-inbox", "workspace-files", binding.project))).toBe(false);
+    } finally {
+      cleanup(workspaceRoot);
+    }
+  });
+
+  it("rejects paths that the C2C staging policy cannot produce", () => {
+    isolateStateDir();
+    const roots: string[] = [];
+    try {
+      const cases = [
+        [".env", "safe text\n"],
+        ["secrets.json", "safe text\n"],
+        ["image.png", "safe text\n"],
+        ["PROJECT.md", "api_key=abcdefghijklmno\n"],
+      ] as const;
+      for (const [index, [relative, data]] of cases.entries()) {
+        const workspaceRoot = makeTmpDir(`plan-workspace-policy-${index}`);
+        roots.push(workspaceRoot);
+        const binding = stagedProjectWithFile(workspaceRoot, relative, data);
+        const inbox = new PlanInbox({ workspaceRoot, workspaceId: `policy-${index}` });
+        expect(() => inbox.authorize({ ...binding })).toThrow(/manifest|path|secret|sensitive|type/i);
+      }
+    } finally {
+      roots.forEach(cleanup);
+    }
+  });
+
+  it("rejects content before the first required section", () => {
+    isolateStateDir();
+    const workspaceRoot = makeTmpDir("plan-workspace-preamble");
+    try {
+      const binding = stagedProject(workspaceRoot);
+      const inbox = new PlanInbox({ workspaceRoot, workspaceId: "preamble" });
+      const { token: grant } = inbox.authorize({ ...binding });
+      expect(() => inbox.submit({
+        ...binding,
+        authorization: grant,
+        content: `Untrusted preamble\n${PLAN}`,
+      })).toThrow(/section|preamble|FILES_USED/i);
     } finally {
       cleanup(workspaceRoot);
     }
@@ -213,6 +269,26 @@ describe("PlanInbox", () => {
       expect(fs.existsSync(path.join(victimRoot, binding.project))).toBe(false);
     } finally {
       cleanup(workspaceRoot);
+      cleanup(victimRoot);
+    }
+  });
+
+  it("rejects a symlink in the configured state-directory ancestry before creating state", () => {
+    const workspaceRoot = makeTmpDir("plan-workspace-state-link");
+    const stateParent = makeTmpDir("plan-state-parent");
+    const victimRoot = makeTmpDir("plan-state-victim");
+    const previous = process.env.C2C_STATE_DIR;
+    const link = path.join(stateParent, "linked");
+    fs.symlinkSync(victimRoot, link);
+    process.env.C2C_STATE_DIR = path.join(link, "state");
+    try {
+      expect(() => new PlanInbox({ workspaceRoot, workspaceId: "state-link" })).toThrow(/symlink|state|inbox/i);
+      expect(fs.existsSync(path.join(victimRoot, "state"))).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.C2C_STATE_DIR;
+      else process.env.C2C_STATE_DIR = previous;
+      cleanup(workspaceRoot);
+      cleanup(stateParent);
       cleanup(victimRoot);
     }
   });

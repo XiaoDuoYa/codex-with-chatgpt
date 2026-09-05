@@ -36,7 +36,7 @@
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
 | Plan write confused-deputy attack | `plan.write` is excluded from default scopes. `submit_plan` also needs a fresh in-memory capability bound to one project and approved staging digest. The capability expires within 10 minutes and is consumed on the first attempt. |
-| Plan path traversal / overwrite | The server chooses an owner-only path outside the workspace and opens a random filename with create-exclusive mode. The model supplies no path, filename, edit, replace, or delete argument. |
+| Plan path traversal / overwrite | The server rejects symlinks in existing state ancestors, revalidates owner-only inbox components, chooses a path outside the workspace, and opens a random filename with create-exclusive mode. The model supplies no path, filename, edit, replace, or delete argument. Same-user concurrent filesystem replacement is outside the stated local-user trust boundary. |
 | Staging changed after approval | Authorization and submission both recompute the manifest digest and verify the exact file set, sizes, hashes, regular-file type, and absence of symlinks before any inbox write. |
 
 ## Token & scope design

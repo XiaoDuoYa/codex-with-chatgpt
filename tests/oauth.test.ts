@@ -121,6 +121,7 @@ describe("discovery metadata", () => {
     const response = await fetch(authorizeUrl);
     const html = await response.text();
     expect(html).toContain("Submit a plan to the separate C2C Plan Inbox");
+    expect(html).toContain("includes permission to create plan artifacts in the separate Plan Inbox");
     expect(html).not.toContain("(read-only):");
   });
 

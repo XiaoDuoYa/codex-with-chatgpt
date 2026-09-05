@@ -60,7 +60,7 @@ ChatGPT calls `submit_plan` with:
 - `authorization`: fresh one-time value;
 - `content`: complete plan text.
 
-The content must be UTF-8, at most 256 KiB, and contain these sections exactly once in this order:
+The content must be UTF-8, at most 256 KiB, begin with `FILES_USED:` at byte zero, and contain these sections exactly once in this order:
 
 ```text
 FILES_USED:
@@ -69,7 +69,7 @@ PLAN:
 OPEN_QUESTIONS:
 ```
 
-Every `FILES_USED` bullet must name a unique file in the approved manifest. Before writing, the server rechecks the manifest digest, exact file set, file sizes, file hashes, and symlink policy.
+Every `FILES_USED` bullet must name a unique file in the approved manifest. Before writing, the server rechecks the manifest digest, exact file set, path policy, UTF-8 text policy, secret-like content scan, file sizes, file hashes, and symlink policy.
 
 The four section labels are reserved framing lines. Do not repeat a label as an exact column-zero line inside a section or code block.
 

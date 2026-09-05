@@ -89,7 +89,7 @@ function pairingPage(opts: {
   const escapedWorkspaceName = escapeHtml(opts.workspaceName);
   const escapedRequestId = escapeHtml(opts.requestId);
   const accessLabel = opts.scopes.includes("plan.write")
-    ? "with optional plan-inbox submission"
+    ? "and includes permission to create plan artifacts in the separate Plan Inbox; it cannot modify the workspace"
     : "(read-only)";
   return `<!doctype html>
 <html lang="en">

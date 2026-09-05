@@ -159,7 +159,23 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     res.json({ code: session.code, expiresAt: session.expiresAt });
   });
 
-  app.post("/admin/plan-authorizations", adminGuard, express.json({ limit: "4kb" }), (req, res) => {
+  const parsePlanAuthorizationBody = express.json({ limit: "4kb", strict: true });
+  const boundedPlanJson = (req: Request, res: Response, next: NextFunction): void => {
+    parsePlanAuthorizationBody(req, res, (error?: unknown) => {
+      if (!error) {
+        next();
+        return;
+      }
+      const status = (error as { status?: number }).status;
+      if (status === 413) {
+        res.status(413).json({ error: "BODY_TOO_LARGE", message: "The authorization request is too large." });
+        return;
+      }
+      res.status(400).json({ error: "INVALID_JSON", message: "The authorization request must be valid JSON." });
+    });
+  };
+
+  app.post("/admin/plan-authorizations", adminGuard, boundedPlanJson, (req, res) => {
     try {
       const body = req.body as { project?: unknown; staged_digest?: unknown; ttl_ms?: unknown };
       if (

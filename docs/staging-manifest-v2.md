@@ -36,6 +36,8 @@ The workspace root, project directory, and nested directories must be owned by t
 
 Allowed classifications are `public`, `synthetic`, and `sanitized`. The file list must be non-empty, contain at most 500 unique safe relative paths, and exactly match the staged regular-file set except for `CONTEXT-MANIFEST.json`.
 
+Paths must follow the C2C staging allowlist. Supported suffixes are `.css`, `.csv`, `.go`, `.graphql`, `.html`, `.java`, `.js`, `.json`, `.jsx`, `.md`, `.mjs`, `.py`, `.rs`, `.sh`, `.sql`, `.toml`, `.ts`, `.tsx`, `.txt`, `.yaml`, and `.yml`. Supported extensionless names are `Dockerfile`, `Makefile`, `README`, and `LICENSE`. Sensitive names and components such as `.env`, `.git`, credentials, secrets, passwords, private keys, and access or refresh tokens are rejected.
+
 ## File hashes
 
 For each approved file:
@@ -43,6 +45,7 @@ For each approved file:
 - `bytes` is the exact byte length, at most 1,000,000;
 - `sha256` is the lowercase SHA-256 of the exact file bytes;
 - the sum of `bytes` is at most 10,000,000.
+- every file is valid UTF-8 text without NUL bytes or secret-like content.
 
 ## Approval digest
 

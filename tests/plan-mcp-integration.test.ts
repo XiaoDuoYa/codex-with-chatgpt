@@ -82,6 +82,40 @@ afterAll(async () => {
 });
 
 describe("submit_plan MCP action", () => {
+  it("returns bounded JSON errors for malformed and oversized admin requests", async () => {
+    const headers = { authorization: "Bearer " + bridge.adminToken, "content-type": "application/json" };
+    const malformed = await fetch(`${bridge.localBaseUrl()}/admin/plan-authorizations`, {
+      method: "POST", headers, body: "{",
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toMatchObject({ error: "INVALID_JSON" });
+
+    const oversized = await fetch(`${bridge.localBaseUrl()}/admin/plan-authorizations`, {
+      method: "POST", headers, body: JSON.stringify({ project: "x".repeat(5_000) }),
+    });
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ error: "BODY_TOO_LARGE" });
+
+    const invalidTtl = await fetch(`${bridge.localBaseUrl()}/admin/plan-authorizations`, {
+      method: "POST", headers,
+      body: JSON.stringify({ project: "sample-project", staged_digest: digest, ttl_ms: 0 }),
+    });
+    expect(invalidTtl.status).toBe(400);
+    expect(await invalidTtl.json()).toMatchObject({ error: "INVALID_TTL" });
+  });
+
+  it("hides the admin route from bad tokens and forwarded requests", async () => {
+    const cases: Record<string, string>[] = [
+      { authorization: "Bearer wrong", "content-type": "application/json" },
+      { authorization: "Bearer " + bridge.adminToken, "content-type": "application/json", "x-forwarded-for": "203.0.113.1" },
+    ];
+    for (const headers of cases) {
+      const response = await fetch(`${bridge.localBaseUrl()}/admin/plan-authorizations`, {
+        method: "POST", headers, body: "{}",
+      });
+      expect(response.status).toBe(404);
+    }
+  });
   it("is declared as a non-destructive, non-idempotent write action", async () => {
     const tool = (await writeClient.listTools()).tools.find((item) => item.name === "submit_plan");
     expect(tool?.annotations).toMatchObject({
