@@ -567,6 +567,57 @@ describe("mergeSession", () => {
     }
   });
 
+  it("keeps pre-pairing checkpoints readable when another session binds the shared Project", () => {
+    const dir = isolateStateDir();
+    try {
+      for (const id of ["session-first", "session-second"]) {
+        updateSession("shared-project", id, {
+          taskId: `task-${id}`, iteration: 1,
+          checkpoint: { originalGoal: `Keep ${id}`, protocolState: "PLAN_RECEIVED" },
+        });
+      }
+      commitSessionRoute("shared-project", "session-first", {
+        projectUrl: PROJECT, chatUrl: PROJECT_CHAT, surfaceGeneration: 1, surfaceTabId: "first-tab",
+      });
+      expect(readSession("shared-project", "session-second")).toMatchObject({
+        projectUrl: PROJECT, taskId: "task-session-second",
+        checkpoint: { originalGoal: "Keep session-second", projectUrl: PROJECT },
+      });
+      expect(readSession("shared-project", "session-second")?.url).toBeUndefined();
+      commitSessionRoute("shared-project", "session-second", {
+        projectUrl: PROJECT, chatUrl: `${PROJECT.slice(0, -"project".length)}c/second`,
+        surfaceGeneration: 2, surfaceTabId: "second-tab",
+      });
+      expect(readSession("shared-project", "session-second")?.checkpoint?.originalGoal).toBe("Keep session-second");
+      expect(readSession("shared-project", "session-first")?.url).toBe(PROJECT_CHAT);
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("does not promote a stale checkpoint Project mirror into the shared route", () => {
+    const dir = isolateStateDir();
+    try {
+      commitSessionRoute("checkpoint-mirror", "session-one", { projectUrl: PROJECT, chatUrl: PROJECT_CHAT });
+      updateSession("checkpoint-mirror", "session-one", {
+        taskId: "keep-task", iteration: 0,
+        checkpoint: { originalGoal: "keep-progress", protocolState: "PLAN_RECEIVED" },
+      });
+      const file = threadSessionFile("checkpoint-mirror", "session-one");
+      const stored = JSON.parse(fs.readFileSync(file, "utf8"));
+      stored.checkpoint.projectUrl = OTHER_PROJECT;
+      fs.writeFileSync(file, JSON.stringify(stored));
+      expect(readSession("checkpoint-mirror", "session-one")).toMatchObject({
+        url: PROJECT_CHAT, projectUrl: PROJECT,
+        checkpoint: { projectUrl: PROJECT, originalGoal: "keep-progress" },
+      });
+    } finally {
+      cleanup(dir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
   it("does not let mergeSession replace an existing Project binding", () => {
     expect(() =>
       mergeSession(

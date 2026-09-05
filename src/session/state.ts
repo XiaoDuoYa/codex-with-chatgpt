@@ -603,9 +603,6 @@ function readSessionUnlocked(workspaceId: string, localSessionId: string): Saved
     if (thread.checkpoint.chatUrl !== thread.url) {
       throw new Error("checkpoint chat URL does not match its local session state");
     }
-    if (thread.checkpoint.projectUrl !== workspace?.projectUrl) {
-      throw new Error("checkpoint Project URL does not match its workspace state");
-    }
   }
   return {
     schemaVersion: 2,
@@ -620,7 +617,11 @@ function readSessionUnlocked(workspaceId: string, localSessionId: string): Saved
     connectorName: workspace?.connectorName,
     surfaceGeneration: thread?.surfaceGeneration,
     surfaceTabId: thread?.surfaceTabId,
-    checkpoint: thread?.checkpoint,
+    // Project state is shared and can change when another session is paired.
+    // The checkpoint URL is a mirror, never a source of routing authority.
+    checkpoint: thread?.checkpoint
+      ? { ...thread.checkpoint, projectUrl: workspace?.projectUrl }
+      : undefined,
     savedAt: thread?.savedAt ?? workspace?.savedAt ?? new Date().toISOString(),
   };
 }
