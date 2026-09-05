@@ -40,12 +40,19 @@ class FakeCloudflaredProcess extends EventEmitter {
   });
 }
 
-function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
+type ResolveImpl = NonNullable<CloudflaredQuickTunnelOptions["resolveImpl"]>;
+
+function setupTunnel(
+  fetchImpl: FetchImpl,
+  startTimeoutMs = 1_000,
+  resolveImpl: ResolveImpl = async () => "ready"
+) {
   const child = new FakeCloudflaredProcess();
   const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
   const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
     spawnImpl,
     fetchImpl,
+    resolveImpl,
     startTimeoutMs,
   });
   return { child, spawnImpl, tunnel };
@@ -97,6 +104,8 @@ describe("parseQuickTunnelUrl", () => {
   });
 });
 
+
+
 describe("CloudflaredQuickTunnel", () => {
   it("resolves only after the public health endpoint identifies the bridge", async () => {
     const fetchImpl = vi.fn(async () => healthResponse());
@@ -115,6 +124,83 @@ describe("CloudflaredQuickTunnel", () => {
       signal: expect.any(AbortSignal),
     });
     expect(tunnel.status()).toMatchObject({ running: true, url: QUICK_URL });
+    await tunnel.stop();
+  });
+
+  it("does not probe over HTTP until the public hostname is ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async () => healthResponse());
+      const resolveImpl = vi
+        .fn<ResolveImpl>()
+        .mockResolvedValueOnce("not-ready")
+        .mockResolvedValueOnce("not-ready")
+        .mockResolvedValue("ready");
+      const { child, tunnel } = setupTunnel(fetchImpl, 20_000, resolveImpl);
+      const starting = tunnel.start(3333);
+      announceUrl(child);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolveImpl).toHaveBeenCalledWith("random-words-here-1234.trycloudflare.com");
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(600);
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(600);
+      await expect(starting).resolves.toBe(QUICK_URL);
+      expect(fetchImpl).toHaveBeenCalled();
+      await tunnel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to HTTP when public DNS probes are unreachable", async () => {
+    const fetchImpl = vi.fn(async () => healthResponse());
+    const resolveImpl = vi.fn<ResolveImpl>().mockResolvedValue("unavailable");
+    const { child, tunnel } = setupTunnel(fetchImpl, 5_000, resolveImpl);
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(fetchImpl).toHaveBeenCalled();
+    await tunnel.stop();
+  });
+
+  it("does not treat NXDOMAIN as another unavailable round", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async () => healthResponse());
+      const resolveImpl = vi
+        .fn<ResolveImpl>()
+        .mockResolvedValueOnce("unavailable")
+        .mockResolvedValueOnce("not-ready")
+        .mockResolvedValue("ready");
+      const { child, tunnel } = setupTunnel(fetchImpl, 20_000, resolveImpl);
+      const starting = tunnel.start(3333);
+      announceUrl(child);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(600);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(600);
+      await expect(starting).resolves.toBe(QUICK_URL);
+      expect(fetchImpl).toHaveBeenCalled();
+      await tunnel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts probing immediately when the hostname already resolves", async () => {
+    const fetchImpl = vi.fn(async () => healthResponse());
+    const { child, tunnel } = setupTunnel(fetchImpl);
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
     await tunnel.stop();
   });
 

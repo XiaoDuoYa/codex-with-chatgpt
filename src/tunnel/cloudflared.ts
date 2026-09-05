@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { Resolver } from "node:dns/promises";
 import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
@@ -10,6 +11,14 @@ const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
 const HEALTH_CHECK_INTERVAL_MS = 250;
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+// Do not query the OS resolver until an external A record exists; an early
+// NXDOMAIN there can stick longer than the start timeout.
+const READINESS_RESOLVERS = ["1.1.1.1", "8.8.8.8"];
+const DNS_RETRY_INTERVAL_MS = 500;
+const DNS_QUERY_TIMEOUT_MS = 3_000;
+const UNAVAILABLE_FALLBACK_ROUNDS = 2;
+
+export type HostnameReadiness = "ready" | "not-ready" | "unavailable";
 
 function isBridgeHealth(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
@@ -36,6 +45,48 @@ async function bridgeHealth(
   };
 }
 
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  if ("errors" in error && Array.isArray(error.errors)) {
+    for (const inner of error.errors) {
+      const code = errorCode(inner);
+      if (code) return code;
+    }
+  }
+  if ("cause" in error) return errorCode(error.cause);
+  return undefined;
+}
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = errorCode(error);
+  return code ? `${error.message} [${code}]` : error.message;
+}
+
+function publicResolverProbe(): (hostname: string) => Promise<HostnameReadiness> {
+  const resolvers = READINESS_RESOLVERS.map((server) => {
+    const resolver = new Resolver({ timeout: DNS_QUERY_TIMEOUT_MS, tries: 1 });
+    resolver.setServers([server]);
+    return resolver;
+  });
+  return async (hostname) => {
+    const settled = await Promise.allSettled(resolvers.map((r) => r.resolve4(hostname)));
+    let positive = 0;
+    let negative = 0;
+    for (const result of settled) {
+      if (result.status === "fulfilled") positive += 1;
+      else {
+        const code = errorCode(result.reason);
+        if (code === "ENOTFOUND" || code === "ENODATA" || code === "ENOENT") negative += 1;
+      }
+    }
+    if (negative > 0) return "not-ready";
+    if (positive > 0) return "ready";
+    return "unavailable";
+  };
+}
+
 /** Extract a Quick Tunnel public URL from a cloudflared log line. */
 export function parseQuickTunnelUrl(line: string): string | null {
   for (const match of line.matchAll(QUICK_TUNNEL_URL_RE)) {
@@ -53,6 +104,8 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  /** Test seam. Must not query the OS resolver. */
+  resolveImpl?: (hostname: string) => Promise<HostnameReadiness>;
   spawnImpl?: (
     command: string,
     args: string[],
@@ -72,6 +125,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private url: string | null = null;
   private lastError: string | null = null;
   private readonly startTimeoutMs: number;
+  private readonly resolveImpl: NonNullable<CloudflaredQuickTunnelOptions["resolveImpl"]>;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
   private starting: Promise<string> | null = null;
@@ -83,6 +137,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     options: CloudflaredQuickTunnelOptions = {}
   ) {
     this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.resolveImpl = options.resolveImpl ?? publicResolverProbe();
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
@@ -187,9 +242,29 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
         );
       };
 
+      const waitForDns = async (hostname: string): Promise<boolean> => {
+        let unavailableRounds = 0;
+        while (!settled && isAlive()) {
+          let verdict: HostnameReadiness = "unavailable";
+          try {
+            verdict = await this.resolveImpl(hostname);
+          } catch (error) {
+            this.lastError = describeError(error);
+          }
+          if (settled) return false;
+          if (verdict === "ready") return true;
+          if (verdict === "not-ready") unavailableRounds = 0;
+          else if (++unavailableRounds >= UNAVAILABLE_FALLBACK_ROUNDS) return true;
+          await new Promise((wait) => setTimeout(wait, DNS_RETRY_INTERVAL_MS));
+        }
+        if (!settled) fail(new Error("cloudflared exited before the public hostname resolved"));
+        return false;
+      };
+
       const waitForHealth = async (): Promise<void> => {
         const publicUrl = candidateUrl;
         if (!publicUrl) return;
+        if (!(await waitForDns(new URL(publicUrl).hostname))) return;
         while (!settled) {
           if (!isAlive()) {
             fail(new Error("cloudflared exited before the public health endpoint became ready"));
@@ -206,7 +281,8 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
             this.lastError = result.detail;
           } catch (error) {
             if (settled) return;
-            this.lastError = error instanceof Error ? error.message : String(error);
+            this.lastError = describeError(error);
+            this.logger.debug(`Quick tunnel health probe: ${this.lastError}`);
           }
           if (settled) return;
           await new Promise((resolveWait) => setTimeout(resolveWait, HEALTH_CHECK_INTERVAL_MS));

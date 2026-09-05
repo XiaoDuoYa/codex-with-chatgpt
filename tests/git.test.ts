@@ -56,6 +56,35 @@ describe("gitStatus", () => {
     git(repo, "reset", "staged.txt");
     git(repo, "checkout", "--", "hello.txt");
   });
+
+  it("omits sensitive and .c2cignore'd paths, even as bare file names", () => {
+    write(repo, ".c2cignore", "private-notes/\n");
+    write(repo, ".env", "SECRET_KEY=leaked-env\n");
+    write(repo, "private-notes/secret.md", "CONFIDENTIAL DATA\n");
+    write(repo, "public.txt", "PUBLIC CONTENT\n");
+
+    const status = gitStatus(repo);
+    expect(status.untracked).toContain("public.txt");
+    expect(status.untracked).not.toContain(".env");
+    expect(status.untracked).not.toContain("private-notes/secret.md");
+    expect(status.hidden.changes).toBeGreaterThan(0);
+  });
+
+  // '>' is not a legal filename character on Windows, so the ambiguous
+  // rendering can only be exercised on POSIX.
+  it.skipIf(process.platform === "win32")(
+    "filters a rename whose pathname itself contains an arrow",
+    () => {
+      write(repo, ".c2cignore", "secret -> file.txt\n");
+      write(repo, "plain -> name.txt", "RENAMED CONTENT\n");
+      write(repo, "secret -> file.txt", "HIDDEN CONTENT\n");
+
+      const status = gitStatus(repo);
+      expect(status.untracked).toContain("plain -> name.txt");
+      expect(status.untracked).not.toContain("secret -> file.txt");
+      expect(status.hidden.changes).toBe(1);
+    }
+  );
 });
 
 describe("gitDiff pagination", () => {
