@@ -2,6 +2,12 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  controlHostFailureSchema,
+  controlWaitPolicy,
+  CONTROL_PAGE_CHECK_INTERVAL_MS,
+  type ControlHostFailure,
+} from "./wait-policy.js";
+import {
   ensureDir,
   getStateDir,
   readJsonIfExists,
@@ -54,6 +60,7 @@ export interface ControlStatus {
   request: ControlResultRequest | null;
   result: ControlResultEnvelope | null;
   progress: ControlProgressEnvelope | null;
+  hostFailure?: ControlHostFailure;
 }
 
 /**
@@ -103,6 +110,10 @@ function locksDir(workspaceId: string): string {
 
 function requestFile(workspaceId: string, requestId: string): string {
   return path.join(requestsDir(workspaceId), `${validateControlId(requestId, "request id")}.json`);
+}
+
+function renewalFile(workspaceId: string, requestId: string): string {
+  return path.join(ensureDir(path.join(workspaceDir(workspaceId), "renewals")), `${validateControlId(requestId, "request id")}.json`);
 }
 
 function resultFile(workspaceId: string, requestId: string): string {
@@ -202,7 +213,7 @@ function readTerminalMarker(
   workspaceId: string,
   request: ControlResultRequest,
   kind: TerminalMarkerKind
-): string | null {
+): { timestamp: string; hostFailure?: ControlHostFailure } | null {
   const value = readStoredJson(
     terminalMarkerFile(workspaceId, request.requestId, kind),
     `${kind} request marker`
@@ -221,6 +232,7 @@ function readTerminalMarker(
       "iteration",
       "phase",
       timestampField,
+      ...(kind === "cancelled" && value.hostFailure !== undefined ? ["hostFailure"] : []),
     ])
   ) {
     integrityError(`${kind} request marker schema is invalid`);
@@ -237,13 +249,22 @@ function readTerminalMarker(
   ) {
     integrityError(`${kind} request marker does not match the exact control request`);
   }
-  return timestamp;
+  let hostFailure: ControlHostFailure | undefined;
+  if (value.hostFailure !== undefined) {
+    const parsed = controlHostFailureSchema.safeParse(value.hostFailure);
+    if (!parsed.success || parsed.data.responseToRequestId !== request.requestId) {
+      integrityError("cancelled request observation is invalid");
+    }
+    hostFailure = parsed.data;
+  }
+  return { timestamp, ...(hostFailure ? { hostFailure } : {}) };
 }
 
 function writeTerminalMarker(
   workspaceId: string,
   request: ControlResultRequest,
-  kind: TerminalMarkerKind
+  kind: TerminalMarkerKind,
+  hostFailure?: ControlHostFailure,
 ): void {
   const timestampField = terminalMarkerTimestampField(kind);
   const marker = {
@@ -255,6 +276,7 @@ function writeTerminalMarker(
     iteration: request.iteration,
     phase: request.phase,
     [timestampField]: new Date().toISOString(),
+    ...(hostFailure ? { hostFailure } : {}),
   };
   const file = terminalMarkerFile(workspaceId, request.requestId, kind);
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -362,7 +384,22 @@ function readRequest(workspaceId: string, requestId: string): ControlResultReque
   const resolvedWorkspaceId = validateControlId(workspaceId, "workspace id");
   const resolvedRequestId = validateControlId(requestId, "request id");
   const value = readStoredJson(requestFile(resolvedWorkspaceId, resolvedRequestId), "stored request");
-  return value === null ? null : parseStoredRequest(value, resolvedWorkspaceId, resolvedRequestId);
+  return value === null ? null : applyRequestRenewal(parseStoredRequest(value, resolvedWorkspaceId, resolvedRequestId));
+}
+
+// A single atomic renewal record extends both immutable request copies without a two-file update.
+function applyRequestRenewal(request: ControlResultRequest): ControlResultRequest {
+  const value = readStoredJson(renewalFile(request.workspaceId, request.requestId), "request renewal");
+  if (value === null) return request;
+  if (!isRecord(value) || !hasExactKeys(value, ["request", "expiresAt"])) {
+    integrityError("request renewal schema is invalid");
+  }
+  const original = parseStoredRequest(value.request, request.workspaceId, request.requestId);
+  if (
+    canonicalJson(original) !== canonicalJson(request) ||
+    !isCanonicalTimestamp(value.expiresAt) || Date.parse(value.expiresAt) < Date.parse(request.expiresAt)
+  ) integrityError("request renewal does not match the original request");
+  return { ...request, expiresAt: value.expiresAt };
 }
 
 function ensureRequestFile(workspaceId: string, request: ControlResultRequest): void {
@@ -386,7 +423,7 @@ function readActiveRequest(workspaceId: string, localSessionId: string): Control
   if (request.localSessionId !== localSessionId) {
     integrityError("active request pointer belongs to another local session");
   }
-  return request;
+  return applyRequestRenewal(request);
 }
 
 function claimActiveRequest(workspaceId: string, request: ControlResultRequest): boolean {
@@ -574,14 +611,14 @@ function isExpired(request: ControlResultRequest, now = Date.now()): boolean {
 function readTerminalState(
   workspaceId: string,
   request: ControlResultRequest
-): { kind: TerminalMarkerKind; timestamp: string } | null {
+): { kind: TerminalMarkerKind; timestamp: string; hostFailure?: ControlHostFailure } | null {
   const acknowledgedAt = readTerminalMarker(workspaceId, request, "acknowledged");
   const cancelledAt = readTerminalMarker(workspaceId, request, "cancelled");
   if (acknowledgedAt && cancelledAt) {
     integrityError("control result request has conflicting terminal markers");
   }
-  if (acknowledgedAt) return { kind: "acknowledged", timestamp: acknowledgedAt };
-  if (cancelledAt) return { kind: "cancelled", timestamp: cancelledAt };
+  if (acknowledgedAt) return { kind: "acknowledged", ...acknowledgedAt };
+  if (cancelledAt) return { kind: "cancelled", ...cancelledAt };
   return null;
 }
 
@@ -908,7 +945,8 @@ export function getControlResultStatus(
   }
   if (terminal?.kind === "cancelled") {
     if (result) integrityError("cancelled control result request unexpectedly contains a result");
-    return { requestId: resolvedRequestId, status: "cancelled", request, result: null, progress };
+    return { requestId: resolvedRequestId, status: "cancelled", request, result: null, progress,
+      ...(terminal.hostFailure ? { hostFailure: terminal.hostFailure } : {}) };
   }
   if (result) return { requestId: resolvedRequestId, status: "received", request, result, progress };
   if (isExpired(request)) {
@@ -954,13 +992,15 @@ export async function waitForControlResult(
       if (signal?.aborted) onAbort();
     });
   };
-  const deadline = Date.now() + Math.max(0, timeoutMs);
+  let deadline: number | undefined;
   for (;;) {
     throwIfAborted();
     const status = getControlResultStatus(workspaceId, requestId, localSessionId, expected);
     if (status.status !== "pending") return status;
-    if (Date.now() >= deadline) return status;
-    await waitForPoll(Math.min(250, deadline - Date.now()));
+    deadline ??= Date.now() + Math.min(CONTROL_PAGE_CHECK_INTERVAL_MS, Math.max(0, timeoutMs), controlWaitPolicy(status).checkPageAfterMs);
+    const remaining = Math.min(deadline, Date.parse(status.request!.expiresAt)) - Date.now();
+    if (remaining <= 0) return status;
+    await waitForPoll(Math.min(250, remaining));
   }
 }
 
@@ -1033,6 +1073,57 @@ export function cancelControlResultRequest(
         expected
       );
     })
+  );
+}
+
+/** Host observations cancel pending work, never manufacture an MCP result. Receipt wins under the request lock. */
+export function recordControlHostFailure(
+  workspaceId: string,
+  requestId: string,
+  localSessionId: string,
+  expected: ControlResultCorrelation,
+  observation: ControlHostFailure,
+): ControlStatus {
+  const parsed = controlHostFailureSchema.safeParse(observation);
+  if (!parsed.success) throw new ControlMailboxError("INVALID_RESULT", "invalid host failure observation");
+  const failure = parsed.data;
+  if (failure.responseToRequestId !== requestId) {
+    throw new ControlMailboxError("MAILBOX_CORRELATION_MISMATCH", "observation belongs to another response");
+  }
+  return withFileLock(sessionLifecycleLockFile(workspaceId, localSessionId), () =>
+    withFileLock(requestLockFile(workspaceId, requestId), () => {
+      const status = getControlResultStatus(workspaceId, requestId, localSessionId, expected);
+      if (status.status !== "pending") return status;
+      writeTerminalMarker(workspaceId, status.request!, "cancelled", failure);
+      clearActiveRequest(workspaceId, localSessionId, requestId);
+      return getControlResultStatus(workspaceId, requestId, localSessionId, expected);
+    }),
+  );
+}
+
+/** Extend only pending work under the same locks used by receipts and cancellation. */
+export function renewControlResultRequest(
+  workspaceId: string,
+  requestId: string,
+  localSessionId: string,
+  expected: ControlResultCorrelation,
+  renewAuthorization: () => string,
+): ControlStatus {
+  return withFileLock(sessionLifecycleLockFile(workspaceId, localSessionId), () =>
+    withFileLock(requestLockFile(workspaceId, requestId), () => {
+      const status = getControlResultStatus(workspaceId, requestId, localSessionId, expected);
+      if (status.status !== "pending") return status;
+      const expiresAt = renewAuthorization();
+      const expiry = Date.parse(expiresAt);
+      if (!isCanonicalTimestamp(expiresAt) || expiry <= Date.now() || expiry > Date.now() + MAX_REQUEST_TTL_MS) {
+        throw new ControlMailboxError("INVALID_RESULT", "invalid request renewal lifetime");
+      }
+      if (expiry > Date.parse(status.request!.expiresAt)) {
+        const original = parseStoredRequest(readStoredJson(requestFile(workspaceId, requestId), "stored request"), workspaceId, requestId);
+        writeSecureJson(renewalFile(workspaceId, requestId), { request: original, expiresAt });
+      }
+      return getControlResultStatus(workspaceId, requestId, localSessionId, expected);
+    }),
   );
 }
 
@@ -1128,6 +1219,7 @@ function pruneControlMailboxUnlocked(resolvedWorkspaceId: string, now: number): 
             progressFile(resolvedWorkspaceId, request.requestId),
             ackFile(resolvedWorkspaceId, request.requestId),
             cancelledFile(resolvedWorkspaceId, request.requestId),
+            renewalFile(resolvedWorkspaceId, request.requestId),
           ]) {
             fs.rmSync(file, { force: true });
           }

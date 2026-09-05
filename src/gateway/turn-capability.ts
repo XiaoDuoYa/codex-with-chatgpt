@@ -157,7 +157,8 @@ interface CapabilityRecord {
   readonly bootEpoch: string;
   readonly binding: TurnCapabilityBinding;
   readonly issuedAt: number;
-  readonly expiresAt: number;
+  readonly ttlMs: number;
+  expiresAt: number;
   state: TurnCapabilityState;
   claimedAt?: number;
   readonly leases: Map<string, number>;
@@ -362,6 +363,7 @@ export class TurnCapabilityBroker {
       bootEpoch: this.bootEpoch,
       binding,
       issuedAt: now,
+      ttlMs,
       expiresAt,
       state: "issued",
       leases: new Map(),
@@ -374,6 +376,40 @@ export class TurnCapabilityBroker {
       expiresAt: new Date(expiresAt).toISOString(),
       bootEpoch: this.bootEpoch,
     };
+  }
+
+  /** Host-only keepalive for an already authorized request. It cannot revive or replace a token. */
+  keepAliveRequest(
+    expected: TurnRequestBinding & Pick<TurnCapabilityBinding, "registrationId" | "generation">,
+    observedAt: number,
+  ): string {
+    const now = this.now();
+    this.prune(now);
+    if (!Number.isFinite(observedAt) || observedAt < now - 60_000 || observedAt > now + 5_000) {
+      throw new TurnCapabilityError("BINDING_MISMATCH", "request activity observation is not fresh");
+    }
+    const matches = [...this.records.values()].filter((record) =>
+      !this.isTombstone(record.state) &&
+      record.binding.workspaceId === expected.workspaceId &&
+      record.binding.projectId === expected.projectId &&
+      record.binding.registrationId === expected.registrationId &&
+      record.binding.localSessionId === expected.localSessionId &&
+      record.binding.taskId === expected.taskId &&
+      record.binding.iteration === expected.iteration &&
+      record.binding.phase === expected.phase &&
+      record.binding.requestId === expected.requestId &&
+      record.binding.generation === expected.generation,
+    );
+    if (matches.length !== 1) {
+      throw new TurnCapabilityError("TOKEN_NOT_FOUND", "no unique live capability for this request activity");
+    }
+    const record = matches[0];
+    this.assertFreshSessionEpoch(record.binding);
+    if (record.state === "completing") {
+      throw new TurnCapabilityError("COMPLETION_ALREADY_STARTED", "result completion is already in progress");
+    }
+    record.expiresAt = Math.max(record.expiresAt, Math.min(observedAt, now) + record.ttlMs);
+    return new Date(record.expiresAt).toISOString();
   }
 
   claim(token: string, expectedBinding: TurnCapabilityBinding, options: TurnClaimOptions = {}): TurnLease {

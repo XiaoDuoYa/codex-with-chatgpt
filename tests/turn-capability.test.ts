@@ -36,6 +36,50 @@ function expectCode(action: () => unknown, code: TurnCapabilityError["code"]): v
 }
 
 describe("turn capability broker", () => {
+  it("renews only the exact live request and does not advance expiry on observation replay", () => {
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    const broker = new TurnCapabilityBroker({ now: () => now });
+    const grant = broker.issueReplacingSession({ ...binding(), ttlMs: 60_000 });
+    const expected = { ...grant.binding, requestId: "request-a" };
+    now += 30_000;
+    for (const mismatch of [
+      { workspaceId: "other" }, { projectId: "other" }, { registrationId: "other" },
+      { localSessionId: "other" }, { requestId: "other" }, { taskId: "other" },
+      { iteration: 99 }, { phase: "other" }, { generation: 99 },
+    ]) expectCode(() => broker.keepAliveRequest({ ...expected, ...mismatch }, now), "TOKEN_NOT_FOUND");
+    expect(broker.status(grant.token).expiresAt).toBe(grant.expiresAt);
+    expectCode(() => broker.keepAliveRequest(expected, now - 60_001), "BINDING_MISMATCH");
+    expectCode(() => broker.keepAliveRequest(expected, now + 5_001), "BINDING_MISMATCH");
+    const observedAt = now;
+    const renewed = broker.keepAliveRequest(expected, observedAt);
+    expect(Date.parse(renewed)).toBe(now + 60_000);
+    now += 20_000;
+    expect(broker.keepAliveRequest(expected, observedAt)).toBe(renewed);
+    expect(broker.status(grant.token).binding).toEqual(grant.binding);
+    broker.revoke(grant.token);
+    expectCode(() => broker.keepAliveRequest(expected, now), "TOKEN_NOT_FOUND");
+    expect(broker.status(grant.token).status).toBe("revoked");
+  });
+
+  it("does not revive expired or replaced capabilities or extend an in-progress completion", () => {
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    const broker = new TurnCapabilityBroker({ now: () => now });
+    const first = broker.issueReplacingSession({ ...binding(), ttlMs: 1_000 });
+    const expected = { ...first.binding, requestId: "request-a" };
+    now += 1_000;
+    expectCode(() => broker.keepAliveRequest(expected, now), "TOKEN_NOT_FOUND");
+    expect(broker.status(first.token).status).toBe("expired");
+    const next = broker.issueReplacingSession(binding({ requestId: "request-b", generation: 5 }));
+    expectCode(() => broker.keepAliveRequest(expected, now), "TOKEN_NOT_FOUND");
+    const nextExpected = { ...next.binding, requestId: "request-b" };
+    const lease = broker.claim(next.token, next.binding);
+    broker.release(next.token, lease.leaseId);
+    const fence = broker.beginCompletion(next.token, next.binding);
+    expectCode(() => broker.keepAliveRequest(nextExpected, now), "COMPLETION_ALREADY_STARTED");
+    broker.complete(fence.fence);
+    expectCode(() => broker.keepAliveRequest(nextExpected, now), "TOKEN_NOT_FOUND");
+  });
+
   it("issues high-entropy capabilities while retaining only a digest", () => {
     const broker = new TurnCapabilityBroker();
     const grant = broker.issue({ ...binding(), ttlMs: 30_000 });

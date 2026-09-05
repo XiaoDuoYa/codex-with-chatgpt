@@ -29,6 +29,7 @@ import {
   parseSubmitControlResultInput,
 } from "../control/result-schema.js";
 import type { Logger } from "../logger/index.js";
+import { controlHostFailureSchema } from "../control/wait-policy.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import {
   MachineGateway,
@@ -344,6 +345,7 @@ const controlResultStatusOutputSchema = {
   // schema; preserve that structured payload without duplicating it here.
   result: z.unknown().nullable(),
   progress: controlProgressOutputSchema.nullable(),
+  hostFailure: controlHostFailureSchema.optional(),
 };
 
 export interface McpContext {
@@ -729,7 +731,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Report control progress",
       description:
-        `Report bounded progress for the active C2C question. Progress can move only forward through ` +
+        `Optionally report bounded progress for the active C2C question; it is never required before final submission. Progress can move only forward through ` +
         `SEARCHING, READING_CODE, and SYNTHESIZING, with at most one accepted update per state. ` +
         `This does not edit workspace files or run commands. Only use it when Codex supplied the ` +
         `active RESULT_REQUEST_ID and RESULT_PHASE. ${UNTRUSTED_NOTE}`,
@@ -762,6 +764,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `Submit one bounded C2C RESEARCH, PLAN, REVIEW, DONE, or BLOCKED result to the local control mailbox. ` +
         `This does not edit workspace files or run commands, cannot choose a write path, and has no diff/log fields. ` +
         `Each request represents exactly one Codex question and accepts exactly one answer. ` +
+        `For a business refusal or inability to complete, submit BLOCKED with {reason, needs} under the original phase, ` +
+        `provided this callback is authorized and permitted. No progress call is required. Never bypass a platform block or use revoked authorization. ` +
         `For local-only RESEARCH use sources: [] and cite relative file paths/lines in conclusions. ` +
         `External sources require title, a real HTTP(S) url, publishedDate (YYYY-MM-DD or null), and keyEvidence; ` +
         `workspace:/ and file:// are not external sources. Never invent sources. ` +

@@ -26,6 +26,8 @@ import {
   getControlResultStatus,
   openControlResultRequestWithStatus,
   reportControlProgress,
+  recordControlHostFailure,
+  renewControlResultRequest,
   retireControlResultSession,
   submitControlResult,
   waitForControlResult,
@@ -65,6 +67,7 @@ import {
   SurfaceOwnershipError,
 } from "../session/surface-ownership.js";
 import { normalizeChatUrl, normalizeProjectUrl } from "../session/state.js";
+import { parseControlPageObservation, type ControlPageObservation } from "../control/wait-policy.js";
 
 export type SurfaceGenerationValidator = (binding: TurnCapabilityBinding) => void;
 
@@ -454,6 +457,51 @@ export class MachineGateway {
   ): ControlStatus {
     this.registry.lookup(identity.workspaceId, identity.projectId, identity.registrationId);
     return cancelControlResultRequest(identity.workspaceId, requestId, identity.localSessionId, expected);
+  }
+
+  observeControlPage(
+    identity: MachineSurfaceIdentity,
+    requestId: string,
+    expected: ControlResultCorrelation,
+    input: ControlPageObservation,
+  ): ControlStatus {
+    this.registry.lookup(identity.workspaceId, identity.projectId, identity.registrationId);
+    const observation = parseControlPageObservation(input);
+    const status = this.getControlResultStatus(identity, requestId, expected);
+    const binding = currentSurfaceBinding(identity.projectId, identity.localSessionId);
+    const observedAt = Date.parse(observation.observedAt);
+    const observedUrl = new URL(observation.observedUrl);
+    const canonicalChatUrl = normalizeChatUrl(observation.observedUrl);
+    const now = Date.now();
+    if (
+      !status.request || observation.responseToRequestId !== requestId || !binding ||
+      binding.tabId !== observation.tabId || binding.lastGeneration !== observation.generation ||
+      !binding.chatUrl || canonicalChatUrl !== binding.chatUrl ||
+      observedUrl.username || observedUrl.password || observedUrl.search || observedUrl.hash ||
+      observedAt < Date.parse(status.request.createdAt) || observedAt < now - 60_000 || observedAt > now + 5_000
+    ) {
+      throw new TurnCapabilityError("BINDING_MISMATCH", "page observation does not match this request's current response and owned page");
+    }
+    if (observation.state === "unknown" || status.status !== "pending") return status;
+    this.assertSurfaceMutationAllowed(identity.projectId, identity.localSessionId);
+    if (observation.state === "generating") {
+      const lease = requireSurfaceGeneration(identity.projectId, identity.localSessionId, observation.generation);
+      return renewControlResultRequest(identity.workspaceId, requestId, identity.localSessionId, expected, () => {
+        const expiresAt = this.broker.keepAliveRequest({
+          ...identity, ...expected, requestId, generation: observation.generation,
+        }, observedAt);
+        this.surfaceRenew(identity, lease, Math.max(1_000, Date.parse(lease.leaseExpiresAt) - Date.parse(lease.updatedAt)));
+        return expiresAt;
+      });
+    }
+    if (observation.state !== "blocked") return status;
+    const resolved = recordControlHostFailure(identity.workspaceId, requestId, identity.localSessionId, expected, {
+      ...observation, observedUrl: binding.chatUrl,
+    });
+    if (resolved.status === "cancelled") {
+      this.broker.revokeRequest({ ...identity, ...expected, requestId });
+    }
+    return resolved;
   }
 
   /**

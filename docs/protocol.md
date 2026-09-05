@@ -22,8 +22,11 @@ The gateway uses these identifiers:
 | `generation` | Current owned browser page generation |
 | `compactionEpoch` | Session context-compaction counter |
 
-The default capability lifetime is 30 minutes and the maximum is one hour.
-Activity leases are shorter and renewed while an MCP call remains active.
+The initial capability lease defaults to 30 minutes, configurable up to one
+hour per lease. For a pending control request, fresh host-observed generation
+can renew the same authorization before expiry; there is no fixed total task
+duration. BOOT has no request and does not use this renewal. Per-MCP-call
+activity leases are shorter and renewed while that individual call is active.
 
 The gateway scopes are:
 
@@ -603,7 +606,12 @@ existing C2C connector when available in its picker and verify the selection
 after filling the prompt. A previous message's chip or successful call does not
 establish current selection. Do not open another chat or install another connector.
 
-Include `resultContract.instructions` and the relevant example from `control open`.
+`control open --json` returns a ready-to-send `deliveryPrompt` containing the
+exact correlation, all `resultContract.instructions`, and phase examples.
+Include it verbatim with the actual task question in the exact owned message;
+do not drop the refusal/failure callback branch when shortening prompts. This
+text contains the capability, so send it only to that page, never to logs or
+public artifacts. The structured `resultContract` exposes the same instructions.
 Ask ChatGPT to check that `submit_control_result` is callable in this message
 before spending work on research/analysis. Tool names quoted in history and
 catalog membership are not proof. If `get_control_result_status` is exposed,
@@ -654,6 +662,21 @@ contains external sources actually consulted, with `title`, `url`,
 URLs without credentials are accepted. Cite local paths/lines in `conclusions`,
 not as `workspace:/`, `file://`, or invented public URLs. Empty `sources` is
 valid; empty `conclusions` is not. Web research still cites its real sources.
+
+Business refusal, missing input and inability to finish should return a terminal
+`BLOCKED` through the existing `submit_control_result`, while that callback is
+authorized and permitted. It needs no business-file reads or progress calls.
+ChatGPT must proactively submit that failure before its final page reply; it
+must not wait for the user to interrupt, send another message or ask for a
+callback. Codex then consumes and acknowledges it automatically. This prompt
+requirement cannot force a model or override platform tool restrictions.
+Routine `report_control_progress` is optional; an initial or SYNTHESIZING
+progress event must never be a prerequisite to synthesis or final submission.
+An unavailable optional tool can be skipped before use. An explicit safety or
+approval block after any call instead ends the attempt; do not try another
+delivery call/channel to bypass it. Revoked/expired authorization cannot submit
+even a refusal result. Ask for the indicated user action and let the host
+reconcile the failed attempt separately.
 
 `BLOCKED` uses `payload: {"reason": "<observed blocker>", "needs": ["<needed action>"]}`
 and the original request phase. It does not use the RESEARCH payload shape.
@@ -722,6 +745,12 @@ use MCP for bounded workspace reads. For PLAN and REVIEW, use MCP before
 synthesizing the answer. Do not repeat read-only discovery in Codex or paste
 source, diffs, logs, or credentials into this prompt. Do not modify files;
 Codex executes locally.
+On a business refusal, failed business read, missing input or inability to
+complete, proactively submit BLOCKED with payload {reason, needs} through
+submit_control_result, using this exact request and original phase, before
+your final page reply. Do not wait for the user to interrupt or prompt again.
+Progress reporting is optional. Respect platform blocks and revoked/expired
+authorization; a page-only failure is not an MCP receipt.
 
 `DELEGATION_MODE: CHATGPT_FIRST` is a routing policy, not an authorization
 grant. The Connector exposes only the bounded MCP tools listed above. Web
@@ -771,6 +800,126 @@ queue other sessions. Pruning uses a separate short maintenance lock and
 processes each session independently. The surface metadata ownership lock is
 only a brief atomic uniqueness guard for lease commits and replacements; it
 does not limit or serialize browser turns.
+
+## Waiting and terminal observations
+
+The mailbox remains authoritative for results. A successful read or a final
+page message is not delivery. A pending mailbox means only that no final result
+has been accepted; it does not establish that ChatGPT is still generating.
+
+`control open`, `status`, `wait` and `observe` return a `wait` policy:
+
+| Field | Meaning |
+| --- | --- |
+| `leaseExpiresAt` | Current activity lease expiry; fresh generating observations renew it |
+| `leaseRemainingMs` | Remaining activity lease, not a total task budget |
+| `elapsedMs` | Time since original request creation, for diagnostics only |
+| `checkPageAfterMs` | At most 30 seconds; earlier at half the remaining activity lease |
+| `outcome` | `pending`, `delivered`, `blocked` or `terminal` |
+| `nextAction` | `inspect_exact_response`, `persist_then_ack` or `stop` |
+
+`control wait` caps each slice at 30 seconds even if a larger `--timeout-ms`
+is supplied. Exit code 0 means a result was received/acknowledged, including a
+business refusal; it does not mean the business task succeeded. Code 1 means
+no received result; inspect the structured status. There is no fixed total task
+deadline: a half-hour or longer task continues automatically while the host
+observes the exact response still working. A wait slice is not a failure and
+never requires the user to interrupt or send a continuation message.
+
+After a pending slice, the host uses the exact saved `tabId` and verifies its
+Project/chat URL. Through semantic CUA operations, locate the user prompt with
+this `RESULT_REQUEST_ID` and inspect its paired assistant response, not the
+last page message or a full-page keyword search. Only a completed response's
+explicit terminal status is failure evidence. Quoted old BLOCKED text, a
+missing reply, a loading page or continued generation is not such evidence.
+Use `state: generating` or `unknown` for nonterminal/ambiguous observations.
+
+For fresh ongoing activity or a confirmed final failure, the host submits an
+observation locally:
+
+```sh
+c2c control observe \
+  --local-session <localSessionId> \
+  --request <request-id> --task <task-id> --iteration <n> --phase <phase> \
+  --page-observation '<observed-json>' --json
+```
+
+`<observed-json>` has this shape. Replace values with the real host observation;
+this example is neither a probe nor evidence:
+
+```json
+{
+  "tabId": "owned-tab-id",
+  "generation": 1,
+  "observedUrl": "https://chatgpt.com/g/g-p-example/c/chat-example",
+  "observedAt": "2026-01-01T00:00:00.000Z",
+  "responseToRequestId": "request-id",
+  "state": "blocked",
+  "responseIsFinal": true,
+  "reason": "platform_blocked",
+  "source": "model_reported",
+  "tool": "report_control_progress",
+  "errorCode": "SAFETY_CHECK_BLOCKED"
+}
+```
+
+The CLI cannot operate CUA; the host must actually inspect the page before
+calling it. The Gateway validates the exact request/session/task/phase, saved
+tab/chat/generation, canonical chat URL and fresh timestamp (within 60 seconds,
+not before the request). It does not independently verify the host's UI claim.
+`responseToRequestId` means the host observed which prompt the response answers;
+do not fill it from an unrelated page or a quoted request ID.
+
+For `generating`/`unknown`, include only the first five identity fields and
+`state`; these observations do not cancel anything. A fresh `generating`
+observation renews the same live request and capability using the original
+capability lease duration, and renews the exact owned surface. The original
+request creation time, correlation, token, scopes and page generation stay
+unchanged. Renewal is host-only; ChatGPT need not send a progress callback or
+receive another message. Persisted request renewal is one atomic sidecar under
+the session/request locks, shared by status, reopen, waiting and receipt checks.
+It cannot revive expired, cancelled, revoked or completed authority. Replaying
+the same observation does not move capability expiry forward again.
+
+The host automatically repeats observe/wait for ongoing generation. `unknown`,
+old progress and a pending mailbox alone do not extend authorization; recheck
+ambiguous UI with backoff while the activity lease is valid. Without fresh
+generating evidence the lease still expires, so an abandoned task cannot retain
+local access indefinitely. Expiry, revoked authorization or gateway restart
+ends this attempt without resurrecting the token or duplicating the task.
+Read and preserve any received result before closing local failure state.
+
+For `blocked`, require
+`responseIsFinal: true` and classify `reason` as `model_refusal`,
+`tool_unavailable`, `platform_blocked`, `capability_invalid` or `callback_missing`.
+Use `callback_missing` with `source: host_observed` only for a confirmed finished
+response with no final callback, after rereading the mailbox. A still-generating
+or missing response is not completion evidence. Other `source` values are
+`model_reported`, `platform_error` or `mcp_error`; choose the latter two only
+when the actual error was observed, not quoted by ChatGPT. Optional `tool` is
+`report_control_progress`, `submit_control_result`, `get_control_result_status`
+or `business_tool`; do not include personal connector names. Optional `errorCode`
+is `TOKEN_REVOKED`, `TOKEN_EXPIRED`, `STALE_BINDING_EPOCH`, `TOOL_UNAVAILABLE`,
+`SAFETY_CHECK_BLOCKED`, `APPROVAL_REQUIRED` or `UNKNOWN`. Unknown causes remain
+unknown. Raw excerpts and arbitrary error strings are rejected without echoing
+them. No capability, key, cookie or business payload belongs in this record.
+
+The authenticated host-only `/admin/mailbox/observe` endpoint is not an MCP
+tool and cannot write a result. A confirmed failure atomically reconciles under
+the existing session/request locks: a received result wins and remains available
+for checkpoint persistence followed by acknowledgment; otherwise the pending
+request is cancelled and its exact capabilities are revoked. The cancellation
+stores `hostFailure` separately, retaining the last accepted progress. Do not
+ack a nonexistent result or describe this as ChatGPT having submitted BLOCKED.
+Other sessions and task checkpoints are not changed. Repeated observation of
+the same terminal request is idempotent.
+
+The host then persists the failure checkpoint with `waitingFor: none` and ends
+the failed attempt automatically. No user confirmation, interruption or extra
+ChatGPT prompt is needed to record a failure. This does not imply successful
+business completion or permission to retry a refusal. Ask the user only for an
+actual required login, CAPTCHA, 2FA, consent or missing decision; never use
+automatic recovery to bypass those gates or a platform safety block.
 
 ## Correlation and recovery
 

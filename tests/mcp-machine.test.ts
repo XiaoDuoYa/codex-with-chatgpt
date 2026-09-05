@@ -7,6 +7,7 @@ import {
   openControlResultRequest,
 } from "../src/control/mailbox.js";
 import { appendExecutionRecord } from "../src/execution/records.js";
+import { CONTROL_PHASES } from "../src/control/result-schema.js";
 import { MachineGateway } from "../src/gateway/machine-gateway.js";
 import { nullLogger } from "../src/logger/index.js";
 import { createMcpServer } from "../src/mcp/server.js";
@@ -59,6 +60,63 @@ afterEach(() => {
 });
 
 describe("machine MCP capability correlation", () => {
+  it.each(CONTROL_PHASES)("delivers a %s refusal directly without progress or business reads", async (phase) => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("mcp-refusal");
+    cleanups.push(root);
+    const gateway = new MachineGateway();
+    const registration = gateway.registerWorkspace(root);
+    const turn = { ...correlation(), phase };
+    const request = openControlResultRequest(registration.workspaceId, turn);
+    const grant = gateway.issueTurn({
+      ...registration, ...turn, requestId: request.requestId, scopes: ["c2c.result.write"],
+      compactionEpoch: 0, generation: 1,
+    });
+    const connection = await connectedClient(gateway);
+    try {
+      const receipt = await connection.client.callTool({
+        name: "submit_control_result",
+        arguments: {
+          context_id: grant.token, requestId: request.requestId, ...turn, kind: "BLOCKED",
+          payload: { reason: "Cannot complete the requested business action", needs: ["Provide a permitted alternative"] },
+        },
+      });
+      expect(receipt.isError).not.toBe(true);
+      expect(receipt.structuredContent).toMatchObject({ accepted: true, kind: "BLOCKED" });
+      expect(getControlResultStatus(registration.workspaceId, request.requestId, turn.localSessionId, turn))
+        .toMatchObject({ status: "received", progress: null, result: { kind: "BLOCKED" } });
+      expect(acknowledgeControlResult(registration.workspaceId, request.requestId, turn.localSessionId, turn).status).toBe("acknowledged");
+    } finally { await connection.close(); }
+  });
+
+  it("does not use revoked authorization even to return BLOCKED", async () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("mcp-revoked-refusal");
+    cleanups.push(root);
+    const gateway = new MachineGateway();
+    const registration = gateway.registerWorkspace(root);
+    const request = openControlResultRequest(registration.workspaceId, correlation());
+    const grant = gateway.issueTurn({
+      ...registration, ...correlation(), requestId: request.requestId, scopes: ["c2c.result.write"],
+      compactionEpoch: 0, generation: 1,
+    });
+    gateway.revokeTurn(grant.token);
+    const connection = await connectedClient(gateway);
+    try {
+      const reply = await connection.client.callTool({
+        name: "submit_control_result",
+        arguments: {
+          context_id: grant.token, requestId: request.requestId, ...correlation(), kind: "BLOCKED",
+          payload: { reason: "Authorization ended", needs: ["Stop the current attempt"] },
+        },
+      });
+      expect(reply.isError).toBe(true);
+      expect(JSON.stringify(reply)).toContain("TOKEN_REVOKED");
+      expect(getControlResultStatus(registration.workspaceId, request.requestId, correlation().localSessionId, correlation()))
+        .toMatchObject({ status: "pending", result: null });
+    } finally { await connection.close(); }
+  });
+
   it("keeps result tools listed across consecutive local-only turns in two workspaces", async () => {
     cleanups.push(isolateStateDir());
     const gateway = new MachineGateway();

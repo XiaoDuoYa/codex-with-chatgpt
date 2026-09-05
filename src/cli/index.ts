@@ -54,7 +54,8 @@ import {
   type ControlResultCorrelation,
 } from "../control/result-schema.js";
 import { saveExecutionOutput } from "../execution/output.js";
-import { controlResultContract } from "../control/result-contract.js";
+import { controlDeliveryPrompt, controlResultContract } from "../control/result-contract.js";
+import { CONTROL_PAGE_CHECK_INTERVAL_MS, parseControlPageObservation, controlWaitPolicy } from "../control/wait-policy.js";
 import {
   appendExecutionRecord,
   parseExecutionExitStatus,
@@ -71,6 +72,7 @@ import {
   getSurface as getMachineSurface,
   issueTurn as issueMachineTurn,
   openMailboxRequest,
+  observeMailboxPage,
   registerWorkspace as registerMachineWorkspace,
   releaseSurface as releaseMachineSurface,
   renewSurface as renewMachineSurface,
@@ -1465,7 +1467,7 @@ control
   .requiredOption("--iteration <n>")
   .requiredOption("--phase <phase>")
   .option("--local-session <id>")
-  .option("--ttl-ms <ms>", "request and capability lifetime", String(DEFAULT_TURN_TTL_MS))
+  .option("--ttl-ms <ms>", "request and capability activity lease; renewed by verified generating observations", String(DEFAULT_TURN_TTL_MS))
   .option("--scopes <scope,...>")
   .option("--model-id <id>")
   .option("--effort <name>")
@@ -1585,6 +1587,8 @@ control
         contextId: grant.token,
         contextExpiresAt: grant.expiresAt,
         resultContract: controlResultContract(correlation.phase),
+        deliveryPrompt: controlDeliveryPrompt(opened.request, grant.token),
+        wait: controlWaitPolicy({ requestId: opened.request.requestId, request: opened.request, status: "pending", result: null, progress: null }),
         pluginPolicy,
         surface: {
           tabId: page.tabId,
@@ -1647,7 +1651,7 @@ addControlLookupOptions(control.command("status"))
         requestId: opts.request,
         ...parseControlCorrelation(opts),
       });
-      const payload = { ok: status.status !== "not_found", ...status };
+      const payload = { ok: status.status !== "not_found", ...status, wait: controlWaitPolicy(status) };
       if (opts.json) say(JSON.stringify(payload));
       else say(`状态：${status.status}`);
       if (status.status === "not_found") process.exitCode = 1;
@@ -1659,7 +1663,7 @@ addControlLookupOptions(control.command("status"))
 addControlLookupOptions(
   control
     .command("wait")
-    .option("--timeout-ms <ms>", "local wait timeout", "300000")
+    .option("--timeout-ms <ms>", "local wait slice; capped by page-check interval, not a task time limit", String(CONTROL_PAGE_CHECK_INTERVAL_MS))
 )
   .action(async (opts: {
     workspace?: string;
@@ -1681,10 +1685,36 @@ addControlLookupOptions(
         timeoutMs,
       });
       const received = status.status === "received" || status.status === "acknowledged";
-      if (opts.json) say(JSON.stringify({ ok: received, ...status }));
+      const wait = controlWaitPolicy(status);
+      if (opts.json) say(JSON.stringify({ ok: received, ...status, wait }));
       else if (status.result) say(JSON.stringify(status.result, null, 2));
-      else say(`状态：${status.status}`);
+      else say(`状态：${status.status}; ${wait.outcome}; ${wait.nextAction}`);
       if (!received) process.exitCode = 1;
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+addControlLookupOptions(control.command("observe"))
+  .description("Renew verified ongoing work or reconcile a final owned response; never submit a result")
+  .requiredOption("--page-observation <json>", "fresh exact-response observation, without raw page text")
+  .action(async (opts: {
+    workspace?: string; request: string; task: string; iteration: string; phase: string;
+    localSession?: string; pageObservation: string; json: boolean;
+  }) => {
+    try {
+      let rawObservation: unknown;
+      try { rawObservation = JSON.parse(opts.pageObservation); }
+      catch { throw new Error("page-observation must be valid JSON; raw page text is not accepted"); }
+      const observation = parseControlPageObservation(rawObservation);
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const identity = await machineSurfaceContext(workspace, resolveLocalSession(opts.localSession));
+      const status = await observeMailboxPage(identity.runtime, identity.identity, {
+        requestId: opts.request, ...parseControlCorrelation(opts), observation,
+      });
+      const wait = controlWaitPolicy(status);
+      if (opts.json) say(JSON.stringify({ ok: true, ...status, wait }));
+      else say(`状态：${status.status}; ${wait.outcome}; ${wait.nextAction}`);
     } catch (error) {
       handleCliError(error, opts.json);
     }

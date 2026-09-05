@@ -574,10 +574,13 @@ c2c control open \
 Save both `RESULT_REQUEST_ID` and `CONTEXT_ID`. An already-open request is
 never silently replaced; inspect or cancel it instead.
 
-Use the returned `resultContract` when composing every control prompt: include
-its instructions and the needed phase example, replacing example placeholders
-with the task-specific question (ChatGPT supplies the evidence and answer).
-Never copy an example as an actual result. Detailed payloads and per-message
+Use the returned `deliveryPrompt` verbatim in the exact owned ChatGPT message,
+alongside the actual task question and any required plugin policy. It already
+contains this request's correlation, current delivery instructions and phase
+examples, including proactive failure/refusal submission. Do not omit that
+failure branch when shortening a prompt. The examples are scaffolds for ChatGPT
+to replace with actual evidence, never actual results. `resultContract` exposes
+the same instructions as structured data. Detailed payloads and per-message
 connector checks are in `<checkout>/docs/protocol.md`, "Result delivery preflight"
 and "Result payloads"; read these before the first control turn.
 
@@ -589,6 +592,15 @@ that `submit_control_result` is callable in this message before doing the task.
 checks the authoritative mailbox. BOOT reads and machine health do not prove
 result delivery, and a tool name in an old answer is not current availability.
 
+For a business refusal, missing input, or inability to complete, request an
+immediate `BLOCKED` result through `submit_control_result` when it is still
+authorized and permitted. Keep the original phase and exact correlation; a
+refusal is a deliverable terminal outcome, not a reason to leave Codex waiting.
+ChatGPT must do this before its final page reply, without waiting for the user
+to interrupt the page, send another message or request a failure callback.
+Routine `report_control_progress` calls are optional and never prerequisites
+for synthesis or final delivery. Do not require a SYNTHESIZING callback.
+
 If the callback is unavailable or a platform confirmation/safety check blocks
 it, stop this turn. Preserve the request correlation and a sanitized observed
 error, distinguish actual tool errors from ChatGPT's description, and ask for
@@ -597,6 +609,11 @@ apps/models, mislabel writes as reads, or use another tool/path to bypass the
 block. Read the local mailbox before cancelling an exact pending failed turn;
 consume any concurrently received result instead. A timeout while generating
 alone still does not authorize cancellation or another send.
+
+`TOKEN_REVOKED`, `TOKEN_EXPIRED` and `STALE_BINDING_EPOCH` also end the attempt;
+never use invalid authorization to return even `BLOCKED`. Report the terminal
+status paired with the exact request. A platform block is not permission to
+try another callback, channel, account or model.
 
 Every control prompt must contain:
 
@@ -616,13 +633,22 @@ bound to that context. Submit one schema-valid result for this exact request
 with submit_control_result. Follow resultContract.instructions and the
 phase-matching payload example supplied by control open. Codex owns all edits
 and execution.
+On business refusal or failure, proactively submit kind BLOCKED with a short
+safe payload {reason, needs}, using this same phase and correlation, before
+your final page reply. Do not wait for the user to interrupt or prompt again.
+No progress callback is required. Respect platform blocks and invalid tokens;
+if the callback itself is unavailable or forbidden, report that terminal state
+without pretending an MCP receipt exists.
 ```
 
 For `EXECUTED`, record command, changed files, tests and output locally, then
 ask ChatGPT to inspect those records through MCP. Never paste the diff or claim
 a visible response is the result.
 
-Wait on the same request:
+Wait on the same request. Before the first wait, read
+`<checkout>/docs/protocol.md`, "Waiting and terminal observations". Preserve
+the exact request, context and page identity in task progress across recovery
+and compaction. Do not reopen a request or resend a task merely because it is slow.
 
 ```sh
 c2c control wait \
@@ -631,7 +657,47 @@ c2c control wait \
   --phase <phase> --json
 ```
 
-Accept only `received` or `acknowledged`, then acknowledge:
+Each call waits at most 30 seconds; this is an automatic host check interval,
+not a task deadline or a handoff to the user. Tasks may run for half an hour
+or longer. After a pending slice, follow
+`wait.nextAction`: for `inspect_exact_response`, resolve the exact owned tab
+and inspect only the response paired with this request's prompt and its
+generation state. Never classify quoted historical BLOCKED text or another
+response as this turn's failure. This is a bounded health check, not the normal
+result-reading path; do not repeatedly read the full conversation.
+
+When the exact response is still generating/thinking/using tools, automatically
+call `control observe --page-observation '<json>'` with `state: generating`
+and fresh exact-response identity, then continue waiting on the same request.
+This renews the live request, the same capability and the owned page lease.
+No new prompt, token delivery, progress callback or user message is needed.
+Use the returned `wait.leaseExpiresAt`/`leaseRemainingMs`; these are renewable
+activity leases, not a total runtime budget. Mere mailbox pending, historical
+progress, a spinner unrelated to this response or `unknown` does not authorize
+renewal. For ambiguous UI, automatically recheck with backoff within the live
+lease; never label uncertainty as generation or refusal.
+
+If that exact response is final and explicitly refused/blocked/unavailable,
+call `control observe --page-observation '<json>'` with the fresh observation
+specified in the protocol. It checks the mailbox again and records a separate
+`hostFailure` only if cancellation wins the race. It cannot submit a result.
+For a confirmed completed response with no final callback, reread the mailbox
+and use `reason: callback_missing`, `source: host_observed` if still pending.
+Do not ask the user to interrupt or send a follow-up to finish this failure.
+Never resend, rotate pages or repair connectors while the response is generating.
+
+There is no fixed total waiting limit. Continue the automatic observe/wait loop
+while fresh generating evidence renews live authorization. If the activity lease
+expires, authorization is revoked, or the gateway restarts, do not revive that
+token or keep polling an unusable request. Reconcile any receipt first, preserve
+the checkpoint, and end the attempt with the observed failure. Automatic failure
+closure does not require user confirmation and must not restart a refused task.
+Only genuinely required login, CAPTCHA, 2FA, explicit consent or a missing user
+decision warrants a user-action request. Never record capabilities or raw
+business/page text in diagnostics.
+
+Accept only `received` or `acknowledged` as MCP delivery. For a received result,
+including `kind: BLOCKED`, persist its result ID and task progress first, then acknowledge:
 
 ```sh
 c2c control ack \
@@ -639,6 +705,12 @@ c2c control ack \
   --request <request-id> --task <task-id> --iteration <n> \
   --phase <phase> --json
 ```
+
+After a `BLOCKED` result or host-observed cancellation, set the checkpoint to
+`BLOCKED` and `waitingFor: none`, preserving the goal, completed work and exact
+request correlation. Do not ack a host failure or treat it as a model-submitted
+result. Finish the failed attempt automatically; do not ask for confirmation
+just to record failure, and do not automatically retry a refused task.
 
 Do not send the next control message until the current request is received,
 acknowledged, cancelled, or expired. A timeout is not permission to resend

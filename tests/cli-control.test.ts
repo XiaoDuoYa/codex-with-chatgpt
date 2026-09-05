@@ -119,6 +119,41 @@ function claimSurface(localSessionId: string, tabId = `tab-${localSessionId}`): 
 }
 
 describe("control CLI correlation", () => {
+  it("reconciles exact terminal page evidence through the authenticated machine client", () => {
+    const localSessionId = "session-observe";
+    claimSurface(localSessionId);
+    const args = ["--local-session", localSessionId, "--task", "task-observe", "--iteration", "0", "--phase", "PLAN"];
+    const opened = runJson(["control", "open", ...args]);
+    expect(opened.command.status).toBe(0);
+    expect(opened.body.wait).toMatchObject({ outcome: "pending", nextAction: "inspect_exact_response" });
+    const request = opened.body.request as { requestId: string; expiresAt: string };
+    const page = opened.body.surface as { tabId: string; chatUrl: string; generation: number };
+    const lookup = [...args, "--request", request.requestId];
+    const renewed = runJson(["control", "observe", ...lookup, "--page-observation", JSON.stringify({
+      tabId: page.tabId, generation: page.generation, observedUrl: page.chatUrl,
+      observedAt: new Date().toISOString(), responseToRequestId: request.requestId, state: "generating",
+    })]);
+    expect(renewed.command.status, JSON.stringify(renewed)).toBe(0);
+    expect(renewed.body).toMatchObject({ status: "pending", requestId: request.requestId, wait: { nextAction: "inspect_exact_response" } });
+    expect(Date.parse((renewed.body.request as { expiresAt: string }).expiresAt)).toBeGreaterThan(Date.parse(request.expiresAt));
+    const observation = {
+      tabId: page.tabId, generation: page.generation, observedUrl: page.chatUrl,
+      observedAt: new Date().toISOString(), responseToRequestId: request.requestId,
+      state: "blocked", responseIsFinal: true, reason: "capability_invalid",
+      source: "model_reported", errorCode: "TOKEN_REVOKED",
+    };
+    const bad = runJson(["control", "observe", ...lookup, "--page-observation", JSON.stringify({ ...observation, errorCode: "sk-fixture-private" })]);
+    expect(bad.command.status).toBe(1);
+    expect(bad.command.stdout + bad.command.stderr).not.toContain("sk-fixture-private");
+    const resolved = runJson(["control", "observe", ...lookup, "--page-observation", JSON.stringify(observation)]);
+    expect(resolved.command.status, JSON.stringify(resolved)).toBe(0);
+    expect(resolved.body).toMatchObject({ status: "cancelled", result: null, hostFailure: observation, wait: { nextAction: "stop" } });
+    const waited = runJson(["control", "wait", ...lookup, "--timeout-ms", "0"]);
+    expect(waited.command.status).toBe(1);
+    expect(waited.body).toMatchObject({ status: "cancelled", result: null, hostFailure: observation });
+    expect(runJson(["control", "ack", ...lookup]).command.status).toBe(1);
+  }, 60_000);
+
   it("reuses one page across tasks and grants only selected observed app reads", () => {
     const localSessionId = "session-app-reads";
     claimSurface(localSessionId);
@@ -339,6 +374,9 @@ describe("control CLI correlation", () => {
       generation: 1,
     });
     expect(opened.body.contextExpiresAt).toEqual(expect.any(String));
+    expect(opened.body.deliveryPrompt).toEqual(expect.any(String));
+    expect(opened.body.deliveryPrompt).toContain(`CONTEXT_ID: ${opened.body.contextId}`);
+    expect(opened.body.deliveryPrompt).toContain("RESULT_PHASE: RESEARCH");
     expect(opened.body.resultContract).toMatchObject({
       phase: "RESEARCH",
       requiredTools: ["submit_control_result"],

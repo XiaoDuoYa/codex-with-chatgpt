@@ -9,6 +9,7 @@ import { projectSelectionSchema } from "../session/project-selection.js";
 import { pluginIdsSchema, pluginIntentSchema, pluginPreflightSchema } from "../session/turn-preflight.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { CONTROL_PHASES, c2cIdSchema } from "../control/result-schema.js";
+import { parseControlPageObservation } from "../control/wait-policy.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { createMcpServer } from "../mcp/server.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
@@ -159,6 +160,7 @@ const mailboxLookupSchema = mailboxIdentitySchema
 const mailboxWaitSchema = mailboxLookupSchema.extend({
   timeoutMs: z.number().int().min(0).max(86_400_000),
 }).strict();
+const mailboxObserveSchema = mailboxLookupSchema.extend({ observation: z.unknown() }).strict();
 
 export interface MachineGatewayServerOptions extends MachineGatewayOptions {
   host?: string;
@@ -495,6 +497,20 @@ export async function startMachineGatewayServer(
       }
     } finally {
       cleanupWait();
+    }
+  });
+
+  app.post("/admin/mailbox/observe", adminGuard, (req, res) => {
+    try {
+      const input = mailboxObserveSchema.parse(req.body);
+      const { workspaceId, projectId, registrationId, localSessionId, requestId, taskId, iteration, phase, observation } = input;
+      res.json(gateway.observeControlPage(
+        { workspaceId, projectId, registrationId, localSessionId }, requestId,
+        { taskId, iteration, phase }, parseControlPageObservation(observation),
+      ));
+    } catch (error) {
+      const response = errorResponse(error);
+      res.status(response.status).json(response.body);
     }
   });
 
