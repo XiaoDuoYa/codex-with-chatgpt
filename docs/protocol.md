@@ -410,10 +410,22 @@ TASK_ID: <task-id>
 ITERATION: <n>
 RESULT_PHASE: <RESEARCH|PLAN|REVIEW>
 
+DELEGATION_MODE: CHATGPT_FIRST
+TASK_GOAL: <short goal without pasted repository content>
+
 Use MCP with context_id "<context-id>" for every call. Work only in the
 workspace identified by that context. Return the requested phase result using
-submit_control_result for this exact RESULT_REQUEST_ID. Do not modify files;
+submit_control_result for this exact RESULT_REQUEST_ID. For RESEARCH, use
+ChatGPT's built-in Web Search when current or external facts are needed and
+use MCP for bounded workspace reads. For PLAN and REVIEW, use MCP before
+synthesizing the answer. Do not repeat read-only discovery in Codex or paste
+source, diffs, logs, or credentials into this prompt. Do not modify files;
 Codex executes locally.
+
+`DELEGATION_MODE: CHATGPT_FIRST` is a routing policy, not an authorization
+grant. The Connector exposes only the bounded MCP tools listed above. Web
+Search is performed by the ChatGPT page itself, while the structured answer
+still returns through `submit_control_result`.
 ```
 
 For `EXECUTED`, include the local execution record id and ask for review of the

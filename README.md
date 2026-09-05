@@ -2,9 +2,27 @@
 
 > ChatGPT thinks. Codex works.
 
-Use ChatGPT web as the planning and review partner for local Codex sessions.
-Codex retains all workspace writes, shell execution, tests, and git operations;
-ChatGPT reads the current workspace through MCP and returns structured advice.
+Use ChatGPT web as the first-choice research, analysis, planning, synthesis, and
+review partner for local Codex sessions. When the ChatGPT page or its read-only
+MCP tools can answer a task, C2C delegates it there and returns a concise,
+structured result through the machine mailbox. Codex retains all workspace
+writes, shell execution, tests, git operations, and recovery locally.
+
+## ChatGPT-first delegation
+
+The default delegation policy is `CHATGPT_FIRST`:
+
+- `RESEARCH` covers Web Search, current facts, external documentation, source
+  comparison, and read-only workspace discovery.
+- `PLAN` covers architecture, implementation options, migrations, API design,
+  documentation, and other synthesis based on MCP reads.
+- `REVIEW` covers recorded local status, diffs, tests, and bounded execution
+  output after Codex has executed locally.
+
+Web Search is a built-in ChatGPT capability rather than a Connector MCP tool;
+the resulting answer still returns through `submit_control_result`. Control
+prompts contain only the task goal and correlation fields. They never paste
+repository contents, diffs, logs, credentials, or full command output.
 
 ## Machine-wide setup
 

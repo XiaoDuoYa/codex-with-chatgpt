@@ -1,9 +1,11 @@
 ---
 name: codex-with-chatgpt
 description: >
-  Use ChatGPT web as the planning and review partner for Codex coding sessions
-  through one machine-wide Secure MCP Tunnel, one connector, and isolated
-  Project chats.
+  Use ChatGPT web as the first-choice research, analysis, planning, synthesis,
+  and review partner for Codex coding sessions through one machine-wide Secure
+  MCP Tunnel, one connector, and isolated Project chats. Delegate web research,
+  read-only workspace discovery, documentation work, comparisons, and review
+  to ChatGPT whenever the page or its MCP tools can perform the task.
 ---
 
 # Codex with ChatGPT
@@ -11,9 +13,39 @@ description: >
 ChatGPT thinks. Codex works.
 
 Codex owns local execution: file writes, shell commands, tests, Git, recovery,
-and final verification. ChatGPT owns planning, review, and current-web research
-through MCP. Never paste repository files, diffs, logs, credentials, or full
+and final verification. ChatGPT is the first-choice worker for research,
+read-only workspace discovery, documentation, comparisons, synthesis, and
+review. Never paste repository files, diffs, logs, credentials, or full
 command output into ChatGPT; it can read bounded data through MCP.
+
+## ChatGPT-first delegation
+
+Classify every request before doing local analysis. When the task is answerable
+by the ChatGPT page or the connector's read-only MCP tools, open a correlated
+control turn and delegate it to the session's exact ChatGPT page. This keeps
+large research and discovery contexts out of the local Codex conversation.
+
+- Use `RESEARCH` for current facts, external documentation, Web Search, source
+  comparison, and workspace discovery. ChatGPT may use its built-in Web Search;
+  that search is a ChatGPT capability, not a local MCP tool. Require concise
+  conclusions and HTTP(S) sources in the structured result.
+- Use `PLAN` for architecture, implementation options, API design, migration
+  steps, documentation outlines, and other synthesis based on MCP reads.
+- Use `REVIEW` after local execution. Ask ChatGPT to inspect the recorded status,
+  diff, tests, and bounded output through MCP and return only actionable findings.
+- Do not duplicate ChatGPT's read-only searches or repeat large file reads in
+  the local Codex turn. Read locally only for routing/security checks,
+  implementation, execution, or final verification.
+- Keep prompts small and results concise. The mailbox payload is bounded; prefer
+  evidence, decisions, citations, and next actions over copied source text.
+- ChatGPT remains advisory and read-only. It must not edit files, run commands,
+  handle credentials, or replace local verification. If ChatGPT cannot complete
+  a delegable task, return `BLOCKED` or ask the user rather than silently
+  redoing the full analysis locally.
+
+The delegation policy moves analysis work to ChatGPT; it does not grant new
+workspace permissions and does not change the one-page-per-session routing or
+the machine's 100-session capacity.
 
 Install this Skill once globally. It must work from any workspace by routing
 from the trusted local `cwd`; never ask the user to install a connector or Skill
