@@ -242,6 +242,26 @@ session's contexts, terminates its active mailbox request, and removes its page
 binding and checkout route. The workspace's ChatGPT Project binding remains
 available to other and future sessions.
 
+### Unavailable chats
+
+The Skill inspects the exact owned tab and passes its semantic state to
+`c2c surface check`. A missing tab reopens the saved chat; an explicitly
+archived or unavailable chat creates a new chat in the same Project without
+unarchiving the old conversation. Login or consent requires user action;
+loading and generation require waiting, not a duplicate send. The CLI evaluates
+the host observation; it does not probe ChatGPT independently.
+
+Before replacing a page, consume any received mailbox result into the local
+checkpoint, then acknowledge it. Received results survive the request TTL until
+ack. Only confirmed page failure permits cancelling an exact pending request.
+The Gateway blocks rotation while work is unresolved. Recovery preserves task
+progress, verifies one replacement through BOOT, and fences stale generations.
+It never uses session retirement to recover a page. See [the recovery protocol](docs/protocol.md#page-recovery).
+
+The page's current model is used by default. Model/effort metadata does not
+operate its selector or guarantee the newest model; explicit model requests
+require selection and verification in the page.
+
 ## Security properties
 
 - MCP workspace tools are read-only. Result writes are bounded by a live,

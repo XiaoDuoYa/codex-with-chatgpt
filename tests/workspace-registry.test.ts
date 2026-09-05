@@ -485,6 +485,35 @@ describe("workspace registry", () => {
     }
   });
 
+  it("preserves other projects after cleanup and a subsequent registry commit", () => {
+    const stateDir = isolateStateDir();
+    const roots = ["keep", "remove", "later"].map((name) => makeTmpDir(`registry-cleanup-${name}`));
+    try {
+      roots.forEach(makeGitRepo);
+      const membershipFile = machineWorkspaceMembershipFile();
+      const removals: string[] = [];
+      const registry = new WorkspaceRegistry(new TurnCapabilityBroker(), (id) => {
+        removals.push(id);
+      }, membershipFile);
+      const keep = registry.register(roots[0]);
+      const remove = registry.register(roots[1]);
+      registry.unregister(remove.workspaceId, remove.projectId, remove.registrationId);
+      const later = registry.register(roots[2]);
+      expect(removals).toEqual([remove.projectId]);
+      expect(registry.lookup(keep.workspaceId, keep.projectId, keep.registrationId)).toBe(keep);
+      expect(JSON.parse(fs.readFileSync(membershipFile, "utf8")).checkouts.map(
+        (entry: { workspaceId: string }) => entry.workspaceId,
+      ).sort()).toEqual([keep.workspaceId, later.workspaceId].sort());
+      const restarted = new WorkspaceRegistry(new TurnCapabilityBroker(), undefined, membershipFile);
+      expect(restarted.register(roots[0]).projectId).toBe(keep.projectId);
+      expect(JSON.parse(fs.readFileSync(membershipFile, "utf8")).checkouts).toHaveLength(2);
+    } finally {
+      roots.forEach(cleanup);
+      cleanup(stateDir);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
   it("registers independent workspaces without a registry capacity gate", () => {
     const parent = makeTmpDir("registry-unbounded");
     try {
@@ -567,6 +596,7 @@ describe("workspace registry", () => {
     const original = path.join(parent, "original");
     const moved = path.join(parent, "moved");
     fs.mkdirSync(original);
+    makeGitRepo(original);
     try {
       const broker = new TurnCapabilityBroker();
       const removals: Array<[string, boolean]> = [];
@@ -579,6 +609,7 @@ describe("workspace registry", () => {
       fs.renameSync(original, moved);
       const after = registry.register(moved);
       expect(after.workspaceId).not.toBe(before.workspaceId);
+      expect(after.projectId).toBe(before.projectId);
       expect(broker.status(grant.token).status).toBe("revoked");
       expect(removals).toEqual([]);
     } finally {

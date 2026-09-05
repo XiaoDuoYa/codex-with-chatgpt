@@ -15,13 +15,19 @@ import {
 import { machineMcpCommand } from "../src/process/machine-daemon.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const testRoot = path.join(projectRoot, ".tooling", "test-tmp");
+
+// Unversioned fixtures must not inherit the real checkout's Git identity or
+// shared project state. Repositories initialized inside a fixture still work.
+process.env.GIT_CEILING_DIRECTORIES = [testRoot, process.env.GIT_CEILING_DIRECTORIES]
+  .filter(Boolean).join(path.delimiter);
 
 /**
  * Temp dirs live inside the repo (.tooling/test-tmp) so tests also run in
  * sandboxed environments where the system temp dir is not writable.
  */
 export function makeTmpDir(name: string): string {
-  const dir = path.join(projectRoot, ".tooling", "test-tmp", `${name}-${randomBytes(4).toString("hex")}`);
+  const dir = path.join(testRoot, `${name}-${randomBytes(4).toString("hex")}`);
   fs.mkdirSync(dir, { recursive: true });
   return fs.realpathSync.native(dir);
 }

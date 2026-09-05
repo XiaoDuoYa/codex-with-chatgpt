@@ -356,8 +356,8 @@ function newRegistrationId(): string {
  */
 export class WorkspaceRegistry {
   private readonly entries = new Map<string, WorkspaceEntry>();
-  private readonly memberships: Map<string, WorkspaceMembership>;
-  private readonly pendingProjectRemovals: Set<string>;
+  private memberships: Map<string, WorkspaceMembership>;
+  private pendingProjectRemovals: Set<string>;
 
   constructor(
     private readonly broker: TurnCapabilityBroker,
@@ -702,12 +702,9 @@ export class WorkspaceRegistry {
     if (this.membershipFile) {
       writeSecureJson(this.membershipFile, serializedMembershipState(next, pendingProjectRemovals));
     }
-    this.memberships.clear();
-    for (const [workspaceId, membership] of next) {
-      this.memberships.set(workspaceId, membership);
-    }
-    this.pendingProjectRemovals.clear();
-    for (const projectId of pendingProjectRemovals) this.pendingProjectRemovals.add(projectId);
+    // Cleanup may pass the current collections back into this commit.
+    this.memberships = new Map(next);
+    this.pendingProjectRemovals = new Set(pendingProjectRemovals);
   }
 
   private drainPendingProjectRemovals(): void {

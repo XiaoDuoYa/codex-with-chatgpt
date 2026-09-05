@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MachineGateway } from "../src/gateway/machine-gateway.js";
 import { openControlResultRequest } from "../src/control/mailbox.js";
 import {
@@ -52,6 +52,18 @@ function expectCode(action: () => unknown, code: TurnCapabilityError["code"]): v
 }
 
 describe("machine gateway", () => {
+  let machineStateDir: string;
+
+  beforeEach(() => {
+    // Even tests without a live server can unregister machine-owned surfaces.
+    machineStateDir = isolateStateDir();
+  });
+
+  afterEach(() => {
+    cleanup(machineStateDir);
+    delete process.env.C2C_STATE_DIR;
+  });
+
   it("routes two registered workspaces through their live leases", async () => {
     const rootA = makeTmpDir("gateway-route-a");
     const rootB = makeTmpDir("gateway-route-b");

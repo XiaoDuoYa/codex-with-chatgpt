@@ -10,6 +10,7 @@ import {
   type ManagedMachineFixture,
 } from "./helpers.js";
 import { threadSessionFile } from "../src/session/state.js";
+import { Workspace } from "../src/workspace/manager.js";
 
 const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 const cliEntry = path.join(projectRoot, "src", "cli", "index.ts");
@@ -344,7 +345,9 @@ describe("machine CLI lifecycle", () => {
     ]);
     expect(committed.command.status).toBe(0);
 
-    const threadFile = threadSessionFile(registration.workspaceId, localSessionId);
+    const localWorkspace = new Workspace(workspace);
+    expect(localWorkspace.id).toBe(registration.workspaceId);
+    const threadFile = threadSessionFile(localWorkspace.id, localSessionId);
     const stale = JSON.parse(fs.readFileSync(threadFile, "utf8")) as Record<string, unknown>;
     fs.writeFileSync(threadFile, JSON.stringify({
       ...stale,

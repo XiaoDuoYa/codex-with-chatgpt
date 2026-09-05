@@ -90,6 +90,9 @@ function getRegisteredDataDir(
 /** Resolve shared state owned by one stable project identity. */
 export function getProjectDataDir(projectId: string): string {
   if (!WORKSPACE_STORAGE_ID.test(projectId)) throw new Error("project storage id is invalid");
+  if (projectDataDirs.has(projectId)) {
+    return getRegisteredDataDir(projectDataDirs, projectId, "project");
+  }
   const isolatedStateRoot = process.env.C2C_STATE_DIR?.trim();
   if (isolatedStateRoot) {
     return path.join(path.resolve(isolatedStateRoot), "project-data", projectId);
@@ -99,11 +102,15 @@ export function getProjectDataDir(projectId: string): string {
 
 /**
  * Resolve state owned by one checkout. Production callers must first create a
- * Workspace, which registers its checkout directory. Tests use C2C_STATE_DIR
- * and receive the same per-id isolation without a checkout.
+ * Workspace, which registers its checkout directory. C2C_STATE_DIR selects
+ * machine state, never overrides a registered repository's data directory.
+ * Tests without a Workspace use its per-id fixture storage.
  */
 export function getWorkspaceDataDir(workspaceId: string): string {
   if (!WORKSPACE_STORAGE_ID.test(workspaceId)) throw new Error("workspace storage id is invalid");
+  if (workspaceDataDirs.has(workspaceId)) {
+    return getRegisteredDataDir(workspaceDataDirs, workspaceId, "workspace");
+  }
   const isolatedStateRoot = process.env.C2C_STATE_DIR?.trim();
   if (isolatedStateRoot) {
     return path.join(path.resolve(isolatedStateRoot), "workspace-data", workspaceId);
