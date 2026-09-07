@@ -449,11 +449,25 @@ independent browser probe; never invent observations from local route metadata.
 - `ready`: Chat mode with an available composer and no blocking banner or generation.
 - `archived`: explicit archived banner or unarchive control. Keep it archived.
 - `unavailable`: explicit conversation-not-found/access-denied message after loading.
+- `connector-unavailable`: the exact saved Chat cannot select `Codex with
+  ChatGPT`, while a new Chat entry in the same saved Project can select it.
 - `missing`: exact `getTab` reports a closed/missing tab; omit `--observed-url`.
 - `auth-required` / `consent-required`: login, CAPTCHA, 2FA or explicit consent.
 - `loading` / `generating`: wait and renew the lease; do not duplicate a send.
 - `unknown`: ambiguous errors, missing composer alone, or unconfirmed UI; inspect
   again with bounded backoff. Never turn a timeout or null route into deletion.
+
+To establish `connector-unavailable`, inspect the exact saved Chat in place.
+Open its app picker, enter `Codex with ChatGPT` with real keyboard events, and
+wait for either matching candidates or an explicit empty result. The initial
+recommended-app list is incomplete, delayed search results are not absence, and
+ordinary page text containing the connector name is not a selection. Availability
+requires a selectable candidate and, after selection, a clickable inline pill
+that resolves to the connector's detail page. If the old Chat still cannot select
+it, inspect the new-Chat entry at the saved Project collection with the same
+search and proof. Report `connector-unavailable` only when the connector is
+confirmed available there; otherwise use `unknown` and keep inspecting. Do not
+send the business request during this probe.
 
 Follow the returned action and `tabAction`. `keep` reuses the exact page,
 including lease reacquisition and BOOT when needed after expiry/restart;
@@ -463,7 +477,7 @@ navigation or allocation. A mismatched URL is not proof that the saved chat
 was archived, and must not be overwritten or closed.
 
 For `create-project-chat` with `tabAction: navigate-owned`, reuse the exact
-still-matching archived/unavailable chat tab. After resolving its active request as
+still-matching archived, unavailable, or connector-unavailable chat tab. After resolving its active request as
 below, claim a Project-only candidate using that **same** `--tab-id`, omit
 `--chat-url`, and supply the old exact replacement generation/tab. Only after
 claim succeeds, navigate that page to the saved Project URL, create the new

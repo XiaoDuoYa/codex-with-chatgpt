@@ -571,6 +571,15 @@ unarchiving the old conversation. Login or consent requires user action;
 loading and generation require waiting, not a duplicate send. The CLI evaluates
 the host observation; it does not probe ChatGPT independently.
 
+After a connector metadata Refresh, an older Chat may no longer offer the app
+even though a new Chat in the same Project does. The Skill searches the old
+Chat's app picker with real keyboard input and waits for asynchronous candidates;
+the recommended list and ordinary text mentions are not availability evidence.
+Only after the old Chat has no selectable connector and the same search in the
+Project's new-Chat entry produces a selectable connector plus its clickable
+inline pill does recovery reuse the owned physical tab and create a replacement
+Chat. Ambiguous observations do not rotate the binding.
+
 Before replacing a page, preserve any verified Computer Use result in the local
 checkpoint. Only confirmed page failure permits cancelling an exact pending request.
 The Gateway blocks rotation while work is unresolved. Recovery preserves task

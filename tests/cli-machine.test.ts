@@ -181,6 +181,14 @@ describe("machine CLI lifecycle", () => {
     expect(archived.body).toMatchObject({
       action: "create-project-chat", controlReady: false, targetUrl: surface.body.projectUrl, control: null,
     });
+    const connectorUnavailable = runJson(stateDir, [
+      ...pageCheckArgs, "--page-state", "connector-unavailable",
+    ]);
+    expect(connectorUnavailable.command.status).toBe(0);
+    expect(connectorUnavailable.body).toMatchObject({
+      action: "create-project-chat", reason: "connector-unavailable", controlReady: false,
+      targetUrl: surface.body.projectUrl, tabAction: "navigate-owned", control: null,
+    });
     const healthy = runJson(stateDir, [...pageCheckArgs, "--page-state", "ready"]);
     expect(healthy.body).toMatchObject({ action: "resume-chat", controlReady: true });
     const stale = runJson(stateDir, [...pageCheckArgs, "--page-state", "archived", "--generation", "999"]);

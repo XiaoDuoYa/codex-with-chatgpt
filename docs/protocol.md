@@ -367,15 +367,28 @@ c2c surface check --local-session <id> --tab-id <id> --generation <n> \
 | Ready composer in the exact committed chat | Resume if the mailbox has no unresolved request |
 | Exact tab missing/closed, or URL changed | Reopen the saved chat in a hidden owned candidate |
 | Explicit archived/unavailable conversation at the exact saved chat URL | Create a new chat in the same owned tab from the saved Project URL, with a fresh generation |
+| Connector cannot be selected in the exact saved chat but is selectable from a new chat in the same saved Project | Create a new chat in the same owned tab from the saved Project URL, with a fresh generation |
 | Login, CAPTCHA, 2FA, consent | Request the required user action, then recheck the same page |
 | Loading/generating | Wait with bounded backoff and lease renewal |
 | Inconclusive UI or absent route | Inspect/pair; do not infer archived or deleted |
 
-`--page-state` is one of `ready`, `archived`, `unavailable`, `missing`,
+`--page-state` is one of `ready`, `archived`, `unavailable`,
+`connector-unavailable`, `missing`,
 `auth-required`, `consent-required`, `loading`, `generating`, or `unknown`.
 Omit the observed URL only for a missing tab or an inconclusive/loading probe.
 Stale tab/generation observations fail. The check is not a persistent attestation:
 the host must recheck immediately before and after each send.
+
+`connector-unavailable` needs two semantic observations. In the exact saved
+Chat, open the app picker, type the full connector name with real keyboard
+events, and wait for a matching candidate or an explicit empty result. The
+recommended list is not exhaustive, search results can arrive asynchronously,
+and ordinary text that names the connector is not selection evidence. A
+successful selection must produce a clickable inline pill that resolves to the
+connector detail page. Only when that proof fails in the saved Chat and succeeds
+from the new-Chat entry of the same saved Project may the host report this
+state. Otherwise report `unknown`; do not rotate the page or send the business
+request.
 
 The decision also returns `tabAction`: `keep` retains the exact tab,
 `navigate-owned` rotates its chat in place, `create` allocates one hidden
@@ -398,7 +411,8 @@ claim succeeds, navigate this owned tab to the saved Project and run the existin
 BOOT/commit sequence. This revokes old contexts before navigating and changes
 generation/chat, not tab ID. For `create`, create one hidden candidate at the
 returned target and claim it with the same replacement guards. A lost tab
-reuses the original chat; a confirmed archived/unavailable chat gets a new chat in
+reuses the original chat; a confirmed archived/unavailable/connector-unavailable
+chat gets a new chat in
 the same Project. Do not unarchive automatically. After an interrupted claim,
 reuse the recorded candidate and repeat verification before committing. Failed
 verification releases only that candidate. A second recreation failure stops the

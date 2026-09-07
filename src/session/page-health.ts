@@ -3,7 +3,7 @@ import { normalizeChatUrl, normalizeProjectUrl, projectIdFromChatUrl, projectIdF
 import type { SurfaceBinding, SurfaceLease } from "./surface-ownership.js";
 
 export const PAGE_STATES = [
-  "ready", "archived", "unavailable", "missing", "auth-required",
+  "ready", "archived", "unavailable", "connector-unavailable", "missing", "auth-required",
   "consent-required", "loading", "generating", "unknown",
 ] as const;
 
@@ -71,7 +71,11 @@ export function assessPageHealth(surface: PageRouteState, input: PageObservation
     return decision(chatUrl ? "reopen-chat" : "create-project-chat", "url-mismatch", chatUrl ?? projectUrl, "create");
   }
   // Do not overwrite a user-navigated tab or infer failure of the saved chat from another URL.
-  if (observation.state === "archived" || observation.state === "unavailable") {
+  if (
+    observation.state === "archived" ||
+    observation.state === "unavailable" ||
+    observation.state === "connector-unavailable"
+  ) {
     if (!chatUrl) return decision("inspect-page", "candidate-state-unconfirmed", null, "inspect");
     return decision("create-project-chat", observation.state, projectUrl, "navigate-owned");
   }

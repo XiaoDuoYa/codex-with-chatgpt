@@ -42,11 +42,18 @@ describe("host page recovery decisions", () => {
 
   it("reuses a confirmed unavailable chat tab but never navigates an unrelated or unverified page", () => {
     expect(assessPageHealth(surface, { ...observation, state: "unavailable" }).tabAction).toBe("navigate-owned");
+    expect(assessPageHealth(surface, { ...observation, state: "connector-unavailable" })).toMatchObject({
+      action: "create-project-chat", reason: "connector-unavailable", targetUrl: projectUrl,
+      controlReady: false, tabAction: "navigate-owned",
+    });
     expect(assessPageHealth(surface, { ...observation, state: "archived", url: chatUrl.replace("chat-a", "other") })).toMatchObject({
       action: "reopen-chat", tabAction: "create", targetUrl: chatUrl,
     });
     expect(assessPageHealth({ ...surface, binding: null, lease: { ...lease, chatUrl: undefined } }, {
       ...observation, state: "unavailable", url: projectUrl,
+    })).toMatchObject({ action: "inspect-page", tabAction: "inspect" });
+    expect(assessPageHealth({ ...surface, binding: null, lease: { ...lease, chatUrl: undefined } }, {
+      ...observation, state: "connector-unavailable", url: projectUrl,
     })).toMatchObject({ action: "inspect-page", tabAction: "inspect" });
     expect(assessPageHealth({ ...surface, lease: null }, observation)).toMatchObject({
       action: "verify-candidate", tabAction: "keep",
