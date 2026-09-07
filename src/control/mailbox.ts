@@ -43,6 +43,7 @@ import {
   sha256Hex,
   type SubmitControlResultInput,
   validateControlId,
+  validateBrowserTabId,
   validateLocalSessionId,
 } from "./result-schema.js";
 
@@ -203,10 +204,10 @@ function isCanonicalTimestamp(value: unknown): value is string {
   );
 }
 
-function storedId(value: unknown, label: string): string {
+function storedId(value: unknown, label: string, validate = validateControlId): string {
   if (typeof value !== "string") integrityError(`${label} is missing`);
   try {
-    const normalized = validateControlId(value, label);
+    const normalized = validate(value, label);
     if (normalized !== value) integrityError(`${label} is not canonical`);
     return normalized;
   } catch (error) {
@@ -428,7 +429,7 @@ function parseStoredRequest(
     integrityError("stored request surface generation is invalid");
   }
   if (surfaceTabId !== null) {
-    storedId(surfaceTabId, "stored request surface tab id");
+    storedId(surfaceTabId, "stored request surface tab id", validateBrowserTabId);
   }
   if ((surfaceGeneration === null) !== (surfaceTabId === null) && current) {
     integrityError("stored request surface identity is incomplete");
@@ -853,7 +854,7 @@ export function openControlResultRequestWithStatus(
   }
   const surfaceTabId = input.surfaceTabId === undefined
     ? null
-    : validateControlId(input.surfaceTabId, "surface tab id");
+    : validateBrowserTabId(input.surfaceTabId, "surface tab id");
   if ((input.surfaceGeneration === undefined) !== (surfaceTabId === null)) {
     throw new ControlMailboxError(
       "INVALID_RESULT",
@@ -1167,7 +1168,7 @@ export function requireBootControlResult(
     request.localSessionId !== resolvedLocalSessionId ||
     request.phase !== "BOOT" ||
     request.surfaceGeneration !== surfaceGeneration ||
-    request.surfaceTabId !== validateControlId(surfaceTabId, "surface tab id")
+    request.surfaceTabId !== validateBrowserTabId(surfaceTabId, "surface tab id")
   ) {
     throw new ControlMailboxError(
       "MAILBOX_CORRELATION_MISMATCH",

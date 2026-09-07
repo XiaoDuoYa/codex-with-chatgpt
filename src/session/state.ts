@@ -1,6 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { isBrowserTabId } from "./browser-tab-id.js";
 import {
   ensureDir,
   getWorkspaceDataDir,
@@ -398,6 +399,13 @@ function optionalSafeId(value: unknown, label: string): string | undefined {
   return normalized;
 }
 
+function optionalTabId(value: unknown, label: string): string | undefined {
+  const raw = optionalString(value, label);
+  if (raw === undefined) return undefined;
+  if (!isBrowserTabId(raw)) throw new Error(`${label} is invalid`);
+  return raw;
+}
+
 function optionalIteration(value: unknown, label: string): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > MAX_C2C_ITERATION) {
@@ -568,7 +576,7 @@ function readThreadSession(workspaceId: string, localSessionId: string): ThreadS
   const url = optionalCanonicalChatUrl(value.url, "local session chat URL");
   const iteration = optionalIteration(value.iteration, "local session iteration");
   const surfaceGeneration = optionalSurfaceGeneration(value.surfaceGeneration, "surface generation");
-  const surfaceTabId = optionalSafeId(value.surfaceTabId, "surface tab id");
+  const surfaceTabId = optionalTabId(value.surfaceTabId, "surface tab id");
   if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
     throw new Error("surface route requires generation and tab id together");
   }
@@ -700,7 +708,7 @@ function writeSessionUnlocked(
     SESSION_TEXT_LIMITS.connectorName
   );
   const surfaceGeneration = optionalSurfaceGeneration(session.surfaceGeneration, "surface generation");
-  const surfaceTabId = optionalSafeId(session.surfaceTabId, "surface tab id");
+  const surfaceTabId = optionalTabId(session.surfaceTabId, "surface tab id");
   if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
     throw new Error("surface route requires generation and tab id together");
   }
@@ -819,7 +827,7 @@ export function commitSessionRoute(
     : optionalSurfaceGeneration(route.surfaceGeneration, "surface generation");
   const surfaceTabId = route.surfaceTabId === undefined
     ? undefined
-    : optionalSafeId(route.surfaceTabId, "surface tab id");
+    : optionalTabId(route.surfaceTabId, "surface tab id");
   if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
     throw new Error("surface route requires generation and tab id together");
   }
@@ -878,7 +886,7 @@ export function reconcileSessionRoute(
   }
   assertProjectChatMatch(projectUrl, chatUrl ?? undefined);
   const surfaceGeneration = optionalSurfaceGeneration(authority.surfaceGeneration, "surface generation");
-  const surfaceTabId = optionalSafeId(authority.surfaceTabId, "surface tab id");
+  const surfaceTabId = optionalTabId(authority.surfaceTabId, "surface tab id");
   if ((surfaceGeneration === undefined) !== (surfaceTabId === undefined)) {
     throw new Error("surface route requires generation and tab id together");
   }
@@ -1252,7 +1260,7 @@ export function mergeSession(previous: SavedSession | null, patch: RouteSessionP
     patch.surfaceGeneration ?? previous?.surfaceGeneration,
     "surface generation",
   );
-  const surfaceTabId = optionalSafeId(
+  const surfaceTabId = optionalTabId(
     patch.surfaceTabId ?? previous?.surfaceTabId,
     "surface tab id",
   );

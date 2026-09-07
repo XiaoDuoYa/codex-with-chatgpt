@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { isBrowserTabId } from "./browser-tab-id.js";
 import { projectSelectionSchema, validateProjectSelection, type ProjectSelection } from "./project-selection.js";
 import {
   C2C_ID_PATTERN,
@@ -312,6 +313,13 @@ function safeId(value: string, label: string): string {
   return value;
 }
 
+function safeTabId(value: string, label: string): string {
+  if (!isBrowserTabId(value)) {
+    throw new SurfaceOwnershipError("INVALID_SURFACE_OWNERSHIP_STATE", `${label} must be a valid browser locator`);
+  }
+  return value;
+}
+
 export function assertChatGPTSurfaceIdentity(browserId: string, surfaceId: string): void {
   if (browserId !== CHATGPT_BROWSER_ID || surfaceId !== CHATGPT_SURFACE_ID) {
     throw new SurfaceOwnershipError(
@@ -448,7 +456,7 @@ function parseLease(value: unknown): SurfaceLease {
   const browserId = safeId(storedString(raw.browserId, "lease browser id"), "lease browser id");
   const surfaceId = safeId(storedString(raw.surfaceId, "lease surface id"), "lease surface id");
   assertChatGPTSurfaceIdentity(browserId, surfaceId);
-  const tabId = safeId(storedString(raw.tabId, "lease tab id"), "lease tab id");
+  const tabId = safeTabId(storedString(raw.tabId, "lease tab id"), "lease tab id");
   const projectUrl = canonicalProjectUrl(storedString(raw.projectUrl, "lease project URL"));
   const chatUrl = raw.chatUrl === undefined
     ? undefined
@@ -504,7 +512,7 @@ function parseBinding(value: unknown): SurfaceBinding {
   return {
     browserId,
     surfaceId,
-    tabId: safeId(storedString(raw.tabId, "binding tab id"), "binding tab id"),
+    tabId: safeTabId(storedString(raw.tabId, "binding tab id"), "binding tab id"),
     projectId: safeId(storedString(raw.projectId, "binding project id"), "binding project id"),
     localSessionId: safeId(
       storedString(raw.localSessionId, "binding local session id"),
@@ -553,7 +561,7 @@ function parseLegacyLease(value: unknown): SurfaceLease {
   );
   const browserId = safeId(storedString(raw.browserId, "legacy lease browser id"), "legacy lease browser id");
   const surfaceId = safeId(storedString(raw.surfaceId, "legacy lease surface id"), "legacy lease surface id");
-  const tabId = safeId(storedString(raw.tabId, "legacy lease tab id"), "legacy lease tab id");
+  const tabId = safeTabId(storedString(raw.tabId, "legacy lease tab id"), "legacy lease tab id");
   const projectUrl = canonicalProjectUrl(storedString(raw.projectUrl, "legacy lease project URL"));
   const chatUrl = raw.chatUrl === undefined
     ? undefined
@@ -608,7 +616,7 @@ function parseLegacyBinding(value: unknown): SurfaceBinding {
   return {
     browserId: safeId(storedString(raw.browserId, "legacy binding browser id"), "legacy binding browser id"),
     surfaceId: safeId(storedString(raw.surfaceId, "legacy binding surface id"), "legacy binding surface id"),
-    tabId: safeId(storedString(raw.tabId, "legacy binding tab id"), "legacy binding tab id"),
+    tabId: safeTabId(storedString(raw.tabId, "legacy binding tab id"), "legacy binding tab id"),
     projectId: safeId(storedString(raw.projectId, "legacy binding project id"), "legacy binding project id"),
     localSessionId: safeId(
       storedString(raw.localSessionId, "legacy binding local session id"),
@@ -1428,7 +1436,7 @@ function validateClaim(request: ClaimSurfaceOptions): {
   const browserId = safeId(request.browserId, "browser id");
   const surfaceId = safeId(request.surfaceId, "surface id");
   assertChatGPTSurfaceIdentity(browserId, surfaceId);
-  const tabId = safeId(request.tabId, "tab id");
+  const tabId = safeTabId(request.tabId, "tab id");
   const projectUrl = canonicalProjectUrl(request.projectUrl);
   const chatUrl = request.chatUrl === undefined ? undefined : canonicalChatUrl(request.chatUrl);
   if (chatUrl && projectIdFromChatUrl(chatUrl) !== projectIdFromUrl(projectUrl)) {
@@ -1444,7 +1452,7 @@ function validateClaim(request: ClaimSurfaceOptions): {
     safeId(request.replaces.browserId, "replacement browser id");
     safeId(request.replaces.surfaceId, "replacement surface id");
     assertChatGPTSurfaceIdentity(request.replaces.browserId, request.replaces.surfaceId);
-    safeId(request.replaces.tabId, "replacement tab id");
+    safeTabId(request.replaces.tabId, "replacement tab id");
     safeEpoch(request.replaces.ownerProcessEpoch);
     if (!Number.isSafeInteger(request.replaces.generation) || request.replaces.generation < 1) {
       throw new SurfaceOwnershipError(
@@ -1635,7 +1643,7 @@ export function commitVerifiedSurfaceRoute(
   safeId(ref.browserId, "browser id");
   safeId(ref.surfaceId, "surface id");
   assertChatGPTSurfaceIdentity(ref.browserId, ref.surfaceId);
-  safeId(ref.tabId, "tab id");
+  safeTabId(ref.tabId, "tab id");
   safeEpoch(ref.ownerProcessEpoch);
   if (!Number.isSafeInteger(ref.generation) || ref.generation < 1) {
     throw new SurfaceOwnershipError("INVALID_SURFACE_OWNERSHIP_STATE", "lease generation is invalid");
@@ -1776,7 +1784,7 @@ export function renewSurface(options: RenewSurfaceOptions): SurfaceLease {
   safeId(ref.browserId, "browser id");
   safeId(ref.surfaceId, "surface id");
   assertChatGPTSurfaceIdentity(ref.browserId, ref.surfaceId);
-  safeId(ref.tabId, "tab id");
+  safeTabId(ref.tabId, "tab id");
   safeEpoch(ref.ownerProcessEpoch);
   return withSurfaceOwnershipLocks(ref.projectId, () => {
     const state = readState(ref.projectId);
@@ -1810,7 +1818,7 @@ export function releaseSurface(ref: SurfaceLeaseRef, now?: Date): boolean {
   safeId(ref.browserId, "browser id");
   safeId(ref.surfaceId, "surface id");
   assertChatGPTSurfaceIdentity(ref.browserId, ref.surfaceId);
-  safeId(ref.tabId, "tab id");
+  safeTabId(ref.tabId, "tab id");
   safeEpoch(ref.ownerProcessEpoch);
   if (!Number.isSafeInteger(ref.generation) || ref.generation < 1) {
     throw new SurfaceOwnershipError("INVALID_SURFACE_OWNERSHIP_STATE", "lease generation is invalid");

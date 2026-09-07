@@ -156,6 +156,26 @@ required before the workspace can receive another turn.
 
 ## Surface lease contract
 
+### Browser tab identity
+
+Persist a provider's stable, resolvable tab identity in `tabId`. In the in-app
+browser, use the returned `providerTabId`, including its namespace (for example
+`browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a`). Task-local short indices such
+as `2` can identify different pages in different Codex tasks and must not be
+used for new machine-wide claims. Resolve the exact provider ID with
+`cua.getTab(providerTabId, { browser: "iab" })` and verify the candidate URL
+before claiming. Carry that same string through claim, BOOT, observations,
+commit, renewal and replacement; never strip a prefix or invent an ID.
+
+Tab locators have separate bounded validation from path-safe C2C request and
+session IDs. Existing saved IDs remain readable and unchanged. For a legacy
+short-ID binding, a successful lookup or URL match alone does not establish
+stable identity across tasks: use guarded replacement with its saved exact
+generation and old ID if continuity cannot be proven. Do not clear a conflicting
+owner or migrate another session's record to make a claim succeed.
+Older runtimes cannot read namespaced locators; keep the upgraded runtime and
+Skill together once these bindings exist rather than manually downgrading one.
+
 ### First Project selection
 
 An unpaired workspace must create its own Project through the host browser UI,
@@ -336,7 +356,7 @@ const replacement = await cua.createBrowserTab("iab", targetUrl, { visible: fals
 ```
 
 Use the saved chat URL when present, otherwise the Project URL. Claim the
-returned exact tab id with the session's `--local-session`; if a lease is
+returned stable provider tab id (see "Browser tab identity") with the session's `--local-session`; if a lease is
 stored, provide its exact current `--replace-generation` and
 `--replace-tab-id`. Re-read that exact id with `getTab` and validate the URL
 before sending. With no saved route, create a hidden Project candidate with

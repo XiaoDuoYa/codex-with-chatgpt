@@ -9,6 +9,7 @@ import { projectSelectionSchema } from "../session/project-selection.js";
 import { pluginIdsSchema, pluginIntentSchema, pluginPreflightSchema } from "../session/turn-preflight.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { CONTROL_PHASES, c2cIdSchema } from "../control/result-schema.js";
+import { browserTabIdSchema } from "../session/browser-tab-id.js";
 import { parseControlPageObservation } from "../control/wait-policy.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { createMcpServer } from "../mcp/server.js";
@@ -99,7 +100,7 @@ const surfaceLeaseRefSchema = z
     localSessionId: c2cIdSchema,
     browserId: z.literal(CHATGPT_BROWSER_ID),
     surfaceId: z.literal(CHATGPT_SURFACE_ID),
-    tabId: c2cIdSchema,
+    tabId: browserTabIdSchema,
     generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
     ownerProcessEpoch: c2cIdSchema,
   })
@@ -108,7 +109,7 @@ const surfaceClaimSchema = surfaceIdentitySchema
   .extend({
     browserId: z.literal(CHATGPT_BROWSER_ID),
     surfaceId: z.literal(CHATGPT_SURFACE_ID),
-    tabId: c2cIdSchema,
+    tabId: browserTabIdSchema,
     projectUrl: z.string().min(1).max(4_096),
     projectSelection: projectSelectionSchema.optional(),
     chatUrl: z.string().min(1).max(4_096).optional(),

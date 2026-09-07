@@ -243,14 +243,14 @@ describe("machine gateway surface invalidation", () => {
     expectCode(() => gateway.claimTurn(later.token, ["workspace.read"]), "STALE_BINDING_EPOCH");
   });
 
-  it("accepts an exact Computer Use BOOT result and rejects raw page evidence", () => {
+  it.each(["tab-boot-receipt", "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a"])("accepts an exact Computer Use BOOT result for %s and rejects raw page evidence", (tabId) => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("gateway-surface-boot-receipt");
     cleanups.push(root);
     const gateway = new MachineGateway({ surfaceValidator: requireCurrentTurnSurface });
     const registration = gateway.registerWorkspace(root);
     const identity = { ...registration, localSessionId: "session-boot-receipt" };
-    const candidate = surface(registration.projectId, identity.localSessionId, "tab-boot-receipt");
+    const candidate = surface(registration.projectId, identity.localSessionId, tabId);
     const boot = issueBootTurn(gateway, registration, identity.localSessionId, candidate.generation, "task-boot-receipt");
     const base = {
       tabId: candidate.tabId,

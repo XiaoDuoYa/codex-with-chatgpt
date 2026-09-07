@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { browserTabIdSchema } from "../session/browser-tab-id.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import {
   MAX_SEARCH_GLOB_LENGTH,
@@ -327,7 +328,7 @@ const controlResultRequestOutputSchema = z.object({
   phase: z.enum(CONTROL_PHASES),
   allowedKinds: z.array(z.enum(CONTROL_RESULT_KINDS)),
   surfaceGeneration: z.number().int().positive().nullable(),
-  surfaceTabId: c2cIdSchema.nullable(),
+  surfaceTabId: browserTabIdSchema.nullable(),
   createdAt: timestampOutputSchema,
   expiresAt: timestampOutputSchema,
 });

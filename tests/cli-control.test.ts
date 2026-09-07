@@ -154,7 +154,7 @@ function receiveBoot(localSessionId: string): string {
 describe("control CLI correlation", () => {
   it("reconciles exact terminal page evidence through the authenticated machine client", () => {
     const localSessionId = "session-observe";
-    claimSurface(localSessionId);
+    claimSurface(localSessionId, "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a");
     const args = ["--local-session", localSessionId, "--task", "task-observe", "--iteration", "0", "--phase", "PLAN"];
     const opened = runJson(["control", "open", ...args]);
     expect(opened.command.status).toBe(0);

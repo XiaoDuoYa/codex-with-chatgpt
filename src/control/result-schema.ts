@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 import { redact } from "../logger/index.js";
+import { isBrowserTabId } from "../session/browser-tab-id.js";
 
 export const CONTROL_PHASES = ["BOOT", "RESEARCH", "PLAN", "REVIEW"] as const;
 export const CONTROL_RESULT_KINDS = ["BOOT", "RESEARCH", "PLAN", "REVIEW", "DONE", "BLOCKED"] as const;
@@ -456,6 +457,13 @@ export function validateControlId(value: string, label = "id"): string {
     throw new ControlMailboxError("INVALID_RESULT", `${label} must be a safe identifier`);
   }
   return normalized;
+}
+
+export function validateBrowserTabId(value: string, label = "tab id"): string {
+  if (!isBrowserTabId(value)) {
+    throw new ControlMailboxError("INVALID_RESULT", `${label} must be a valid browser locator`);
+  }
+  return value;
 }
 
 export function validateLocalSessionId(value: string): string {

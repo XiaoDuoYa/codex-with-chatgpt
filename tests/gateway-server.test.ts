@@ -111,7 +111,7 @@ describe("machine gateway control server", () => {
     expect(registrationAgain.body).toEqual(registeredA.body);
   });
 
-  it("routes the complete surface lifecycle through authenticated admin endpoints", async () => {
+  it.each(["tab-admin-surface", "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a"])("routes the complete surface lifecycle for %s through authenticated admin endpoints", async (tabId) => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("machine-server-surface");
     cleanups.push(root);
@@ -137,7 +137,7 @@ describe("machine gateway control server", () => {
       ...identity,
       browserId: "iab",
       surfaceId: "chatgpt",
-      tabId: "tab-admin-surface",
+      tabId,
       projectUrl,
       projectSelection: projectSelection(projectUrl),
       chatUrl,
@@ -145,7 +145,7 @@ describe("machine gateway control server", () => {
       leaseTtlMs: 60_000,
     });
     expect(claimed.status).toBe(200);
-    expect(claimed.body.lease).toMatchObject({ tabId: "tab-admin-surface", generation: 1 });
+    expect(claimed.body.lease).toMatchObject({ tabId, generation: 1 });
 
     const current = await admin<{ lease: Record<string, unknown>; binding: unknown }>(
       server,
@@ -153,7 +153,7 @@ describe("machine gateway control server", () => {
       identity,
     );
     expect(current.status).toBe(200);
-    expect(current.body.lease).toMatchObject({ tabId: "tab-admin-surface", generation: 1 });
+    expect(current.body.lease).toMatchObject({ tabId, generation: 1 });
     expect(current.body.binding).toBeNull();
 
     const leaseRef = {
@@ -161,7 +161,7 @@ describe("machine gateway control server", () => {
       localSessionId: identity.localSessionId,
       browserId: "iab",
       surfaceId: "chatgpt",
-      tabId: "tab-admin-surface",
+      tabId,
       generation: 1,
       ownerProcessEpoch: "owner-admin-surface",
     };
@@ -181,7 +181,7 @@ describe("machine gateway control server", () => {
       leaseTtlMs: 60_000,
     });
     expect(renewed.status).toBe(200);
-    expect(renewed.body.lease).toMatchObject({ generation: 1, tabId: "tab-admin-surface" });
+    expect(renewed.body.lease).toMatchObject({ generation: 1, tabId });
 
     const released = await admin<{ released: boolean }>(server, "/admin/surfaces/release", {
       ...identity,

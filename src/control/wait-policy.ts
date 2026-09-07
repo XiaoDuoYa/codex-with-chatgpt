@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { browserTabIdSchema } from "../session/browser-tab-id.js";
 import type { ControlStatus } from "./mailbox.js";
 import {
   ControlMailboxError,
@@ -10,7 +11,7 @@ import {
 export const CONTROL_PAGE_CHECK_INTERVAL_MS = 30_000;
 
 const observationBase = {
-  tabId: c2cIdSchema,
+  tabId: browserTabIdSchema,
   generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   observedAt: z.string().datetime(),
   responseToRequestId: c2cIdSchema,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { c2cIdSchema } from "../control/result-schema.js";
+import { browserTabIdSchema } from "./browser-tab-id.js";
 import { normalizeChatUrl } from "./state.js";
 
 const text = z.string().trim().min(1).max(200);
@@ -11,7 +12,7 @@ export const repositoryTargetSchema = z.object({ host: text, owner: text, name: 
 export const pluginPreflightSchema = z.object({
   workspaceId: c2cIdSchema, localSessionId: c2cIdSchema, taskId: c2cIdSchema,
   iteration: z.number().int().nonnegative(), phase: text,
-  tabId: c2cIdSchema, generation: z.number().int().positive().safe(), chatUrl: z.string().url(),
+  tabId: browserTabIdSchema, generation: z.number().int().positive().safe(), chatUrl: z.string().url(),
   bootEpoch: text, observedAt: z.string().datetime(),
   // Account/workspace key observed by the host; a nickname is not a provider identity.
   chatgptAccount: text,

@@ -71,6 +71,26 @@ afterEach(() => {
 });
 
 describe("persistent ChatGPT surface ownership", () => {
+  it("keeps stable provider locators distinct without weakening ownership or rewriting legacy IDs", () => {
+    stateDir();
+    const tabA = "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a";
+    const tabB = "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6b";
+    const legacy = claim("session-legacy", "2");
+    const a = claim("session-provider-a", tabA, { chatUrl: CHAT_URL.replace("chat-main", "chat-a") });
+    const b = claim("session-provider-b", tabB, { chatUrl: CHAT_URL.replace("chat-main", "chat-b") });
+    expect(currentSurfaceBinding("project-alpha", a.localSessionId)?.tabId).toBe(tabA);
+    expect(currentSurfaceBinding("project-alpha", b.localSessionId)?.tabId).toBe(tabB);
+    expect(currentSurfaceBinding("project-alpha", legacy.localSessionId)?.tabId).toBe("2");
+    expect(() => claimOnly("session-intruder", tabA, {
+      projectId: "project-other", projectUrl: OTHER_PROJECT_URL, chatUrl: OTHER_CHAT_URL,
+    })).toThrow(/owned|bound/);
+    expect(() => claimOnly("session-intruder", tabA)).toThrow(/owned|bound/);
+    expect(renewSurface({ lease: a, now: START }).tabId).toBe(tabA);
+    expect(releaseSurface(a, START)).toBe(true);
+    expect(currentSurfaceBinding("project-alpha", a.localSessionId)?.tabId).toBe(tabA);
+    expect(currentSurfaceLease("project-alpha", b.localSessionId, START)?.tabId).toBe(tabB);
+  });
+
   it("does not persist an unverified candidate page", () => {
     stateDir();
     const candidate = claimOnly("session-a", "tab-a");

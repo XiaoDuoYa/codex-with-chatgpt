@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { browserTabIdSchema } from "./browser-tab-id.js";
 import { normalizeChatUrl, normalizeProjectUrl, projectIdFromChatUrl, projectIdFromUrl } from "./state.js";
 import type { SurfaceBinding, SurfaceLease } from "./surface-ownership.js";
 
@@ -8,7 +9,7 @@ export const PAGE_STATES = [
 ] as const;
 
 export const pageObservationSchema = z.object({
-  tabId: z.string().min(1),
+  tabId: browserTabIdSchema,
   generation: z.number().int().positive().safe(),
   state: z.enum(PAGE_STATES),
   url: z.string().url().optional(),

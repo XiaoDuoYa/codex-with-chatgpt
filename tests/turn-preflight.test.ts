@@ -3,7 +3,7 @@ import { assessPluginPreflight, type PluginPreflight } from "../src/session/turn
 
 const now = Date.now();
 const turn = { workspaceId: "workspace-a", localSessionId: "session-a", taskId: "task-a", iteration: 0, phase: "PLAN", generation: 1, plugins: ["GitHub"] };
-const surface = { tabId: "tab-a", generation: 1, chatUrl: "https://chatgpt.com/g/g-p-project-a/c/chat-a" };
+const surface = { tabId: "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a", generation: 1, chatUrl: "https://chatgpt.com/g/g-p-project-a/c/chat-a" };
 function proof(): PluginPreflight {
   return {
     ...turn, ...surface, bootEpoch: "epoch-a", observedAt: new Date(now).toISOString(), chatgptAccount: "observed-account-key",
