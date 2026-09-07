@@ -1,6 +1,6 @@
 {
   "name": "codex-with-chatgpt",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "ChatGPT thinks. Codex works. Use ChatGPT as the planning brain while keeping the Codex harness.",
   "type": "module",
   "license": "MIT",
@@ -15,6 +15,7 @@
     "dev": "tsx src/cli/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:visible-control": "node scripts/visible-control-smoke.mjs",
     "typecheck": "tsc --noEmit"
   },
   "packageManager": "pnpm@11.24.0",

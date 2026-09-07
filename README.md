@@ -11,24 +11,26 @@
 
 **中文** — ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的
 API 额度做规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，
-Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+Codex 只负责执行。不用 API Key、不搞逆向代理——官方网页 + 分权限 MCP 桥接。
 
 **EN** — ChatGPT Plus/Pro web quota sits idle while your coding agent burns
 scarce API/Codex tokens on planning and review. This project moves the
 thinking to the subscription you already pay for; Codex only executes.
-No API keys, no reverse proxy — official web UI plus a read-only MCP bridge.
+No API keys, no reverse proxy — official web UI plus a scoped MCP bridge.
 
 ## What it is · 这是什么
 
 **中文** — 把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，执行权
 完全保留在 Codex 手里。你的仓库永远不会被上传：ChatGPT 通过一条安全的、
-OAuth 保护的**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
+OAuth 保护的分权限 MCP 连接，按需读取所需代码；只有用户授权后，ChatGPT 才能
+提交纯文本计划给 Codex 执行、查看进度或取消任务，不能直接调用文件写入或 Shell。
 
 **EN** — Use the ChatGPT web app as the planning and review brain for your
 Codex coding sessions, while Codex keeps full ownership of execution. Your
 repository is never uploaded: ChatGPT reads exactly the lines it needs through
-a secure, OAuth-protected, **read-only** MCP connection to your current
-workspace.
+a secure, OAuth-protected, scoped MCP connection. Read access is separate from
+the optional text-task submission scope; ChatGPT never receives direct file-write
+or shell tools.
 
 Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](README.zh-CN.md)**
 
@@ -155,11 +157,11 @@ Credentials stay in the OS app state directory, not in the project.
                         ▼          │
              ┌─────────────────────┐
              │      C2C Bridge     │   loopback-only HTTP server
-             │  read-only MCP      │   OAuth 2.1 + one-time pairing code
+             │  scoped MCP         │   OAuth 2.1 + one-time pairing code
              │  OAuth + Pairing    │   Cloudflare Quick Tunnel
              │  Tunnel Manager     │
              └──────────┬──────────┘
-                        │  read-only
+                        │  fixed workspace
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
              │   Local Workspace   │◀─────────│    Codex Harness    │
@@ -170,18 +172,21 @@ Credentials stay in the OS app state directory, not in the project.
 - **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
   `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
   no logs, no file bodies are ever pasted.
-- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
-  tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
+- **Data plane (MCP)**: ChatGPT pulls evidence through 9 read-only tools:
+  `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
   `git_status`, `git_diff`, `test_status`, `execution_summary`,
-  `execution_output`.
+  `execution_output`. With separately consented `execution.submit`, it may also
+  submit text-only tasks, read live task progress/events, and cancel a task via
+  `submit_task`, `task_progress`, `task_events`, and `cancel_task`.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
 
 ## Security model (short version)
 
-- **Read-only by construction**: write/delete/shell/commit tools simply do not
-  exist on the server. No prompt injection can enable them.
+- **No direct write or shell MCP tools**: task submission accepts only a text
+  plan for the connector's fixed workspace. Codex remains the executor, and
+  users can inspect or cancel its visible Codex UI task.
 - **One workspace = one boundary**: every token is bound to a single workspace;
   path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
   are all blocked and tested).
@@ -219,7 +224,7 @@ Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 ```
 src/
   bridge/     loopback HTTP server, port recovery, admin API
-  mcp/        9 read-only tools, stateless Streamable HTTP
+  mcp/        read-only review tools + scoped task control, Streamable HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
   workspace/  path containment, sensitive-file policy, search, git

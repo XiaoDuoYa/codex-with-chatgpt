@@ -8,13 +8,14 @@
 
 ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的 API 额度做
 规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，Codex 只负责
-执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+执行。不用 API Key、不搞逆向代理——官方网页 + 分权限 MCP 桥接。
 
 ## 这是什么
 
 把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，而执行权完全保留在
 Codex 手里。你的仓库永远不会被上传——ChatGPT 通过一条安全的、OAuth 保护的
-**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
+分权限 MCP 连接，按需读取所需代码；只有用户授权后，ChatGPT 才能提交纯文本
+计划给 Codex 执行、查看进度或取消任务，不能直接调用文件写入或 Shell。
 
 ## 一段话安装（纯小白专用）
 
@@ -89,11 +90,11 @@ Ready.
                         ▼          │
              ┌─────────────────────┐
              │      C2C Bridge     │   仅监听本机回环地址
-             │  只读 MCP           │   OAuth 2.1 + 一次性配对码
+             │  分权限 MCP         │   OAuth 2.1 + 一次性配对码
              │  OAuth + 配对       │   Cloudflare Quick Tunnel
              │  Tunnel 管理        │
              └──────────┬──────────┘
-                        │  只读
+                        │  固定工作区
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
              │     本地工作区      │◀─────────│    Codex Harness    │
@@ -104,17 +105,19 @@ Ready.
 - **控制面（Computer Use）**：Codex 与 ChatGPT 之间只交换极小的结构化 `[C2C]`
   状态消息——`INIT → PLAN → EXECUTED → REVIEW → DONE`。绝不粘贴 diff、日志
   或文件内容。
-- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
+- **数据面（MCP）**：ChatGPT 通过 9 个只读工具获取证据：
   `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
   `git_status`、`git_diff`、`test_status`、`execution_summary`、
-  `execution_output`。
+  `execution_output`。用户另行授权 `execution.submit` 后，还可通过
+  `submit_task`、`task_progress`、`task_events`、`cancel_task` 提交纯文本
+  任务、查看实时状态/事件并取消任务。
 - **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
   和测试记录——绝不因为 Codex 说"测试全过"就直接相信。
 
 ## 安全模型（简版）
 
-- **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
-  注入都无法启用它们。
+- **没有直接写文件或 Shell 的 MCP 工具**：任务提交只接受文本计划，并且只能
+  在连接器绑定的固定工作区交给 Codex 执行；用户可在 Codex UI 查看和取消。
 - **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
   realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
@@ -131,7 +134,7 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # vitest：171 个测试（路径安全、OAuth、配对、任务生命周期、MCP 端到端）
 
 c2c setup           # 一条命令：Bridge + 隧道 + 配对码
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
@@ -149,7 +152,7 @@ c2c status / doctor / pair / unpair / logs / stop
 ```
 src/
   bridge/     本机回环 HTTP 服务、端口自动恢复、管理 API
-  mcp/        9 个只读工具、无状态 Streamable HTTP
+  mcp/        只读审查工具 + 分权限任务控制、Streamable HTTP
   auth/       OAuth 2.1（PKCE、动态注册、refresh 轮换、吊销）
   pairing/    一次性配对码（CSPRNG、TTL、限速）
   workspace/  路径收敛、敏感文件策略、搜索、git

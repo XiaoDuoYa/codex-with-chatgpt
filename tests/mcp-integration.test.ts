@@ -55,10 +55,16 @@ beforeAll(async () => {
     port: 0,
     persistRuntime: false,
     authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
+    taskRunner: async (_root, _name, _prompt, hooks) => {
+      hooks.onReady(process.pid, "thread-integration", "turn-integration");
+      hooks.onProgress(80, "Running tests");
+      hooks.onLog("integration log");
+      return { result: Promise.resolve({ exitCode: 0, output: "NO SIDE EFFECT TEST EXECUTED\n", summary: "done", testStatus: "PASS" }), cancel: async () => undefined };
+    },
   });
   const tokens = bridge.authStore.issueTokens({
     clientId: "it-client",
-    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read"],
+    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read", "execution.submit"],
   });
   accessToken = tokens.accessToken;
 
@@ -76,10 +82,11 @@ afterAll(async () => {
 });
 
 describe("MCP tools over Streamable HTTP", () => {
-  it("lists all nine read-only tools", async () => {
+  it("lists read tools plus fixed-workspace task submission", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
+      "cancel_task",
       "execution_output",
       "execution_summary",
       "git_diff",
@@ -87,6 +94,9 @@ describe("MCP tools over Streamable HTTP", () => {
       "list_directory",
       "read_file",
       "search_workspace",
+      "submit_task",
+      "task_events",
+      "task_progress",
       "test_status",
       "workspace_info",
     ]);
@@ -104,6 +114,39 @@ describe("MCP tools over Streamable HTTP", () => {
     expectToolOutputSchema(tools, "test_status", ["available", "tests", "outputAvailable", "outputId"]);
     expectToolOutputSchema(tools, "execution_summary", ["records"]);
     expectToolOutputSchema(tools, "execution_output", ["action", "items", "text"]);
+    expectToolOutputSchema(tools, "submit_task", ["accepted", "task_id", "iteration", "status"]);
+    expectToolOutputSchema(tools, "task_progress", ["task_id", "iteration", "status", "progress_percent", "current_action", "logs", "workspace", "plan", "created_at", "changed_files"]);
+    expectToolOutputSchema(tools, "cancel_task", ["task_id", "status", "cancelled", "current_action", "changed_files"]);
+    expectToolOutputSchema(tools, "task_events", ["events", "next_event_id"]);
+  });
+
+  it("submits a harmless task, reports completion and creates an execution record", async () => {
+    const submitted = structuredJsonOf<{ accepted: boolean; task_id: string; iteration: number }>(await client.callTool({
+      name: "submit_task",
+      arguments: { workspace_name: path.basename(root), task_id: "c2c_safe1", iteration: 1, prompt: "Inspect workspace identity and make no changes." },
+    }));
+    expect(submitted).toMatchObject({ accepted: true, task_id: "c2c_safe1", iteration: 1 });
+    let status: { status: string; output_id?: number } = { status: "queued" };
+    for (let attempt = 0; attempt < 20 && !["COMPLETED", "FAILED"].includes(status.status); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      status = structuredJsonOf(await client.callTool({ name: "task_progress", arguments: { task_id: "c2c_safe1" } }));
+    }
+    expect(status.status).toBe("COMPLETED");
+    expect(status.output_id).toBeTypeOf("number");
+    const summary = structuredJsonOf<{ records: { taskId: string; iteration: number; exitStatus: string }[] }>(
+      await client.callTool({ name: "execution_summary", arguments: { limit: 20 } })
+    );
+    expect(summary.records).toContainEqual(expect.objectContaining({ taskId: "c2c_safe1", iteration: 1, exitStatus: "ok" }));
+    const events = structuredJsonOf<{ events: { type: string }[] }>(await client.callTool({ name: "task_events", arguments: {} }));
+    expect(events.events).toContainEqual(expect.objectContaining({ type: "TASK_COMPLETED_EVENT" }));
+  });
+
+  it("rejects task submission for any other workspace name", async () => {
+    const result = await client.callTool({ name: "submit_task", arguments: {
+      workspace_name: "another-workspace", prompt: "Do nothing."
+    }});
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("WORKSPACE_MISMATCH");
   });
 
   it("documents git_diff pagination with its output field names", async () => {
@@ -205,7 +248,7 @@ describe("MCP tools over Streamable HTTP", () => {
     const summary = structuredJsonOf<{ records: { taskId: string }[] }>(
       await client.callTool({ name: "execution_summary", arguments: {} })
     );
-    expect(summary.records[0].taskId).toBe("c2c_test1");
+    expect(summary.records.map((record) => record.taskId)).toContain("c2c_test1");
 
     const status = structuredJsonOf<{ available: boolean; tests: string; outputAvailable: boolean; outputId: number | null }>(
       await client.callTool({ name: "test_status", arguments: {} })
