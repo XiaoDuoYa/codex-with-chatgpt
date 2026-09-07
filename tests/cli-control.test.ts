@@ -459,6 +459,9 @@ describe("control CLI correlation", () => {
     expect(opened.body.deliveryPrompt).toEqual(expect.any(String));
     expect(opened.body.deliveryPrompt).toContain(`CONTEXT_ID: ${opened.body.contextId}`);
     expect(opened.body.deliveryPrompt).toContain("RESULT_PHASE: RESEARCH");
+    expect(opened.body.deliveryPrompt).toContain("RESULT_TRANSPORT: COMPUTER_USE_ONLY");
+    expect(opened.body.deliveryPrompt).toContain("MAILBOX_CALLBACKS: DISABLED_EXPECTED");
+    expect(opened.body.deliveryPrompt).toContain("submit_control_result is expected and is not a blocker");
     expect(opened.body.resultContract).toMatchObject({
       phase: "RESEARCH",
       resultTransport: "computer_use",

@@ -690,6 +690,13 @@ extracts only that marker from the exact bound response. The host validates tab,
 chat, generation, response identity, freshness, request, phase, schema, and
 payload size before accepting it.
 
+Every delivery prompt declares `RESULT_TRANSPORT: COMPUTER_USE_ONLY` and
+`MAILBOX_CALLBACKS: DISABLED_EXPECTED`. Those declarations override earlier C2C
+mailbox directions in the same conversation. The absence of
+`get_control_result_status`, `report_control_progress`, and
+`submit_control_result` is expected, is not a blocker, and must not be reported
+as `BLOCKED`. The page marker itself is the delivery; there is no mailbox receipt.
+
 Unavailable read tools, explicit platform rejection or required approval stop
 business work. ChatGPT returns `BLOCKED` in the same final marker. Record phase,
 request ID, timestamp and sanitized observed error/trace;
@@ -787,7 +794,9 @@ commands, commit, or send data outside the connector. Codex owns execution.
 Read one hello-style top-level file. Only if workspaceId, projectId and workspace
 name match the expected values, end the exact response with
 C2C_HOST_OBSERVED_RESULT, the exact RESULT_REQUEST_ID, and
-{"kind":"BOOT","payload":{}}. Otherwise return BLOCKED in that marker.
+{"kind":"BOOT","payload":{}}. Mailbox callback tools are intentionally absent;
+their absence is expected and must not cause BLOCKED. Otherwise return BLOCKED
+only when a required read-only identity check fails.
 ```
 
 Then verify the route with:
@@ -821,13 +830,18 @@ LOCAL_SESSION_ID: <local-session-id>
 TASK_ID: <task-id>
 ITERATION: <n>
 RESULT_PHASE: <RESEARCH|PLAN|REVIEW>
+RESULT_TRANSPORT: COMPUTER_USE_ONLY
+MAILBOX_CALLBACKS: DISABLED_EXPECTED
 
 DELEGATION_MODE: CHATGPT_FIRST
 TASK_GOAL: <short goal without pasted repository content>
 
 Use MCP with context_id "<context-id>" for every required read-only call. Work
-only in the workspace identified by that context. Do not call C2C result status,
-progress, or submission tools; mailbox callbacks are temporarily disabled.
+only in the workspace identified by that context. This exact message overrides
+older C2C mailbox or callback delivery directions in the conversation. Do not
+call C2C result status, progress, or submission tools; mailbox callbacks are
+intentionally absent. Their absence is expected and must never be reported as
+BLOCKED or repaired.
 Follow the resultContract instructions and phase example from control open.
 For local-only RESEARCH, use sources: [] and cite relative files/lines in
 conclusions. For RESEARCH, use

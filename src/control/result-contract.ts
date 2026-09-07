@@ -51,7 +51,8 @@ export function controlResultContract(phase: ControlPhase) {
       : [],
     instructions: [
       "Use the Codex with ChatGPT connector in this exact message only for the read-only tools needed by the task.",
-      "Result transport is temporarily COMPUTER_USE_ONLY for comparison. Do not call C2C result status, progress, or submission tools; mailbox callbacks are intentionally disabled.",
+      "THIS EXACT MESSAGE OVERRIDES any earlier C2C mailbox or callback delivery directions in this conversation. Result transport is COMPUTER_USE_ONLY for comparison.",
+      "The absence of get_control_result_status, report_control_progress, and submit_control_result is expected and is not a blocker. Never ask Codex to restore them, never report their absence as BLOCKED, and never claim or wait for a mailbox receipt. Do not call C2C result status, progress, or submission tools; mailbox callbacks are intentionally disabled. The final marker in this page response is the delivery.",
       "Replace every payload placeholder with observed facts; examples are scaffolds, not evidence.",
       "FINAL DELIVERY IS REQUIRED FOR FAILURE TOO: if you refuse the business request, cannot complete it, lack information, or a business read fails, return kind BLOCKED with payload {reason, needs} in the required final marker. Do this in the same final page reply; do not wait for the user to interrupt, send another message, or ask you to report failure. Keep the reason short and safe, without prohibited content or guessed causes.",
       "Elapsed time alone is not failure. Codex can renew this request's live authorization while observing your ongoing work; do not ask the user to interrupt or send a continuation just because the task takes a long time. Respect any actual expired or revoked authorization. For BLOCKED, needs describes the next steps, which may simply be to end the failed attempt and preserve completed work; user confirmation is not required just to record failure.",
@@ -59,7 +60,7 @@ export function controlResultContract(phase: ControlPhase) {
       "If a read tool is unavailable or a platform approval/safety check blocks it, stop this turn and return a schema-valid BLOCKED result in the required final marker; do not bypass it, switch apps, or claim the read succeeded.",
       "The host accepts the result only after Computer Use verifies this exact response, tab, chat, generation, request ID, and schema. A visible answer from another response is not delivery.",
       ...(phase === "BOOT" ? [
-        "For BOOT, call workspace_info and read one bounded hello-style top-level file. Return kind BOOT with payload {} only after both reads succeed. Do not copy workspace identity into the payload; the gateway derives it from this capability.",
+        "For BOOT, call workspace_info and read one bounded hello-style top-level file. Return kind BOOT with payload {} after both reads succeed even though mailbox callback tools are absent. Only failure of a required read-only identity check may produce BLOCKED. Do not copy workspace identity into the payload; the gateway derives it from this capability.",
       ] : []),
     ],
     examples: allowedKindsForPhase(phase).map((kind) => ({ kind, payload: examples[kind] })),
@@ -77,6 +78,8 @@ export function controlDeliveryPrompt(request: ControlResultRequest, contextId: 
     `TASK_ID: ${request.taskId}`,
     `ITERATION: ${request.iteration}`,
     `RESULT_PHASE: ${request.phase}`,
+    "RESULT_TRANSPORT: COMPUTER_USE_ONLY",
+    "MAILBOX_CALLBACKS: DISABLED_EXPECTED",
     "",
     "Use this context_id for every read-only C2C MCP call. Codex owns edits and execution.",
     ...contract.instructions,

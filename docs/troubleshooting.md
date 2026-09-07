@@ -121,6 +121,15 @@ tools remain before starting a fresh authorized request. Restarting the Tunnel
 alone does not refresh ChatGPT's cached app metadata, and creating another
 connector is not the repair.
 
+If ChatGPT instead returns `BLOCKED` only because one of those callback tools is
+absent, the connection is not missing a tool: the page followed an obsolete
+mailbox instruction from earlier conversation context. Do not restore the
+callbacks. Finish that exact request as the observed `BLOCKED` result, then open
+a fresh request whose delivery prompt includes `RESULT_TRANSPORT:
+COMPUTER_USE_ONLY` and `MAILBOX_CALLBACKS: DISABLED_EXPECTED`. After the required
+read-only checks succeed, BOOT must return `{"kind":"BOOT","payload":{}}`; no
+mailbox receipt exists in this mode.
+
 ## `workspace_info` reports the wrong workspace
 
 Stop sending control messages. Check the local route and page lease:

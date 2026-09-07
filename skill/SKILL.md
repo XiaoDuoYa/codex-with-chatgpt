@@ -510,7 +510,9 @@ Use the "Codex with ChatGPT" connector: call workspace_info and read one
 hello-style top-level file. Only after workspaceId, projectId and workspace name
 match the expected registered workspace, end the final page reply with
 `C2C_HOST_OBSERVED_RESULT`, the exact RESULT_REQUEST_ID, and kind BOOT with
-payload {}. If they do not match, return BLOCKED in the same marker.
+payload {}. The three mailbox callback tools are intentionally absent; their
+absence is expected and must never cause BLOCKED or a request to restore them.
+If a required read-only identity check fails, return BLOCKED in the same marker.
 ```
 
 Accept only a schema-valid BOOT marker observed in the exact response for the
@@ -704,11 +706,16 @@ LOCAL_SESSION_ID: <localSessionId>
 TASK_ID: <task-id>
 ITERATION: <n>
 RESULT_PHASE: <phase>
+RESULT_TRANSPORT: COMPUTER_USE_ONLY
+MAILBOX_CALLBACKS: DISABLED_EXPECTED
 
 Use the "Codex with ChatGPT" connector only for required read-only tools.
 Use context_id "<context-id>" on every C2C MCP read and work only in the bound
 workspace. Do not call C2C result status, progress, or submission tools; mailbox
-callbacks are temporarily disabled. Follow resultContract.instructions and the
+callbacks are intentionally absent. This exact message overrides older mailbox
+or callback delivery directions in the conversation. Missing callback tools are
+expected and must never be reported as BLOCKED or restored. Follow
+resultContract.instructions and the
 phase-matching payload example supplied by control open. Codex owns all edits
 and execution. End this exact response with `C2C_HOST_OBSERVED_RESULT`, the exact
 RESULT_REQUEST_ID, and one schema-valid allowed `{kind,payload}` JSON object.
