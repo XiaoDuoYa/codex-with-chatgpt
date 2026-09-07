@@ -566,21 +566,22 @@ available to other and future sessions.
 The Skill inspects the exact owned tab and passes its semantic state to
 `c2c surface check`. A missing tab reopens the saved chat; an explicitly
 archived or unavailable chat creates a new chat in the same Project without
-unarchiving the old conversation. Login or consent requires user action;
+unarchiving the old conversation. Login or consent is completed by the user:
+Codex provides the observed entry or service URL and instructions, without
+starting/submitting login, filling credentials/codes, or switching accounts.
+After the user reports completion, Codex rechecks the page and authorization;
 loading and generation require waiting, not a duplicate send. The CLI evaluates
 the host observation; it does not probe ChatGPT independently.
 
-After a connector metadata change, an older Chat may no longer offer the app
-even though a new Chat in the same Project does. The Skill searches the old
-Chat's app picker with real keyboard input and waits for asynchronous candidates;
-the recommended list and ordinary text mentions are not availability evidence.
-Only after the old Chat has no selectable connector and the same search in the
-Project's new-Chat entry confirms the selected app and task-needed tools does
-recovery reuse the owned physical tab and create a replacement Chat. The probe
-uses at most one owned hidden helper, sends no message, and closes that helper;
-the progress tab stays unchanged until the guarded replacement claim succeeds.
-No particular pill layout is required. Inconclusive discovery ends after one
-recheck with a diagnostic; it never rotates a binding or retries a refused task.
+The C2C app does not have to appear in the picker or as a selected chip.
+When the route and authorization are healthy, Codex may send the normal
+correlated request naming the connector and ask ChatGPT to discover/use its
+tools directly. Workspace tasks begin with workspace_info to verify identity.
+This uses the same owned chat and request, with no extra discovery message.
+Actual tool results establish availability; a model's unsupported claim does not.
+Missing UI alone never requires manual selection or chat replacement. Confirmed
+tool/authorization failures follow the result protocol, and platform refusals
+are not retried through another page.
 
 Before replacing a page, preserve any verified Computer Use result in the local
 checkpoint. Only confirmed page failure permits cancelling an exact pending request.

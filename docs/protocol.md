@@ -307,7 +307,9 @@ page at each turn's start/end; a mark is not ownership evidence. Do not allocate
 another page, repeat BOOT, or retire/release the route merely because a healthy
 task finished. Independent sessions retain independent progress pages.
 
-Ordinary app discovery uses this chat's picker, not another catalog tab. Any
+For C2C, ordinary discovery may use the current chat's picker or prompt-directed
+tool discovery in the normal correlated request. A visible app selection is
+optional; do not open the catalog solely because a chip or picker entry is absent. Any
 exceptional settings or pre-send recovery probe helper is hidden, turn-local and unmarked, with its exact
 creation handle retained by the host. Close it after use/failure only after a
 fresh check confirms it remains that helper and has not been taken over. Never
@@ -357,6 +359,13 @@ or submission.
 
 The host owns browser observation and creation. The CLI cannot call the host's
 Computer Use runtime, and the Gateway cannot infer archival from a route file.
+Login is user-operated. On an authentication screen, report the observed login
+entry or relevant service URL and the required user action. Do not initiate or
+submit login, enter account identifiers/passwords/verification codes, retrieve
+saved credentials, solve CAPTCHA or switch accounts. Leave consent and permission
+prompts to the user too. After the user reports completion, recheck the exact page,
+identity and live authorization; preserve task progress without reusing expired
+capabilities. App-picker visibility alone is not an authentication failure.
 After resolving the exact `tabId`, inspect its semantic state and pass the fresh
 observation to:
 
@@ -370,8 +379,9 @@ c2c surface check --local-session <id> --tab-id <id> --generation <n> \
 | Ready composer in the exact committed chat | Resume if the mailbox has no unresolved request |
 | Exact tab missing/closed, or URL changed | Reopen the saved chat in a hidden owned candidate |
 | Explicit archived/unavailable conversation at the exact saved chat URL | Create a new chat in the same owned tab from the saved Project URL, with a fresh generation |
-| Connector cannot be selected in the exact saved chat but is selectable from a new chat in the same saved Project | Create a new chat in the same owned tab from the saved Project URL, with a fresh generation |
-| Login, CAPTCHA, 2FA, consent | Request the required user action, then recheck the same page |
+| C2C picker entry or selected-app chip missing | Keep the chat; attempt the normal authorized request with prompt-directed tool discovery |
+| Explicit chat-specific tool unavailability confirmed, and same-Project replacement capability established | Resolve the request, then use guarded same-tab recovery; UI absence alone never establishes this state |
+| Login, CAPTCHA, 2FA, consent | Show the observed entry or service URL; the user completes login/consent, then the host rechecks the same page |
 | Loading/generating | Wait with bounded backoff and lease renewal |
 | Inconclusive UI or absent route | Inspect/pair; do not infer archived or deleted |
 
@@ -382,33 +392,31 @@ Omit the observed URL only for a missing tab or an inconclusive/loading probe.
 Stale tab/generation observations fail. The check is not a persistent attestation:
 the host must recheck immediately before and after each send.
 
-`connector-unavailable` needs two semantic observations. In the exact saved
-Chat, open the app picker, type the full connector name with real keyboard
-events, and wait for a matching candidate or an explicit empty result. The
-recommended list is not exhaustive, search results can arrive asynchronously,
-and ordinary text that names the connector is not selection evidence. A
-successful selection needs observed semantic evidence identifying the selected
-app and its task-needed tools. A selected-app chip, checked picker entry or
-equivalent UI can supply that evidence; a particular clickable pill/detail link
-is not mandatory. A ChatGPT text claim alone is not proof of tool availability.
+`connector-unavailable` must not be inferred from a missing picker entry,
+selected-app chip or empty search result. On a healthy authorized route, first
+allow prompt-directed discovery in the normal correlated request, as described
+in "Result delivery preflight". Successful tool use keeps the original chat
+regardless of the UI. A model-only unavailable claim is an unverified report,
+not independent proof that the chat must be replaced.
 
 Before probing a different composer, inspect the current control request. Do not
 probe/rotate while it is generating or unresolved; first consume any durable
-result and preserve progress. For an idle, confirmed old-chat selection failure,
+result and preserve progress. Only after explicit chat-specific tool
+unavailability is confirmed independently of picker visibility,
 the host may create at most one hidden turn-local helper at the saved Project URL
 to inspect its new-Chat composer. Retain its exact creation handle. Do not claim
 it as a session page, send a message or deliver any capability to it. Reuse the
 same semantic search, then close only this owned helper after a fresh ownership
 check, also on failure. Never navigate the old progress tab to obtain this proof.
 
-Use one completed search per composer and at most one recheck for delayed or
-ambiguous results. If still inconclusive, return `unknown` with a diagnostic and
-end this discovery attempt; do not keep inspecting indefinitely. This bound is
-for pre-send discovery, not a generation deadline. Only confirmed absence in the
-old Chat plus availability in the same Project's new composer allows
-`connector-unavailable`. Re-resolve the old exact tab, URL, generation and active
-request immediately before reporting it. No business request is sent during the
-probe, and this flow must never retry or route around a platform-refused task.
+Use at most one recheck for ambiguous helper observations. If still inconclusive,
+end the recovery inspection with a diagnostic and preserve the original route.
+A new composer's picker can corroborate availability but cannot by itself prove
+the old chat is broken. Only confirmed chat-specific failure plus established
+same-Project replacement capability allows `connector-unavailable`. Re-resolve
+the old exact tab, URL, generation and active request before reporting it.
+No message is sent in the helper. This flow never retries or routes around a
+platform-refused task; a discovery inspection bound is not a generation deadline.
 
 The decision also returns `tabAction`: `keep` retains the exact tab,
 `navigate-owned` rotates its chat in place, `create` allocates one hidden
@@ -706,12 +714,25 @@ registered while the active result transport is `computer_use`.
 
 ## Result delivery preflight
 
-Machine health, read-tool availability, a successful BOOT read, and accepted
-result delivery are separate. Before each control send, inspect the exact owned
-chat and verify its URL. Select the existing C2C connector only when read-only
-workspace tools are needed, and verify selection survives filling the composer.
-A previous message's chip or successful call does not establish current
-selection. Do not open another chat or connector.
+Machine health, tool availability, a successful read and accepted result delivery
+are separate. Before sending, verify the exact owned chat URL and authorization.
+A visible C2C chip or picker entry is optional, not a dispatch prerequisite.
+If available, the host may select the existing connector for convenience;
+absence or loss of that visual selection does not require manual intervention.
+
+Send the normal correlated request once, naming "Codex with ChatGPT" and asking
+ChatGPT to discover and call its available C2C tools with the supplied context_id.
+For workspace tasks, request workspace_info first and verify the expected
+workspace/project identity before further reads. Add this to the existing
+BOOT/task question, not as a second message or a repeated BOOT. A healthy
+connection with unknown UI visibility permits this bounded discovery; known
+authorization failures do not. Web-only work needs no connector read.
+
+Actual tool invocation and its returned result establish read capability, not
+a chip or a model's unsupported claim. Record model-only reports as unverified.
+Use the correlated Computer Use result for completion. If required tools cannot
+be discovered/called, return BLOCKED under the same result contract. Do not
+retry a platform refusal, switch accounts/apps/chats or weaken authorization.
 
 `control open --json` returns a ready-to-send `deliveryPrompt` containing the
 exact correlation, all `resultContract.instructions`, and phase examples.

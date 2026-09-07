@@ -1,10 +1,9 @@
 ---
 name: codex-with-chatgpt
-description: >
-  Use an isolated ChatGPT Project chat as the first-choice partner for research,
-  bounded workspace analysis, planning, synthesis, and review in Codex coding
-  tasks through the machine-wide C2C connector. Also use for C2C setup and
-  diagnostics; simple local status checks and execution stay local.
+description: >-
+  Connect or diagnose C2C, or use a ChatGPT Project for research, planning, or
+  review when ChatGPT collaboration is requested or the task needs a verified
+  capability available through that connection. Ordinary local work stays local.
 ---
 
 # Codex with ChatGPT
@@ -12,6 +11,11 @@ description: >
 ChatGPT handles evidence-backed read-only thinking; Codex prepares missing
 evidence, edits files, runs commands/tests, and verifies execution. Install once
 globally and route from the trusted workspace, not from the foreground tab.
+
+Choose C2C for requested ChatGPT collaboration or a specific needed capability
+verified in that connection. Research, planning, or review alone does not require
+opening ChatGPT. A local task can proceed with available local tools; preserve
+all authorization, identity, scope, and result-delivery checks when using C2C.
 
 ## Entrypoint and references
 
@@ -120,6 +124,27 @@ request/tab/generation; after partial local failure replay that idempotent commi
 `session set` cannot establish a route. Do not repeat BOOT on a healthy committed
 route. Retirement discards a session; it is not ordinary recovery.
 
+## C2C availability without a visible app selection
+
+For the already configured C2C connector, UI selection is optional during
+preflight and recovery. This rule governs those checks in the protocol references.
+A missing picker entry, chip or delayed app list is not a known capability gap
+and must not block dispatch, require manual selection, or rotate the chat.
+
+On a healthy exact owned page with valid registration/authorization, send the
+normal correlated request once. Name "Codex with ChatGPT" and ask ChatGPT to
+discover and use its available C2C tools with the supplied context_id. For a
+workspace task, start with workspace_info and verify the expected identity
+before reading further. Include this check in the existing BOOT/task request;
+do not add another prompt, repeat BOOT on a healthy route, or paste local data.
+
+If the app is visibly selectable, selecting it is a convenience, not a gate.
+Judge availability by an actual task-scoped tool invocation and its result.
+A model's "I can use the plugin" claim alone is unverified. If tools are actually
+unavailable, return BLOCKED through the existing result contract. Preserve
+platform consent/refusals and all result correlation checks; do not resend or
+switch chats to bypass them. Third-party account and operation grants still apply.
+
 ## Normal control turn
 
 1. Reuse the resolved session and committed surface; check the exact page and
@@ -173,6 +198,14 @@ Recovery is session-local and bounded by the protocol.
 Do not bypass platform blocks through reconnects, account/model/app switching or
 disguised effects. Ask for user action only for required login, CAPTCHA, 2FA,
 consent, authorization or a meaningful missing user choice.
+
+When login is required, give the user the observed login entry or relevant
+service URL and explain what they need to complete. Login is user-operated:
+do not start or submit a login flow, enter account identifiers/passwords/codes,
+retrieve saved credentials, solve CAPTCHA, or switch accounts. Consent and
+permission prompts also remain with the user. Resume only after the user reports
+completion, then recheck the exact page, identity and authorization before
+continuing the original task. Ordinary app selection is not a login requirement.
 
 ## Third-party apps and reporting
 
