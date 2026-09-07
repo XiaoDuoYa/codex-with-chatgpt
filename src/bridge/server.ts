@@ -16,6 +16,7 @@ import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
+import { TaskManager, type TaskRunner } from "../execution/tasks.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
   const binding = namedTunnelBinding(readTunnelState(workspaceId));
@@ -40,6 +41,7 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  taskRunner?: TaskRunner;
 }
 
 export interface Bridge {
@@ -49,6 +51,7 @@ export interface Bridge {
   adminToken: string;
   authStore: AuthStore;
   pairing: PairingManager;
+  tasks: TaskManager;
   tunnel: TunnelProvider;
   getPublicBaseUrl(): string | null;
   localBaseUrl(): string;
@@ -89,6 +92,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
+  const tasks = new TaskManager(workspace, logger, opts.taskRunner);
   const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
@@ -125,7 +129,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   // ---- MCP endpoint (bearer-protected) --------------------------------------
 
-  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger }), logger);
+  const mcpHandler = createMcpHttpHandler(() => createMcpServer({ workspace, logger, tasks }), logger);
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
@@ -248,6 +252,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     adminToken,
     authStore,
     pairing,
+    tasks,
     tunnel,
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
