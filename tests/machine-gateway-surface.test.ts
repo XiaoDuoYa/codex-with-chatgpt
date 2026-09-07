@@ -243,7 +243,7 @@ describe("machine gateway surface invalidation", () => {
     expectCode(() => gateway.claimTurn(later.token, ["workspace.read"]), "STALE_BINDING_EPOCH");
   });
 
-  it("requires a real BOOT receipt and rejects host-observed or raw page evidence", () => {
+  it("accepts an exact Computer Use BOOT result and rejects raw page evidence", () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("gateway-surface-boot-receipt");
     cleanups.push(root);
@@ -290,8 +290,7 @@ describe("machine gateway surface invalidation", () => {
       responseId: "response-boot-receipt",
       state: "final",
       responseIsFinal: true,
-      reason: "callback_missing",
-      source: "host_observed",
+      delivery: "computer_use",
       terminalResult: { kind: "BOOT", payload: {} },
     });
     expect(observed).toMatchObject({
@@ -299,10 +298,72 @@ describe("machine gateway surface invalidation", () => {
       result: null,
       hostObservedResult: { provenance: "host_observed", result: { kind: "BOOT" } },
     });
+    expect(gateway.surfaceCommit(identity, candidate, {
+      bootRequestId: boot.request.requestId,
+      chatUrl: candidate.chatUrl,
+    })).toMatchObject({
+      binding: {
+        projectId: registration.projectId,
+        localSessionId: identity.localSessionId,
+        tabId: candidate.tabId,
+        lastGeneration: candidate.generation,
+        chatUrl: candidate.chatUrl,
+      },
+      session: {
+        localSessionId: identity.localSessionId,
+        surfaceGeneration: candidate.generation,
+        surfaceTabId: candidate.tabId,
+        url: candidate.chatUrl,
+      },
+    });
+  });
+
+  it("rejects a failed host observation that merely includes a BOOT-shaped result", () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("gateway-surface-failed-boot");
+    cleanups.push(root);
+    const gateway = new MachineGateway({ surfaceValidator: requireCurrentTurnSurface });
+    const registration = gateway.registerWorkspace(root);
+    const identity = { ...registration, localSessionId: "session-failed-boot" };
+    const candidate = surface(registration.projectId, identity.localSessionId, "tab-failed-boot");
+    const boot = issueBootTurn(gateway, registration, identity.localSessionId, candidate.generation, "task-failed-boot");
+    const base = {
+      tabId: candidate.tabId,
+      generation: candidate.generation,
+      observedUrl: candidate.chatUrl!,
+      observedAt: new Date().toISOString(),
+      responseToRequestId: boot.request.requestId,
+    };
+    gateway.observeControlPage(identity, boot.request.requestId, {
+      taskId: "task-failed-boot", iteration: 0, phase: "BOOT",
+    }, { ...base, observationSequence: 1, state: "send_attempted" });
+    gateway.observeControlPage(identity, boot.request.requestId, {
+      taskId: "task-failed-boot", iteration: 0, phase: "BOOT",
+    }, { ...base, observationSequence: 2, state: "sent" });
+    gateway.observeControlPage(identity, boot.request.requestId, {
+      taskId: "task-failed-boot", iteration: 0, phase: "BOOT",
+    }, { ...base, observationSequence: 3, responseId: "response-failed-boot", state: "response_created" });
+    const failed = gateway.observeControlPage(identity, boot.request.requestId, {
+      taskId: "task-failed-boot", iteration: 0, phase: "BOOT",
+    }, {
+      ...base,
+      observationSequence: 4,
+      responseId: "response-failed-boot",
+      state: "final",
+      responseIsFinal: true,
+      reason: "callback_missing",
+      source: "host_observed",
+      terminalResult: { kind: "BOOT", payload: {} },
+    });
+    expect(failed).toMatchObject({
+      status: "cancelled",
+      hostFailure: { reason: "callback_missing" },
+      hostObservedResult: { result: { kind: "BOOT" } },
+    });
     expect(() => gateway.surfaceCommit(identity, candidate, {
       bootRequestId: boot.request.requestId,
       chatUrl: candidate.chatUrl,
-    })).toThrow(/successful BOOT result received through MCP/);
+    })).toThrow(/active result transport/);
   });
 
   it("revokes a context when its surface is released", () => {

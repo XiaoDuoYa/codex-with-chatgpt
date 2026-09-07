@@ -16,9 +16,10 @@ describe("control result prompt contract", () => {
     const contract = controlResultContract(phase);
     expect(contract.requiredTools).toEqual(
       phase === "BOOT"
-        ? ["workspace_info", "read_file", "submit_control_result"]
-        : ["submit_control_result"],
+        ? ["workspace_info", "read_file"]
+        : [],
     );
+    expect(contract.resultTransport).toBe("computer_use");
     expect(contract.examples.map((example) => example.kind)).toEqual(allowedKindsForPhase(phase));
     for (const example of contract.examples) {
       expect(parseControlResultSubmission(example)).toMatchObject(example);
@@ -57,6 +58,8 @@ describe("control result prompt contract", () => {
     expect(JSON.parse(prompt.split("\n").at(-1)!)).toEqual(contract.examples);
     expect(contract.examples.some((example) => example.kind === "BLOCKED")).toBe(true);
     expect(prompt).toContain("C2C_HOST_OBSERVED_RESULT");
+    expect(prompt).toContain("COMPUTER_USE_ONLY");
+    expect(prompt).toContain("mailbox callbacks are intentionally disabled");
     expect(prompt).toContain(request.requestId);
   });
 

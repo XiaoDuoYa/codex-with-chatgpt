@@ -35,11 +35,14 @@ function planPayload() {
   };
 }
 
-async function connectedClient(gateway: MachineGateway): Promise<{
+async function connectedClient(
+  gateway: MachineGateway,
+  resultTransport: "computer_use" | "mailbox" = "computer_use",
+): Promise<{
   client: Client;
   close: () => Promise<void>;
 }> {
-  const server = createMcpServer({ gateway, logger: nullLogger });
+  const server = createMcpServer({ gateway, logger: nullLogger }, { resultTransport });
   const client = new Client({ name: "machine-mcp-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -60,6 +63,22 @@ afterEach(() => {
 });
 
 describe("machine MCP capability correlation", () => {
+  it("hides mailbox callback tools while Computer Use is the active result transport", async () => {
+    cleanups.push(isolateStateDir());
+    const connection = await connectedClient(new MachineGateway());
+    try {
+      const { tools } = await connection.client.listTools();
+      expect(tools.map((tool) => tool.name)).not.toEqual(expect.arrayContaining([
+        "get_control_result_status",
+        "report_control_progress",
+        "submit_control_result",
+      ]));
+      expect(tools.some((tool) => tool.name === "workspace_info")).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("delivers BOOT through the public MCP schema before committing the exact candidate", async () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("mcp-boot-receipt");
@@ -87,7 +106,7 @@ describe("machine MCP capability correlation", () => {
       compactionEpoch: 0,
       generation: lease.generation,
     });
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const receipt = await connection.client.callTool({
         name: "submit_control_result",
@@ -111,6 +130,49 @@ describe("machine MCP capability correlation", () => {
     }
   });
 
+  it("commits an exact candidate after a verified Computer Use BOOT result", () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("computer-use-boot");
+    cleanups.push(root);
+    const gateway = new MachineGateway({ surfaceValidator: requireCurrentTurnSurface });
+    const identity = { ...gateway.registerWorkspace(root), localSessionId: "session-computer-use-boot" };
+    const projectUrl = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
+    const chatUrl = projectUrl.replace("/project", "/c/computer-use-boot");
+    const lease = gateway.surfaceClaim(identity, {
+      browserId: "iab", surfaceId: "chatgpt", tabId: "tab-computer-use-boot",
+      projectUrl, chatUrl, projectSelection: projectSelection(projectUrl),
+    });
+    const turn = { taskId: "boot-computer-use", iteration: 0, phase: "BOOT" as const };
+    const { request } = gateway.openControlResultRequest(identity, turn);
+    const page = {
+      tabId: lease.tabId,
+      generation: lease.generation,
+      observedUrl: chatUrl,
+      observedAt: new Date().toISOString(),
+      responseToRequestId: request.requestId,
+    };
+    gateway.observeControlPage(identity, request.requestId, turn, {
+      ...page, observationSequence: 1, state: "send_attempted",
+    });
+    gateway.observeControlPage(identity, request.requestId, turn, {
+      ...page, observationSequence: 2, state: "sent",
+    });
+    gateway.observeControlPage(identity, request.requestId, turn, {
+      ...page, observationSequence: 3, state: "response_created", responseId: "response-computer-use-boot",
+    });
+    expect(gateway.observeControlPage(identity, request.requestId, turn, {
+      ...page, observationSequence: 4, state: "final", responseId: "response-computer-use-boot",
+      responseIsFinal: true, delivery: "computer_use", terminalResult: { kind: "BOOT", payload: {} },
+    })).toMatchObject({
+      status: "cancelled",
+      hostObservedResult: { result: { kind: "BOOT" } },
+    });
+    expect(gateway.surfaceCommit(identity, lease, {
+      bootRequestId: request.requestId,
+      connectorName: "Codex with ChatGPT",
+    })).toMatchObject({ binding: { tabId: lease.tabId, chatUrl } });
+  });
+
   it("derives optional progress correlation from context and rejects legacy overrides", async () => {
     cleanups.push(isolateStateDir());
     const root = makeTmpDir("mcp-progress-binding");
@@ -123,7 +185,7 @@ describe("machine MCP capability correlation", () => {
       ...registration, ...turn, requestId: request.requestId, scopes: ["c2c.result.write"],
       compactionEpoch: 0, generation: 1,
     });
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const reported = await connection.client.callTool({
         name: "report_control_progress",
@@ -154,7 +216,7 @@ describe("machine MCP capability correlation", () => {
       ...registration, ...turn, requestId: request.requestId, scopes: ["c2c.result.write"],
       compactionEpoch: 0, generation: 1,
     });
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const receipt = await connection.client.callTool({
         name: "submit_control_result",
@@ -183,7 +245,7 @@ describe("machine MCP capability correlation", () => {
       compactionEpoch: 0, generation: 1,
     });
     gateway.revokeTurn(grant.token);
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const reply = await connection.client.callTool({
         name: "submit_control_result",
@@ -199,7 +261,7 @@ describe("machine MCP capability correlation", () => {
     } finally { await connection.close(); }
   });
 
-  it("keeps result tools listed across consecutive local-only turns in two workspaces", async () => {
+  it("keeps dormant mailbox callbacks testable without exposing them in production", async () => {
     cleanups.push(isolateStateDir());
     const gateway = new MachineGateway();
     const registrations = [0, 1].map((index) => {
@@ -208,7 +270,7 @@ describe("machine MCP capability correlation", () => {
       write(root, "fixture.txt", `marker-${index}\n17\n25\n`);
       return gateway.registerWorkspace(root);
     });
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       for (const iteration of [0, 1]) {
         const { tools } = await connection.client.listTools();
@@ -264,7 +326,7 @@ describe("machine MCP capability correlation", () => {
   it("documents git_diff pagination with its output field names", async () => {
     cleanups.push(isolateStateDir());
     const gateway = new MachineGateway();
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const { tools } = await connection.client.listTools();
       const description = tools.find((tool) => tool.name === "git_diff")?.description;
@@ -307,7 +369,7 @@ describe("machine MCP capability correlation", () => {
       outputAvailable: false,
     });
 
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const result = await connection.client.callTool({
         name: "execution_summary",
@@ -353,7 +415,7 @@ describe("machine MCP capability correlation", () => {
       generation: 1,
       ttlMs: 60_000,
     });
-    const connection = await connectedClient(gateway);
+    const connection = await connectedClient(gateway, "mailbox");
     try {
       const status = await connection.client.callTool({
         name: "get_control_result_status",

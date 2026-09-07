@@ -7,7 +7,7 @@
 Use ChatGPT web as the first-choice research, analysis, planning, synthesis, and
 review partner for local Codex sessions. When the ChatGPT page or its read-only
 MCP tools can answer a task, C2C delegates it there and returns a concise,
-structured result through the machine mailbox. Codex retains all workspace
+structured result through exact Computer Use page observation. Codex retains all workspace
 writes, shell execution, tests, git operations, and recovery locally.
 
 ## ChatGPT-first delegation
@@ -36,8 +36,9 @@ evidence; ChatGPT then researches, plans, or reviews the supported read-only
 question; Codex finally applies changes and verifies the result. A known
 capability gap is not sent merely to produce a predictable `BLOCKED` response.
 
-Web Search is a built-in ChatGPT capability rather than a Connector MCP tool;
-the resulting answer still returns through `submit_control_result`. Control
+Web Search is a built-in ChatGPT capability rather than a Connector MCP tool.
+In the current comparison mode, the resulting answer is collected from the
+exact bound response by Computer Use. Control
 prompts contain only the task goal and correlation fields. They never paste
 repository contents, diffs, logs, credentials, or full command output.
 
@@ -327,9 +328,9 @@ Open your actual project in Codex desktop. In a new session, ask:
 ```text
 Use $codex-with-chatgpt to pair this workspace and verify local reads and
 structured result delivery. Run two consecutive read-only questions in this
-session's dedicated ChatGPT chat. Require each exact mailbox request to be
-received and acknowledged; do not edit business code or treat page text as a
-successful result.
+session's dedicated ChatGPT chat. Require Computer Use to validate each exact
+response marker against its request and page identity; do not edit business
+code or accept uncorrelated page text.
 ```
 
 The Skill registers the current workspace, creates its ChatGPT Project on
@@ -345,13 +346,12 @@ Acceptance has three separate levels:
 | --- | --- |
 | Installed and connected | Global Skill matches; machine ready; doctor passes |
 | Workspace reads | BOOT returns the expected workspace/project IDs and actual local evidence |
-| Result delivery | Each exact request reaches `received` then `acknowledged`, including a later message in the same chat |
+| Result delivery | Computer Use validates the exact tab/chat/generation/response and its schema-bound result marker |
 
-There are historical successful live returns, but the latest acceptance also
-found `submit_control_result` unavailable in a later ChatGPT message. The local
-format fix and automated tests do not resolve or certify that platform-side
-availability. If the tool is unavailable or approval is blocked, stop and
-report it; do not bypass the check or accept browser prose as a receipt.
+Mailbox callback code and historical live-return records are retained for a
+later comparison. Production currently does not register those callback tools.
+The page marker is accepted only after exact Computer Use correlation and schema
+validation; arbitrary browser prose is never accepted.
 See [current verification boundaries](docs/issue-log.md#最新回传验收修复).
 
 ### Use another project or session
@@ -458,7 +458,7 @@ the machine-wide capacity of 100 active session/page leases.
 | Installer requires clean Git source | Use a Git clone and preserve your changes before installing; a ZIP download is insufficient |
 | Tunnel absent in ChatGPT | Verify the selected account/workspace, tunnel association, and Read + Use permissions |
 | Machine not ready | Run `c2c machine doctor --no-fix --json`; check network/key permissions and the one managed client |
-| Reads work but no mailbox result | In the existing app choose Manage > Refresh, then check current-message callback availability; do not create another connector, claim full success, or bypass platform approval |
+| Final response is not detected | Verify the exact owned tab, chat, generation, response id, request id, and `C2C_HOST_OBSERVED_RESULT` marker; do not inspect another page or resend while generation is active |
 
 For controlled repair and exact-session recovery, see [Troubleshooting](docs/troubleshooting.md).
 
@@ -509,17 +509,16 @@ RESEARCH -> INIT -> PLAN -> EXECUTED -> REVIEW -> DONE
 ```
 
 Codex sends only small control messages to the exact owned chat. It never pastes
-file contents, diffs, or logs into ChatGPT. ChatGPT reads data through MCP and
-returns a schema-bound result to the protected machine mailbox:
+file contents, diffs, or logs into ChatGPT. ChatGPT reads bounded data through
+read-only MCP tools and ends the exact response with a schema-bound
+`C2C_HOST_OBSERVED_RESULT` marker. Computer Use verifies the exact tab, chat,
+generation, response id, request id, phase and payload schema before advancing
+the session.
 
-- `report_control_progress` is forward-only progress.
-- `submit_control_result` accepts one result for one exact
-  `RESULT_REQUEST_ID` and correlation tuple.
-- Codex waits on that request, acknowledges it, and then advances the session.
-
-The protected machine mailbox is the only result transport. A visible browser
-reply is never accepted as a result, including when it is the latest message in
-the owned chat.
+This is a temporary comparison mode. Mailbox callback implementation remains in
+the source tree, but `get_control_result_status`, `report_control_progress`, and
+`submit_control_result` are not registered by the production MCP server and
+`c2c.result.write` is not granted by `control open`.
 
 ## Browser ownership
 
@@ -534,7 +533,7 @@ For each session:
 2. Resolve the session route and current surface lease.
 3. Open or return to only that session's saved chat URL.
 4. Include `CONTEXT_ID` and `RESULT_REQUEST_ID` in each control prompt.
-5. Wait for the exact mailbox request before sending the next control message.
+5. Wait for the exact Computer Use result before sending the next control message.
 
 Computer Use drives each owned in-app browser page through stable URLs and
 semantic DOM/browser APIs, always using the exact owned `tabId`. These CUA calls
@@ -559,7 +558,7 @@ again. Do not close or repurpose the owned standby tab when a turn ends.
 `surface release` only ends the current lease and keeps the durable session
 route for later reuse. When a local Codex session is permanently discarded,
 run `c2c surface retire --local-session <id> --json`. Retirement revokes that
-session's contexts, terminates its active mailbox request, and removes its page
+session's contexts, terminates its active control request, and removes its page
 binding and checkout route. The workspace's ChatGPT Project binding remains
 available to other and future sessions.
 
@@ -572,9 +571,8 @@ unarchiving the old conversation. Login or consent requires user action;
 loading and generation require waiting, not a duplicate send. The CLI evaluates
 the host observation; it does not probe ChatGPT independently.
 
-Before replacing a page, consume any received mailbox result into the local
-checkpoint, then acknowledge it. Received results survive the request TTL until
-ack. Only confirmed page failure permits cancelling an exact pending request.
+Before replacing a page, preserve any verified Computer Use result in the local
+checkpoint. Only confirmed page failure permits cancelling an exact pending request.
 The Gateway blocks rotation while work is unresolved. Recovery preserves task
 progress, verifies one replacement through BOOT, and fences stale generations.
 It never uses session retirement to recover a page. See [the recovery protocol](docs/protocol.md#page-recovery).
@@ -585,14 +583,14 @@ require selection and verification in the page.
 
 ## Security properties
 
-- MCP workspace tools are read-only. Result writes are bounded by a live,
-  schema-checked request and capability.
+- MCP workspace tools are read-only. Computer Use results are bounded by a live,
+  schema-checked request and exact page/response identity.
 - Workspace paths are resolved and contained under the registered root. Symlink
   and traversal escapes are rejected.
 - Capabilities and activity leases are short-lived and bound to session, task,
   iteration, phase, compaction epoch, page generation, and scopes.
-- A completion fence drains active leases before mailbox completion. A failed
-  mailbox write aborts completion so the result can be retried.
+- The retained mailbox completion fence is dormant in the current production
+  transport and remains covered by tests for later comparison.
 - The machine lifetime record is owner-checked by machine id, boot epoch, pid,
   and exact runtime data. A second process cannot silently become the broker.
 - Secrets (runtime key, admin token, raw capability) stay in protected machine

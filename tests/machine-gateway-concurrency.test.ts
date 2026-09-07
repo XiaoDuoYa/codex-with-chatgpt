@@ -37,7 +37,7 @@ async function connectedClient(gateway: MachineGatewayServer["gateway"]): Promis
   client: Client;
   close: () => Promise<void>;
 }> {
-  const server = createMcpServer({ gateway, logger: nullLogger });
+  const server = createMcpServer({ gateway, logger: nullLogger }, { resultTransport: "mailbox" });
   const client = new Client({ name: "machine-concurrency-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);

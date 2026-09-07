@@ -66,6 +66,13 @@ const finalHostFailureSchema = responseIdentity.extend({
   errorCode: failureCodeSchema,
 }).strict();
 
+const finalComputerUseResultSchema = responseIdentity.extend({
+  state: z.literal("final"),
+  responseIsFinal: z.literal(true),
+  delivery: z.literal("computer_use"),
+  terminalResult: controlResultSubmissionSchema,
+}).strict();
+
 const responseStartFailureSchema = observedPageIdentity.extend({
   state: z.literal("response_start_failed"),
   reason: z.literal("response_start_failed"),
@@ -103,24 +110,26 @@ export const controlHostObservedResultSchema = z.object({
   result: controlResultSubmissionSchema,
 }).strict();
 
-const finalTerminalObservationSchema = finalHostFailureSchema.extend({
+const finalFailedObservationSchema = finalHostFailureSchema.extend({
   terminalResult: controlResultSubmissionSchema.optional(),
 }).strict();
 
-export const controlTerminalObservationSchema = z.discriminatedUnion("state", [
-  finalTerminalObservationSchema,
+export const controlTerminalObservationSchema = z.union([
+  finalComputerUseResultSchema,
+  finalFailedObservationSchema,
   responseStartFailureSchema,
   pageLostHostFailureSchema,
   authorityInvalidHostFailureSchema,
 ]);
 
-export const controlPageObservationSchema = z.discriminatedUnion("state", [
+export const controlPageObservationSchema = z.union([
   observedPageIdentity.extend({ state: z.literal("send_attempted") }).strict(),
   observedPageIdentity.extend({ state: z.literal("sent") }).strict(),
   observedPageIdentity.extend({ state: z.literal("unknown") }).strict(),
   responseIdentity.extend({ state: z.literal("response_created") }).strict(),
   responseIdentity.extend({ state: z.literal("generating") }).strict(),
-  finalTerminalObservationSchema,
+  finalComputerUseResultSchema,
+  finalFailedObservationSchema,
   responseStartFailureSchema,
   pageLostHostFailureSchema,
   authorityInvalidHostFailureSchema,
@@ -227,7 +236,7 @@ export function controlWaitPolicy(status: ControlStatus, now = Date.now()) {
   const hostObserved = status.status === "cancelled" && status.hostObservedResult !== undefined;
   const outcome = received
     ? status.result?.kind === "BLOCKED" ? "blocked" : "delivered"
-    : hostObserved && status.hostObservedResult?.result.kind === "BLOCKED" ? "blocked"
+    : hostObserved ? status.hostObservedResult?.result.kind === "BLOCKED" ? "blocked" : "delivered"
     : status.status !== "pending" ? "terminal" : "pending";
   const observedState = status.pageObservation?.lastDefinitive?.state;
   const pendingAction = observedState === undefined
@@ -239,7 +248,7 @@ export function controlWaitPolicy(status: ControlStatus, now = Date.now()) {
         : "inspect_exact_response";
   return {
     outcome,
-    delivery: received ? "mcp" : hostObserved ? "host_observed" : "none",
+    delivery: received ? "mcp" : hostObserved ? "computer_use" : "none",
     nextAction: received
       ? status.status === "received" ? "persist_then_ack" : "stop"
       : outcome === "pending" ? pendingAction : "stop",

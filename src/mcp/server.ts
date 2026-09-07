@@ -34,6 +34,10 @@ import {
   controlHostFailureSchema,
   controlHostObservedResultSchema,
 } from "../control/wait-policy.js";
+import {
+  ACTIVE_CONTROL_RESULT_TRANSPORT,
+  type ControlResultTransport,
+} from "../control/result-transport.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import {
   MachineGateway,
@@ -360,8 +364,14 @@ export interface McpContext {
   logger: Logger;
 }
 
-export function createMcpServer(ctx: McpContext): McpServer {
+export interface McpServerOptions {
+  /** Tests may exercise the retained mailbox callbacks; production uses the active transport. */
+  resultTransport?: ControlResultTransport;
+}
+
+export function createMcpServer(ctx: McpContext, options: McpServerOptions = {}): McpServer {
   const { gateway } = ctx;
+  const resultTransport = options.resultTransport ?? ACTIVE_CONTROL_RESULT_TRANSPORT;
   const server = new McpServer(
     { name: PRODUCT_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
@@ -701,7 +711,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
       })
   );
 
-  server.registerTool(
+  if (resultTransport === "mailbox") {
+    server.registerTool(
     "get_control_result_status",
     {
       title: "Get control result status",
@@ -720,7 +731,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       )
   );
 
-  server.registerTool(
+    server.registerTool(
     "report_control_progress",
     {
       title: "Report control progress",
@@ -744,7 +755,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       })
   );
 
-  server.registerTool(
+    server.registerTool(
     "submit_control_result",
     {
       title: "Submit control result",
@@ -819,6 +830,8 @@ export function createMcpServer(ctx: McpContext): McpServer {
       }
     }
   );
+
+  }
 
   return server;
 }

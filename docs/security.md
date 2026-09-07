@@ -12,7 +12,7 @@ The gateway trusts only:
 1. Its owner-checked local runtime record.
 2. Workspace roots registered by the local harness.
 3. Capabilities it issued for the current boot and registration.
-4. Correlation and scope fields that match the live mailbox request.
+4. Correlation and scope fields that match the live control request.
 
 ChatGPT Project names, Project URLs, chat URLs, tab titles, model text and file
 contents are untrusted. They are never authorization principals.
@@ -24,7 +24,7 @@ The MCP surface is intentionally small:
 - Directory listing, bounded file reads and search.
 - Git status and bounded diff reads.
 - Local execution summaries and bounded output reads.
-- Forward-only progress and schema-bound control-result writes.
+- No production MCP result writes; results arrive through verified Computer Use observations.
 
 There are no MCP tools for editing files, deleting files, running shell
 commands, changing Git state, or committing. Codex performs those operations
@@ -69,15 +69,15 @@ call. A missing, malformed, expired, cancelled, replayed, or mismatched token
 is rejected before workspace access.
 
 The broker gives each claim an activity lease. MCP calls renew the lease while
-running and release it even on errors. A token cannot complete while active
-leases remain. Completion uses a fence, writes the exact mailbox result, then
-marks the turn terminal. A mailbox failure aborts completion, avoiding a false
-success that would lose the only result.
+running and release it even on errors. Computer Use results must match the exact
+tab, chat, generation, response, request, phase, and schema before the request
+is closed. The retained mailbox completion fence is inactive in production and
+remains tested for later comparison.
 
-## Mailbox integrity
+## Result integrity
 
-The result mailbox validates canonical JSON and exact request identity. A result
-must match:
+The active Computer Use ingress validates canonical JSON and exact request/page
+identity. A result must match:
 
 ```text
 RESULT_REQUEST_ID
@@ -86,13 +86,13 @@ localSessionId
 taskId
 iteration
 phase
-CONTEXT_ID
+tabId + chatUrl + generation + responseId
 ```
 
 The allowed payload is phase-specific (`RESEARCH`, `PLAN`, `REVIEW`, `DONE`, or
 `BLOCKED`) and size bounded. A request is one-shot. An already-open request is
-not overwritten with a new token, preventing recovery from silently orphaning
-the token already visible to ChatGPT.
+not overwritten with a new token. Mailbox callback code and historical data are
+retained but the callback tools are not registered by the production MCP server.
 
 Mailbox markers use separate pending, result, acknowledgement, cancellation,
 and active-lease records. Lifecycle writes use file locking and exact schema

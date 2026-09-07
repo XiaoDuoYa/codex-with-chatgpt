@@ -211,7 +211,10 @@ describe("state-driven mailbox waiting", () => {
     expect(f.gateway.getControlResultStatus(otherIdentity, other.request.requestId, correlation))
       .toMatchObject({ status: "expired", request: { expiresAt: other.request.expiresAt } });
 
-    const server = createMcpServer({ gateway: f.gateway, logger: nullLogger });
+    const server = createMcpServer(
+      { gateway: f.gateway, logger: nullLogger },
+      { resultTransport: "mailbox" },
+    );
     const client = new Client({ name: "long-task-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -554,7 +557,43 @@ describe("exact response terminal observations", () => {
         result: { kind: "BLOCKED", payload: { reason: "The final callback was unavailable" } },
       },
     });
-    expect(controlWaitPolicy(status)).toMatchObject({ nextAction: "stop", delivery: "host_observed" });
+    expect(controlWaitPolicy(status)).toMatchObject({ nextAction: "stop", delivery: "computer_use" });
+    expect(f.gateway.turnStatus(f.grant.token).status).toBe("revoked");
+  });
+
+  it("accepts a verified Computer Use result as the active delivery path", () => {
+    const planCorrelation = { taskId: "computer-use-plan", iteration: 0, phase: "PLAN" as const };
+    const f = fixture(
+      "session-computer-use",
+      new MachineGateway({ surfaceValidator: requireCurrentTurnSurface }),
+      planCorrelation,
+    );
+    const { reason: _reason, source: _source, tool: _tool, errorCode: _errorCode, ...response } = f.observation;
+    const status = f.gateway.observeControlPage(f.identity, f.request.requestId, planCorrelation, {
+      ...response,
+      delivery: "computer_use",
+      terminalResult: {
+        kind: "PLAN",
+        payload: {
+          goal: "Compare Computer Use delivery",
+          rationale: "The exact owned response contains a schema-valid result marker.",
+          actions: [{ change: "Observe the bound response", why: "Avoid the MCP callback" }],
+          tests: ["Verify exact response correlation"],
+          successCriteria: ["The host reports Computer Use delivery"],
+        },
+      },
+    });
+    expect(status).toMatchObject({
+      status: "cancelled",
+      result: null,
+      hostObservedResult: { provenance: "host_observed", result: { kind: "PLAN" } },
+    });
+    expect(status.hostFailure).toBeUndefined();
+    expect(controlWaitPolicy(status)).toMatchObject({
+      outcome: "delivered",
+      delivery: "computer_use",
+      nextAction: "stop",
+    });
     expect(f.gateway.turnStatus(f.grant.token).status).toBe("revoked");
   });
 

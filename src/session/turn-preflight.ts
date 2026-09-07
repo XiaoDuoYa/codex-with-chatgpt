@@ -52,8 +52,8 @@ export function assessPluginPreflight(
   const requested = pluginIdsSchema.parse(turn.plugins ?? []);
   const intent = pluginIntentSchema.parse(turn.pluginIntent ?? "task");
   if (intent === "identity-discovery" && (turn.phase !== "RESEARCH" || requested.length !== 1 ||
-      turn.scopes?.some((scope) => scope !== "c2c.result.write"))) {
-    throw new Error("Identity discovery requires one plugin, RESEARCH and result-only C2C scopes.");
+      (turn.scopes?.length ?? 0) !== 0)) {
+    throw new Error("Identity discovery requires one plugin, RESEARCH and no local C2C scopes.");
   }
   if (new Set(requested).size !== requested.length) throw new Error("Duplicate requested plugins.");
   if (requested.length === 0) {

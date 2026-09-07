@@ -7,7 +7,8 @@
 本项目把 ChatGPT 网页版作为本地 Codex 会话的优先研究、分析、规划、整理与审查伙伴。
 凡是 ChatGPT 页面或只读 MCP 能完成的任务，默认优先交给 ChatGPT；Codex 始终掌握
 工作区写入、命令执行、测试和 Git 操作。ChatGPT 通过 MCP 按需读取当前工作区，
-也可以使用自身的联网搜索能力，再把精简的结构化结果写回受保护的机器结果箱。
+也可以使用自身的联网搜索能力。当前对比模式由 Computer Use 从精确绑定的页面
+回复中读取并校验精简的结构化结果。
 
 ### ChatGPT-first 分派
 
@@ -27,7 +28,7 @@
 执行和验收。已知能力缺口不得为了得到可预期的 `BLOCKED` 而先行派发。
 
 网页的 Web Search 是 ChatGPT 自身能力，不是 Connector 暴露的本地 MCP 工具；
-搜索结果和其他分析结果统一通过 `submit_control_result` 回写本地。为节省本地
+搜索结果和其他分析结果统一由 Computer Use 从精确回复读取。为节省本地
 上下文，控制消息只携带任务目标和关联字段，不复制仓库内容、Diff 或日志。
 
 ## 机器级一次配置
@@ -261,7 +262,8 @@ c2c machine doctor --no-fix --json
 ```text
 请使用 $codex-with-chatgpt 配对当前工作区，验证本地读取和结构化结果回传。
 在本会话专属的 ChatGPT 对话中连续完成两轮只读问题，每轮都必须从精确关联的
-本地 mailbox 收到并确认结果。不要修改业务代码，不要把网页文字当作回传成功。
+页面回复中由 Computer Use 校验结构化标记。不要修改业务代码，也不要接受未关联的
+页面文字。
 ```
 
 Skill 会注册当前工作区，在首次配对时为它创建 ChatGPT Project，或者使用用户明确
@@ -275,12 +277,11 @@ Codex 桌面端；已有会话需要重新读取新版 Skill，而不是逐项�
 | --- | --- |
 | 已安装并连接 | 全局 Skill 匹配、机器 ready、doctor 通过 |
 | 本地读取可用 | BOOT 返回预期 workspace/project ID 和真实本地证据 |
-| 回传可用 | 每个精确请求都达到 `received` 后再 `acknowledged`，包括同一 Chat 的后续消息 |
+| 回传可用 | Computer Use 校验精确 tab/chat/generation/response 和结构化结果标记 |
 
-历史上已有真实回传成功记录，但最近验收也出现了后续 ChatGPT 消息无法调用
-`submit_control_result` 的情况。本地格式修复和自动化测试不能解决或证明网页侧工具
-可用性。工具不可用或平台授权受阻时应停止并如实报告，不能绕过检查或用页面文字
-替代回执。详见 [当前验收边界](docs/issue-log.md#最新回传验收修复)。
+mailbox 回调代码和历史真实回传记录继续保留，供后续对比；生产 MCP 当前不注册
+这些回调工具。只有经过精确页面关联和 schema 校验的结果标记才会被接受，普通页面
+文字不能替代结果。详见 [当前验收边界](docs/issue-log.md#最新回传验收修复)。
 
 ### 在其他项目或会话中使用
 
@@ -423,15 +424,13 @@ RESEARCH -> INIT -> PLAN -> EXECUTED -> REVIEW -> DONE
 ```
 
 Codex 只向精确认领的对话发送很短的控制消息，绝不把文件内容、diff 或日志粘贴
-到 ChatGPT。ChatGPT 通过 MCP 读取数据，并把结构化结果写到受保护的机器结果箱：
+到 ChatGPT。ChatGPT 通过只读 MCP 工具读取数据，并在精确回复末尾输出
+`C2C_HOST_OBSERVED_RESULT` 结构化标记。Computer Use 校验 tab、chat、generation、
+response id、request id、阶段和 payload schema 后，Codex 才推进会话。
 
-- `report_control_progress` 只能报告向前推进的进度。
-- `submit_control_result` 只能为一个精确的 `RESULT_REQUEST_ID` 和关联元组提交
-  一次结果。
-- Codex 等待该请求、确认结果，然后才推进会话。
-
-受保护的机器结果箱是唯一结果传输方式。页面中可见的回复不能作为结果，
-即使它是该会话中的最新消息也不例外。
+这是临时对比模式。mailbox 回调实现仍保留在源码中，但生产 MCP 不注册
+`get_control_result_status`、`report_control_progress` 和 `submit_control_result`，
+`control open` 也不会授予 `c2c.result.write`。
 
 ## 页面所有权
 
@@ -445,7 +444,7 @@ chat URL 和 `tabId` 精确认领页面。租约带有 generation 和 owner epoc
 2. 读取该会话的 route 和 surface lease。
 3. 只打开或返回该会话保存的 chat URL。
 4. 每条控制提示都带上 `CONTEXT_ID` 和 `RESULT_REQUEST_ID`。
-5. 等待精确的结果箱请求完成后，才能发送下一条控制消息。
+5. 等待精确的 Computer Use 结果完成后，才能发送下一条控制消息。
 
 Computer Use 通过稳定 URL 和语义化 DOM/浏览器 API 驱动每个独立的内置浏览器
 页面，并始终使用精确 `tabId`。正常操作不使用截图坐标点击；轮次结束后保留页面
@@ -454,7 +453,7 @@ Computer Use 通过稳定 URL 和语义化 DOM/浏览器 API 驱动每个独立�
 `surface release` 只结束当前租约，并保留会话路由以便下次继续使用。只有在本地
 Codex 会话被永久丢弃时，才执行
 `c2c surface retire --local-session <id> --json`。退役会撤销该会话的 context、
-结束活动结果箱请求，并删除页面绑定和 checkout 路由；工作区的 ChatGPT Project
+结束活动控制请求，并删除页面绑定和 checkout 路由；工作区的 ChatGPT Project
 绑定仍供其他会话和未来会话复用。
 
 ### 会话不可用时
@@ -464,8 +463,8 @@ Skill 检查精确标签页的语义状态，再交给 `c2c surface check` 判�
 登录或授权需要用户操作；加载和生成中只等待，不重复发送。CLI 评估宿主观察，
 本身不独立探测 ChatGPT 页面。
 
-替换前先将已收到的结果保存到本地 checkpoint，再 ack；已收到但未确认的结果
-不会随请求 TTL 消失。只有确认页面失败后，才取消精确的 pending 请求。未收敛的
+替换前先将已验证的 Computer Use 结果保存到本地 checkpoint。只有确认页面失败后，
+才取消精确的 pending 请求。未收敛的
 请求会阻止页面轮换。恢复保留任务进度，新页面通过 BOOT 后才能提交路由，旧
 generation 不能继续写回。一次恢复只自动创建一个替代页面，不使用会话退役来恢复。
 详见 [恢复协议](docs/protocol.md#page-recovery)。
@@ -475,11 +474,11 @@ generation 不能继续写回。一次恢复只自动创建一个替代页面，
 
 ## 安全边界
 
-- MCP 工作区工具全部只读；结果写入同时受活动请求和能力令牌约束。
+- MCP 工作区工具全部只读；Computer Use 结果受活动请求、精确页面/回复身份和 schema 约束。
 - 工作区路径会规范化并限制在注册根目录内，符号链接和目录穿越都会被拒绝。
 - 能力令牌和活动租约均短时有效，并绑定会话、任务、轮次、阶段、压缩纪元、页面
   generation 与 scopes。
-- 完成栅栏会先排空活动租约；结果箱写入失败时不会错误地标记完成，可以重试。
+- 保留的 mailbox 完成栅栏在当前生产传输中停用，仅继续由测试覆盖以便后续对比。
 - 机器生命周期记录同时校验 machine id、boot epoch、pid 和精确运行时数据，第二
   个进程不能悄悄成为网关。
 - 运行时密钥、管理令牌和原始能力令牌只保存在受保护的机器状态中，普通 CLI 输出

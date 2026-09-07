@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { reportControlProgress, submitControlResult } from "../src/control/mailbox.js";
+import { submitControlResult } from "../src/control/mailbox.js";
 import { readMachineRuntime } from "../src/gateway/runtime.js";
 import { Workspace } from "../src/workspace/manager.js";
 import {
@@ -211,16 +211,16 @@ describe("control CLI correlation", () => {
       result: null,
       hostFailure,
       hostObservedResult: { provenance: "host_observed", result: terminalResult },
-      wait: { delivery: "host_observed", nextAction: "stop" },
+      wait: { delivery: "computer_use", nextAction: "stop" },
     });
     const waited = runJson(["control", "wait", ...lookup, "--timeout-ms", "0"]);
-    expect(waited.command.status).toBe(1);
+    expect(waited.command.status).toBe(0);
     expect(waited.body).toMatchObject({
       status: "cancelled",
       result: null,
       hostFailure,
       hostObservedResult: { provenance: "host_observed", result: terminalResult },
-      wait: { delivery: "host_observed", nextAction: "stop" },
+      wait: { delivery: "computer_use", nextAction: "stop" },
     });
     expect(runJson(["control", "ack", ...lookup]).command.status).toBe(1);
     }, 90_000);
@@ -425,8 +425,15 @@ describe("control CLI correlation", () => {
     expect(cancelledStatus.body.status).toBe("cancelled");
   }, 60_000);
 
-  it("opens RESEARCH requests and exposes their current progress", () => {
+  it("opens RESEARCH requests with the Computer Use result contract", () => {
     claimSurface("session-research");
+    const disabledMailbox = runJson([
+      "control", "open", "-w", workspace, "--local-session", "session-research",
+      "--task", "c2c_research1", "--iteration", "0", "--phase", "RESEARCH",
+      "--scopes", "c2c.result.write",
+    ]);
+    expect(disabledMailbox.command.status).toBe(1);
+    expect(disabledMailbox.command.stdout + disabledMailbox.command.stderr).toContain("temporarily disabled");
     const opened = runJson([
       "control",
       "open",
@@ -448,12 +455,14 @@ describe("control CLI correlation", () => {
       generation: 1,
     });
     expect(opened.body.contextExpiresAt).toEqual(expect.any(String));
+    expect(opened.body.resultTransport).toBe("computer_use");
     expect(opened.body.deliveryPrompt).toEqual(expect.any(String));
     expect(opened.body.deliveryPrompt).toContain(`CONTEXT_ID: ${opened.body.contextId}`);
     expect(opened.body.deliveryPrompt).toContain("RESULT_PHASE: RESEARCH");
     expect(opened.body.resultContract).toMatchObject({
       phase: "RESEARCH",
-      requiredTools: ["submit_control_result"],
+      resultTransport: "computer_use",
+      requiredTools: [],
       examples: [
         { kind: "RESEARCH", payload: { sources: [] } },
         { kind: "BLOCKED", payload: { reason: expect.any(String), needs: expect.any(Array) } },
@@ -483,33 +492,6 @@ describe("control CLI correlation", () => {
     expect(pending.body.status).toBe("pending");
     expect(request.allowedKinds).toEqual(["RESEARCH", "BLOCKED"]);
 
-    reportControlProgress(request.workspaceId, {
-      requestId: request.requestId,
-      localSessionId: "session-research",
-      taskId: "c2c_research1",
-      iteration: 0,
-      phase: "RESEARCH",
-      status: "SEARCHING",
-      message: "Checking current sources.",
-    });
-    const status = runJson([
-      "control",
-      "status",
-      "-w",
-      workspace,
-      "--local-session",
-      "session-research",
-      "--request",
-      request.requestId,
-      "--task",
-      "c2c_research1",
-      "--iteration",
-      "0",
-      "--phase",
-      "RESEARCH",
-    ]);
-    expect(status.command.status).toBe(0);
-    expect(status.body.progress).toMatchObject({ status: "SEARCHING" });
   });
 
   it("keeps one question and answer bound through open, wait, and acknowledge", () => {

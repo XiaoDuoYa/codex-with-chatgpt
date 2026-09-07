@@ -14,7 +14,7 @@ The key distinction is:
   one registration in the machine gateway.
 - **Session scope:** one local Codex session, one ChatGPT Project chat and one
   owned browser page.
-- **Turn scope:** one short-lived capability, one mailbox request and one
+- **Turn scope:** one short-lived capability, one correlated request and one
   ordered control message.
 
 ## Components
@@ -37,7 +37,7 @@ The key distinction is:
        |          |             |
   registry   capability      MCP server
              broker             |
-        protected mailbox       |
+     control/result records     |
                    +------------+
                    |
             local workspace roots
@@ -198,20 +198,20 @@ the exact-tab and URL checks run again.
 Before a control message, the local harness:
 
 1. Confirms the session route and surface generation.
-2. Opens one mailbox request for `(workspaceId, localSessionId, taskId,
+2. Opens one correlated request for `(workspaceId, localSessionId, taskId,
    iteration, phase)`.
 3. Issues a capability bound to the same correlation, current registration,
-   exact mailbox `requestId`, compaction epoch, surface generation and
-   requested scopes. BOOT uses the same request binding and its receipt gates
+   exact `requestId`, compaction epoch, surface generation and requested scopes.
+   BOOT uses the same request binding and its verified Computer Use result gates
    the first route commit.
 4. Places `CONTEXT_ID` and `RESULT_REQUEST_ID` in the prompt sent to the owned
    chat.
 
-ChatGPT passes `context_id` to every MCP call. The gateway claims a lease,
-renews it during a long operation and releases it in a `finally` path. On
-completion, the broker creates a fence and waits for all leases to drain before
-the mailbox is written. If mailbox persistence fails, the fence aborts rather
-than claiming the result was delivered.
+ChatGPT passes `context_id` to every read-only MCP call. The gateway claims a
+lease, renews it during a long operation, and releases it in a `finally` path.
+On completion, Computer Use verifies the exact bound page response and submits
+its schema-valid marker through the host-only observation endpoint. The retained
+mailbox completion path is dormant in production and remains covered by tests.
 
 Completion or cancellation revokes the capability. Gateway restart changes the
 boot epoch and invalidates all prior capabilities. Compaction or a page
@@ -229,7 +229,7 @@ Session C: turn 1 -> turn 2 -> ...
 A, B, and C execute independently.
 ```
 
-The mailbox and capability records do not consume additional page-capacity
+The control and capability records do not consume additional page-capacity
 slots. Surface ownership has one machine-wide capacity of 100 unexpired
 session/page leases, with one slot per unique `(projectId, localSessionId)`
 identity. Released,
@@ -240,12 +240,11 @@ reuse its slot. Bounded terminal tombstones and per-turn activity leases
 remain cleanup protections. Backoff, retry, and browser recovery are scoped
 to the affected session only.
 
-Normal mailbox `open`, `ack`, `cancel`, and result operations use a lifecycle
-lock for the specific `localSessionId`; they do not scan or serialize the whole
-workspace. Pruning uses a separate short maintenance lock and processes
-sessions independently. The surface metadata ownership lock is only a brief
-atomic uniqueness guard for lease commits/replacements; it never limits or
-queues browser turns.
+Normal request open, observe, and cancel operations use a lifecycle lock for the
+specific `localSessionId`; they do not serialize the whole workspace. Dormant
+mailbox result and acknowledgment operations retain the same lock discipline.
+The surface metadata ownership lock is only a brief atomic uniqueness guard for
+lease commits/replacements; it never limits browser turns.
 
 ## Data boundaries
 

@@ -24,11 +24,11 @@ describe("plugin dispatch preflight", () => {
     delete p.github;
     delete p.requestedOperations;
     p.plugins[0].authenticatedProfileTool = "get_authenticated_user";
-    const discovery = { ...turn, phase: "RESEARCH", pluginIntent: "identity-discovery" as const, scopes: ["c2c.result.write"], pluginPreflight: p };
+    const discovery = { ...turn, phase: "RESEARCH", pluginIntent: "identity-discovery" as const, scopes: [], pluginPreflight: p };
     const policy = assessPluginPreflight(discovery, surface, "epoch-a", now);
     expect(policy).toEqual({ allowedPlugins: ["GitHub"], access: "authenticated-profile-only", repositoryAccess: "none", allowedOperations: [{ plugin: "GitHub", tool: "get_authenticated_user" }] });
     expect(() => assessPluginPreflight({ ...discovery, pluginIntent: "task" }, surface, "epoch-a", now)).toThrow(/unknown/);
-    expect(() => assessPluginPreflight({ ...discovery, scopes: ["git.read"] }, surface, "epoch-a", now)).toThrow(/result-only/);
+    expect(() => assessPluginPreflight({ ...discovery, scopes: ["git.read"] }, surface, "epoch-a", now)).toThrow(/no local C2C scopes/);
     expect(() => assessPluginPreflight({ ...discovery, plugins: [] }, surface, "epoch-a", now)).toThrow(/one plugin/);
     expect(() => assessPluginPreflight({ ...discovery, phase: "PLAN" }, surface, "epoch-a", now)).toThrow(/RESEARCH/);
     expect(() => assessPluginPreflight(discovery, surface, "another-epoch", now)).toThrow(/stale/);

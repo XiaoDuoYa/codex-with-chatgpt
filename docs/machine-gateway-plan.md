@@ -4,6 +4,10 @@ This is the implementation contract for the machine-wide architecture. It is
 intentionally written as an end-state plan: no workspace-specific service or
 second connection path is required.
 
+Current experiment note: the mailbox design below is retained and tested, but
+production result delivery is temporarily `computer_use`. See
+`docs/protocol.md` for the active flow.
+
 ## Product requirements
 
 1. Configure one ChatGPT connector per machine:
@@ -241,7 +245,7 @@ changed, while an uncertain gateway state fails closed.
 | Isolation | Two or more workspaces and sessions route to their own roots/pages |
 | Capacity | 100 unique `(projectId, localSessionId)` identities execute concurrently; a new 101st claim is rejected and retries until a lease releases, expires, or retires |
 | Stale state | Old boot, registration, generation, epoch and context are rejected |
-| Mailbox | Duplicate open, late result, cancellation and write failure are covered |
+| Dormant mailbox | Duplicate open, late result, cancellation and write failure remain covered by tests |
 | Browser | Exact `tabId` targeting; ordinary user tabs are untouched |
 | Secrets | Runtime key, admin token and raw context absent from normal output |
 | Docs | README, protocol, security and Skill agree on one connector and `None` auth |
@@ -252,7 +256,7 @@ changed, while an uncertain gateway state fails closed.
 2. Install and verify the official Tunnel runtime.
 3. On macOS, enable autostart once and verify its status.
 4. Register one workspace and claim one Project chat.
-5. Run a read-only boot check and a mailbox control turn.
+5. Run a read-only BOOT check and a Computer Use result turn.
 6. Add a second workspace and multiple sessions; verify independent tabs and
    affected-session-only recovery.
 7. Install the global Skill and verify a fresh Codex session.

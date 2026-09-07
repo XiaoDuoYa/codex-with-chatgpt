@@ -5,6 +5,7 @@ import {
   type ControlResultRequest,
   type ControlResultSubmission,
 } from "./result-schema.js";
+import { ACTIVE_CONTROL_RESULT_TRANSPORT } from "./result-transport.js";
 
 /** Prompt scaffolds, not results or proof that a page can call these tools. */
 export function controlResultContract(phase: ControlPhase) {
@@ -44,22 +45,21 @@ export function controlResultContract(phase: ControlPhase) {
 
   return {
     phase,
+    resultTransport: ACTIVE_CONTROL_RESULT_TRANSPORT,
     requiredTools: phase === "BOOT"
-      ? ["workspace_info", "read_file", "submit_control_result"]
-      : ["submit_control_result"],
+      ? ["workspace_info", "read_file"]
+      : [],
     instructions: [
-      "Use the Codex with ChatGPT connector in this exact message. Check that submit_control_result is callable now, not merely mentioned in history, before doing research or analysis.",
-      "When get_control_result_status is callable, call it with context_id only and proceed only for the bound pending request. Its absence alone does not block submission; Codex owns mailbox status and acknowledgment.",
-      "Call submit_control_result with context_id, kind and its matching payload only. The context already binds request, workspace, local session, task, iteration and phase. Never supply or override those correlation fields. Replace every example placeholder with observed facts; examples are not evidence.",
-      "FINAL DELIVERY IS REQUIRED FOR FAILURE TOO: if you refuse the business request, cannot complete it, lack information, or a business read fails, stop business work and proactively call submit_control_result with kind BLOCKED and payload {reason, needs}, while this callback remains authorized and permitted. Do this before your final page reply; do not wait for the user to interrupt, send another message, or ask you to report failure. Keep the reason short and safe, without prohibited content or guessed causes. A page-only refusal does not notify Codex.",
-      "report_control_progress is optional and never a prerequisite for final submission or synthesis. No initial or SYNTHESIZING progress call is required. Skip routine progress unless it materially helps a long task.",
+      "Use the Codex with ChatGPT connector in this exact message only for the read-only tools needed by the task.",
+      "Result transport is temporarily COMPUTER_USE_ONLY for comparison. Do not call C2C result status, progress, or submission tools; mailbox callbacks are intentionally disabled.",
+      "Replace every payload placeholder with observed facts; examples are scaffolds, not evidence.",
+      "FINAL DELIVERY IS REQUIRED FOR FAILURE TOO: if you refuse the business request, cannot complete it, lack information, or a business read fails, return kind BLOCKED with payload {reason, needs} in the required final marker. Do this in the same final page reply; do not wait for the user to interrupt, send another message, or ask you to report failure. Keep the reason short and safe, without prohibited content or guessed causes.",
       "Elapsed time alone is not failure. Codex can renew this request's live authorization while observing your ongoing work; do not ask the user to interrupt or send a continuation just because the task takes a long time. Respect any actual expired or revoked authorization. For BLOCKED, needs describes the next steps, which may simply be to end the failed attempt and preserve completed work; user confirmation is not required just to record failure.",
       "For RESEARCH, sources contains only external HTTP(S) URLs actually consulted, each with title, url, publishedDate (YYYY-MM-DD or null) and keyEvidence. Use sources: [] for local-only work and cite relative files/lines in conclusions. Never fabricate URLs or use workspace:/ or file:// as sources.",
-      "If tools are unavailable or a platform approval/safety check blocks a call, stop this turn and report the observed failure; do not bypass it, switch apps or claim successful delivery. Submit BLOCKED only when that same tool is available and permitted.",
-      "After an explicit safety/approval block or TOKEN_REVOKED, TOKEN_EXPIRED or STALE_BINDING_EPOCH, do not retry through another call or delivery channel. If no permitted final callback can be sent, finish with a short schema-valid {kind,payload} result under the host-observed marker supplied below so the host can reconcile; do not claim a mailbox receipt.",
-      "Only the local mailbox received/acknowledged state proves delivery. A visible answer or successful read is not a receipt.",
+      "If a read tool is unavailable or a platform approval/safety check blocks it, stop this turn and return a schema-valid BLOCKED result in the required final marker; do not bypass it, switch apps, or claim the read succeeded.",
+      "The host accepts the result only after Computer Use verifies this exact response, tab, chat, generation, request ID, and schema. A visible answer from another response is not delivery.",
       ...(phase === "BOOT" ? [
-        "For BOOT, call workspace_info and read one bounded hello-style top-level file before submission. Submit kind BOOT with payload {} only after both reads succeed. Do not copy workspace identity into the payload; the gateway derives it from this capability.",
+        "For BOOT, call workspace_info and read one bounded hello-style top-level file. Return kind BOOT with payload {} only after both reads succeed. Do not copy workspace identity into the payload; the gateway derives it from this capability.",
       ] : []),
     ],
     examples: allowedKindsForPhase(phase).map((kind) => ({ kind, payload: examples[kind] })),
@@ -78,9 +78,9 @@ export function controlDeliveryPrompt(request: ControlResultRequest, contextId: 
     `ITERATION: ${request.iteration}`,
     `RESULT_PHASE: ${request.phase}`,
     "",
-    "Use this context_id for every C2C MCP call. Codex owns edits, execution and acknowledgment.",
+    "Use this context_id for every read-only C2C MCP call. Codex owns edits and execution.",
     ...contract.instructions,
-    `If no permitted MCP callback can be sent, end this exact response with the marker C2C_HOST_OBSERVED_RESULT, pair it to RESULT_REQUEST_ID ${request.requestId}, and place exactly one schema-valid allowed {kind,payload} JSON object after the marker. This is host-observed evidence, not an MCP receipt. Do not include raw logs, source, diffs, credentials or error excerpts.`,
+    `End this exact response with the marker C2C_HOST_OBSERVED_RESULT, pair it to RESULT_REQUEST_ID ${request.requestId}, and place exactly one schema-valid allowed {kind,payload} JSON object after the marker. Computer Use reads this exact bound response as the only active result transport. Do not include raw logs, source, diffs, credentials or error excerpts in the marker payload.`,
     "Phase-specific payload scaffolds (replace placeholders with actual findings; never submit examples verbatim):",
     JSON.stringify(contract.examples),
   ].join("\n");

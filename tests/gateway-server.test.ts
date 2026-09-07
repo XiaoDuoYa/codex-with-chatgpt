@@ -506,7 +506,7 @@ describe("machine gateway control server", () => {
     const discovery = {
       ...turn, phase: "RESEARCH", taskId: "task-profile",
       requestId: discoveryRequest.request.requestId,
-      pluginIntent: "identity-discovery", scopes: ["c2c.result.write"],
+      pluginIntent: "identity-discovery", scopes: [],
       pluginPreflight: {
         ...proof, phase: "RESEARCH", taskId: "task-profile", github: undefined, requestedOperations: undefined,
         plugins: [{ id: "GitHub", availability: "available", usesGitHub: true, authenticatedProfileTool: "get_authenticated_user" }],
@@ -514,14 +514,12 @@ describe("machine gateway control server", () => {
     };
     const profileTurn = await admin<{ token: string }>(server, "/admin/turns/issue", discovery);
     expect(profileTurn.status).toBe(200);
-    const profileLease = server.gateway.claimTurn(profileTurn.body.token, ["c2c.result.write"]);
-    server.gateway.releaseTurn(profileTurn.body.token, profileLease.lease);
     expect(() => server!.gateway.claimTurn(profileTurn.body.token, ["workspace.read"])).toThrow();
     const unauthorizedBusiness = await admin(server, "/admin/turns/issue", { ...discovery, pluginIntent: "task" });
     expect(unauthorizedBusiness.status).not.toBe(200);
     const excessiveScopes = await admin(server, "/admin/turns/issue", { ...discovery, scopes: ["git.read"] });
     expect(excessiveScopes.status).not.toBe(200);
-    expect(server.gateway.turnStatus(profileTurn.body.token).status).toBe("active");
+    expect(server.gateway.turnStatus(profileTurn.body.token).status).toBe("issued");
     expect((await admin(server, "/admin/turns/cancel", { contextId: profileTurn.body.token })).status).toBe(200);
     server.gateway.cancelControlResultRequest(identity, discoveryRequest.request.requestId, {
       taskId: "task-profile", iteration: 0, phase: "RESEARCH",

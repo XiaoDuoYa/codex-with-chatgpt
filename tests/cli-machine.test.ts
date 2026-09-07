@@ -227,7 +227,7 @@ describe("machine CLI lifecycle", () => {
       "--compaction-epoch",
       "0",
       "--scopes",
-      "workspace.read,c2c.result.write",
+      "workspace.read",
     ]);
     expect(issued.command.status).toBe(0);
     expect(issued.body.contextId).toMatch(/^c2c_ctx_[A-Za-z0-9_-]{43}$/);

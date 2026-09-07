@@ -304,8 +304,8 @@ function readTerminalMarker(
   if (value.hostObservedResult !== undefined) {
     const parsed = controlHostObservedResultSchema.safeParse(value.hostObservedResult);
     if (
-      !parsed.success || !hostFailure ||
-      parsed.data.observedAt !== hostFailure.observedAt ||
+      !parsed.success ||
+      (hostFailure !== undefined && parsed.data.observedAt !== hostFailure.observedAt) ||
       !request.allowedKinds.includes(parsed.data.result.kind)
     ) {
       integrityError("cancelled request host-observed result is invalid");
@@ -1148,7 +1148,7 @@ export function getControlResultStatus(
   return { requestId: resolvedRequestId, status: "pending", request, result: null, progress, ...observed };
 }
 
-/** Require an authoritative successful BOOT receipt for one exact candidate generation. */
+/** Require an authoritative successful BOOT result for one exact candidate generation. */
 export function requireBootControlResult(
   workspaceId: string,
   requestId: string,
@@ -1181,13 +1181,15 @@ export function requireBootControlResult(
     resolvedLocalSessionId,
     expected,
   );
-  if (
-    (status.status !== "received" && status.status !== "acknowledged") ||
-    status.result?.kind !== "BOOT"
-  ) {
+  const mailboxBoot = (status.status === "received" || status.status === "acknowledged") &&
+    status.result?.kind === "BOOT";
+  const computerUseBoot = status.status === "cancelled" &&
+    status.hostFailure === undefined &&
+    status.hostObservedResult?.result.kind === "BOOT";
+  if (!mailboxBoot && !computerUseBoot) {
     throw new ControlMailboxError(
       "MAILBOX_RESULT_NOT_READY",
-      "surface commit requires a successful BOOT result received through MCP",
+      "surface commit requires a successful BOOT result from the active result transport",
     );
   }
   return status;
@@ -1331,20 +1333,21 @@ export function cancelControlResultRequest(
 }
 
 function terminalObservationRecords(observation: ControlTerminalObservation): {
-  failure: ControlHostFailure;
+  failure?: ControlHostFailure;
   hostObservedResult?: ControlHostObservedResult;
 } {
   const terminalResultInput = observation.state === "final"
     ? observation.terminalResult
     : undefined;
+  const isComputerUseResult = observation.state === "final" && "delivery" in observation;
   const failureInput = observation.state === "final"
     ? (({ terminalResult: _terminalResult, ...failure }) => failure)(observation)
     : observation;
-  const failure = controlHostFailureSchema.parse(failureInput);
+  const failure = isComputerUseResult ? undefined : controlHostFailureSchema.parse(failureInput);
   const hostObservedResult = terminalResultInput
     ? controlHostObservedResultSchema.parse({
         provenance: "host_observed",
-        observedAt: failure.observedAt,
+        observedAt: observation.observedAt,
         result: parseControlResultSubmission(terminalResultInput),
       })
     : undefined;
@@ -1379,7 +1382,7 @@ export function observeControlResultRequest(
         expected,
       );
       if (status.status === "cancelled") {
-        if (!status.hostFailure) {
+        if (!status.hostFailure && !status.hostObservedResult) {
           clearActiveRequest(resolvedWorkspaceId, resolvedLocalSessionId, resolvedRequestId);
           return getControlResultStatus(
             resolvedWorkspaceId,
@@ -1492,6 +1495,9 @@ export function recordControlHostFailure(
 ): ControlStatus {
   const parsed = controlTerminalObservationSchema.safeParse(observation);
   if (!parsed.success) throw new ControlMailboxError("INVALID_RESULT", "invalid host failure observation");
+  if (parsed.data.state === "final" && "delivery" in parsed.data) {
+    throw new ControlMailboxError("INVALID_RESULT", "computer use results are not host failures");
+  }
   const terminalResultInput = parsed.data.state === "final"
     ? parsed.data.terminalResult
     : undefined;

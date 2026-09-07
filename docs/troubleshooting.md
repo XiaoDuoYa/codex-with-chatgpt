@@ -112,12 +112,14 @@ URL. Do not create a connector per workspace or alter a connector belonging to
 another purpose. After the connector reports connected, test it in the owned
 chat with `workspace_info`.
 
-If reads work but callback tools are absent or show an older input schema, keep
+The active comparison mode intentionally exposes no result callback tools. If
+the app still lists `get_control_result_status`, `report_control_progress`, or
+`submit_control_result`, or a read-only tool shows an older input schema, keep
 the gateway healthy, open the existing app's action menu in ChatGPT Plugins,
-choose **Manage**, and select **Refresh**. Confirm the displayed callback schema
-matches the installed runtime before starting a fresh authorized request.
-Restarting the Tunnel alone does not refresh ChatGPT's cached app metadata, and
-creating another connector is not the repair.
+choose **Manage**, and select **Refresh**. Confirm only the current read-only C2C
+tools remain before starting a fresh authorized request. Restarting the Tunnel
+alone does not refresh ChatGPT's cached app metadata, and creating another
+connector is not the repair.
 
 ## `workspace_info` reports the wrong workspace
 
@@ -189,10 +191,11 @@ c2c control wait \
   --task <task-id> --iteration <n> --phase <phase> --json
 ```
 
-Verify ChatGPT used `context_id` on every MCP call and used the same request and
-correlation fields when submitting. A timeout alone is not permission to resend.
-Do not accept visible browser text as a result; resume or cancel the exact
-protected mailbox request.
+Verify ChatGPT used `context_id` on every read-only MCP call and ended the exact
+response with `C2C_HOST_OBSERVED_RESULT`, the matching request ID, and one valid
+`{kind,payload}` object. Computer Use must inspect the bound response, not the
+page's latest arbitrary text. A timeout alone is not permission to resend;
+resume observation or cancel the exact control request.
 
 ## A context is rejected as stale
 

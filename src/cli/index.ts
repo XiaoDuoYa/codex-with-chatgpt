@@ -56,6 +56,7 @@ import {
 } from "../control/result-schema.js";
 import { saveExecutionOutput } from "../execution/output.js";
 import { controlDeliveryPrompt, controlResultContract } from "../control/result-contract.js";
+import { ACTIVE_CONTROL_RESULT_TRANSPORT } from "../control/result-transport.js";
 import { CONTROL_PAGE_CHECK_INTERVAL_MS, parseControlPageObservation, controlWaitPolicy } from "../control/wait-policy.js";
 import {
   appendExecutionRecord,
@@ -1190,7 +1191,7 @@ surface
   .requiredOption("--generation <n>", "exact verified page generation")
   .requiredOption("--tab-id <id>", "exact verified in-app browser tab id")
   .requiredOption("--chat-url <url>", "observed ChatGPT chat URL created inside that Project")
-  .requiredOption("--boot-request <id>", "exact BOOT mailbox request received through MCP")
+  .requiredOption("--boot-request <id>", "exact BOOT request completed through the active result transport")
   .option("--json", "machine-readable output", false)
   .action(async (opts: {
     workspace?: string;
@@ -1533,10 +1534,16 @@ control
       }
       const plugins = opts.plugins?.split(",").map((id) => id.trim());
       const pluginIntent = pluginIntentSchema.parse(opts.pluginIntent ?? "task");
-      const scopes = correlation.phase === "BOOT" && opts.scopes === undefined
-        ? ["workspace.read", "c2c.result.write"]
-        : pluginIntent === "identity-discovery" && opts.scopes === undefined
-          ? ["c2c.result.write"] : parseScopes(opts.scopes);
+      const scopes = opts.scopes === undefined
+        ? correlation.phase === "BOOT"
+          ? ["workspace.read"]
+          : pluginIntent === "identity-discovery"
+            ? []
+            : TURN_SCOPES.filter((scope) => scope !== "c2c.result.write")
+        : parseScopes(opts.scopes);
+      if (ACTIVE_CONTROL_RESULT_TRANSPORT === "computer_use" && scopes.includes("c2c.result.write")) {
+        throw new Error("c2c.result.write is temporarily disabled while Computer Use is the active result transport");
+      }
       const pluginPreflight = opts.pluginPreflight === undefined ? undefined : pluginPreflightSchema.parse(JSON.parse(opts.pluginPreflight));
       if (pluginIntent === "task" && pluginPreflight?.plugins.some((plugin) => plugin.usesGitHub || /github/i.test(plugin.id))) {
         const identity = inspectRepositoryIdentity(workspace.root, opts.githubRemote);
@@ -1603,6 +1610,7 @@ control
         request: opened.request,
         contextId: grant.token,
         contextExpiresAt: grant.expiresAt,
+        resultTransport: ACTIVE_CONTROL_RESULT_TRANSPORT,
         resultContract: controlResultContract(correlation.phase),
         deliveryPrompt: controlDeliveryPrompt(opened.request, grant.token),
         wait: controlWaitPolicy({ requestId: opened.request.requestId, request: opened.request, status: "pending", result: null, progress: null }),
@@ -1702,18 +1710,19 @@ addControlLookupOptions(
         timeoutMs,
       });
       const received = status.status === "received" || status.status === "acknowledged";
+      const computerUseDelivered = status.status === "cancelled" && status.hostObservedResult !== undefined;
       const wait = controlWaitPolicy(status);
-      if (opts.json) say(JSON.stringify({ ok: received, ...status, wait }));
+      if (opts.json) say(JSON.stringify({ ok: received || computerUseDelivered, ...status, wait }));
       else if (status.result) say(JSON.stringify(status.result, null, 2));
       else say(`状态：${status.status}; ${wait.outcome}; ${wait.nextAction}`);
-      if (!received) process.exitCode = 1;
+      if (!received && !computerUseDelivered) process.exitCode = 1;
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
 addControlLookupOptions(control.command("observe"))
-  .description("Renew verified ongoing work or reconcile a final owned response; never submit a result")
+  .description("Renew verified ongoing work or record the exact owned Computer Use result")
   .requiredOption("--page-observation <json>", "fresh exact-response observation, without raw page text")
   .action(async (opts: {
     workspace?: string; request: string; task: string; iteration: string; phase: string;

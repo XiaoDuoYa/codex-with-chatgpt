@@ -59,7 +59,7 @@ const issueTurnSchema = registrationIdentitySchema
     iteration: z.number().int().min(0).max(10_000),
     phase: z.enum(CONTROL_PHASES),
     requestId: c2cIdSchema,
-    scopes: z.array(z.enum(TURN_SCOPES)).min(1).max(TURN_SCOPES.length),
+    scopes: z.array(z.enum(TURN_SCOPES)).max(TURN_SCOPES.length),
     modelId: z.string().min(1).max(128).optional(),
     effort: z.string().min(1).max(128).optional(),
     compactionEpoch: z.number().int().nonnegative(),

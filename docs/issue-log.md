@@ -4,6 +4,20 @@
 
 状态只表示已实现和实际验证的范围；自动化测试与真实 ChatGPT 验证分别记录。
 
+## Computer Use 单通道对比模式
+
+- 2026-09-07：按用户要求临时停用 mailbox 结果回调。实现与历史数据保留，但生产
+  MCP 不再注册 `get_control_result_status`、`report_control_progress` 和
+  `submit_control_result`，`control open` 不再授予 `c2c.result.write`。
+- ChatGPT 每次必须在精确回复末尾输出 `C2C_HOST_OBSERVED_RESULT`、对应的
+  `RESULT_REQUEST_ID` 和一个阶段匹配的 `{kind,payload}`。Computer Use 只检查本地
+  会话绑定的精确 tab/chat/generation/response，Gateway 再校验关联、时效、schema
+  和 16 KiB 上限；未关联的页面文字不能作为结果。
+- 正常页面结果使用 `delivery: computer_use`，不再伪装成 `callback_missing`；
+  `BLOCKED` 同样在首个最终回复中返回，无需用户打断或追问。BOOT 页面绑定也接受
+  经过同样校验的 Computer Use 结果。
+- mailbox 回调仍有隔离测试入口，用于未来恢复后的 A/B 对比；它不是当前生产路径。
+
 ## 拒绝与终止回传收口
 
 - 2026-09-06：模型可见回传参数收敛为 `context_id + kind + payload`，状态查询只需 `context_id`，进度只需状态和可选短消息；request/session/task/iteration/phase 全部从 capability 绑定派生，旧的重复关联参数会在 MCP schema 层直接拒绝。

@@ -153,7 +153,7 @@ export type MachineSurfaceCommitOptions = Omit<
   CommitVerifiedSurfaceRouteOptions,
   "lease" | "workspaceId"
 > & {
-  /** Exact structured BOOT request whose MCP receipt authorizes this route. */
+  /** Exact structured BOOT request whose verified result authorizes this route. */
   bootRequestId: string;
 };
 
@@ -308,11 +308,13 @@ export class MachineGateway {
       ...routeOptions,
       requireProjectSelection: true,
     });
-    acknowledgeControlResult(identity.workspaceId, bootRequestId, identity.localSessionId, {
-      taskId: boot.request!.taskId,
-      iteration: boot.request!.iteration,
-      phase: "BOOT",
-    });
+    if (boot.status === "received" || boot.status === "acknowledged") {
+      acknowledgeControlResult(identity.workspaceId, bootRequestId, identity.localSessionId, {
+        taskId: boot.request!.taskId,
+        iteration: boot.request!.iteration,
+        phase: "BOOT",
+      });
+    }
     this.broker.revokeRequest({
       ...identity,
       taskId: boot.request!.taskId,
