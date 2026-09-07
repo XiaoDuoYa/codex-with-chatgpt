@@ -303,12 +303,12 @@ or administrator settings, rather than selecting a public URL or OAuth.
 Tell Codex the connector is configured before proceeding to step 6. A connector
 card alone is not proof of result delivery.
 
-After creating the app, open its action menu, choose **Manage**, and select
-**Refresh** once while the local gateway is healthy. This pulls the current
-tools, descriptions, server instructions, and input schemas from the MCP
-server. Repeat this refresh after a local C2C runtime update; restarting the
-Tunnel alone does not refresh ChatGPT's cached app metadata. Refresh the same
-global app instead of creating another connector for a project.
+After creating the app or changing its tool schemas, verify the task-needed
+read tools and input contracts in the existing app while the gateway is healthy.
+Use **Refresh** once if the current UI offers it and discovery needs updating;
+do not assume a fixed menu path exists. Opening Manage or restarting the Tunnel
+does not prove that schemas were refreshed. A real scoped read is verified
+separately in step 6. Keep the same global app; do not recreate it per project.
 
 ### 6. Verify installation, then the real round trip
 
@@ -419,10 +419,9 @@ for a deliberate tunnel change or key rotation.
 Run setup with the **updated source entrypoint** shown above, not the old
 installed `c2c`, which would reuse its own runtime. The Skill obtains fresh
 authorizations after restart and preserves established Project/chat mappings.
-In ChatGPT Plugins, open the existing `Codex with ChatGPT` app's action menu,
-choose **Manage**, and select **Refresh** once before the next control turn.
-Confirm that its displayed tool schemas match the updated runtime; do not create
-a replacement connector or repeat this per project.
+If the update changes tool contracts, verify discovery in the existing
+`Codex with ChatGPT` app as described in step 5. Use Refresh only if offered and
+needed; missing UI controls do not justify recreating the connector.
 `c2c update-check --json` checks for updates; it does not install them. A
 `checked: false` response is not proof that your installation is up to date.
 
@@ -571,14 +570,17 @@ unarchiving the old conversation. Login or consent requires user action;
 loading and generation require waiting, not a duplicate send. The CLI evaluates
 the host observation; it does not probe ChatGPT independently.
 
-After a connector metadata Refresh, an older Chat may no longer offer the app
+After a connector metadata change, an older Chat may no longer offer the app
 even though a new Chat in the same Project does. The Skill searches the old
 Chat's app picker with real keyboard input and waits for asynchronous candidates;
 the recommended list and ordinary text mentions are not availability evidence.
 Only after the old Chat has no selectable connector and the same search in the
-Project's new-Chat entry produces a selectable connector plus its clickable
-inline pill does recovery reuse the owned physical tab and create a replacement
-Chat. Ambiguous observations do not rotate the binding.
+Project's new-Chat entry confirms the selected app and task-needed tools does
+recovery reuse the owned physical tab and create a replacement Chat. The probe
+uses at most one owned hidden helper, sends no message, and closes that helper;
+the progress tab stays unchanged until the guarded replacement claim succeeds.
+No particular pill layout is required. Inconclusive discovery ends after one
+recheck with a diagnostic; it never rotates a binding or retries a refused task.
 
 Before replacing a page, preserve any verified Computer Use result in the local
 checkpoint. Only confirmed page failure permits cancelling an exact pending request.

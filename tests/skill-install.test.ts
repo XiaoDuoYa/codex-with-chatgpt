@@ -123,11 +123,8 @@ describe("global Skill installation", () => {
     expect(JSON.stringify(payload)).not.toContain("runtimeKey");
 
     const installedSkill = fs.readFileSync(String(payload.path), "utf8");
-    expect(installedSkill).toContain("c2c update-check -w <workspace-root> --json");
-    expect(installedSkill).toContain("c2c sandbox-clean --json");
-    expect(installedSkill).toContain("<git-common-dir>/codex-with-chatgpt");
-    expect(installedSkill).toContain("<workspace-root>/.codex-with-chatgpt");
-    expect(installedSkill).not.toContain("c2c sandbox-allow");
-    expect(installedSkill).toContain(runtimeRoot);
+    expect(installedSkill).toBe(
+      renderSkill(fs.readFileSync(path.join(projectRoot, "skill", "SKILL.md"), "utf8"), runtimeRoot),
+    );
   });
 });
