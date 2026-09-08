@@ -666,7 +666,7 @@ export async function startMachineGatewayServer(
 
   if (connectStdio) {
     try {
-      mcpServer = createMcpServer({ gateway, logger });
+      mcpServer = createMcpServer({ gateway, logger, machine: { machineId: identity.machineId, associationId } });
       const stdioInput = options.stdioInput ?? process.stdin;
       const stdioTransport = options.stdioTransport ?? new StdioServerTransport(
         stdioInput,

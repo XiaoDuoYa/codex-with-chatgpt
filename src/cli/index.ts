@@ -85,6 +85,8 @@ import {
   type MachineRegistrationIdentity,
 } from "../gateway/control-client.js";
 import { startMachineGatewayServer, TURN_SCOPES } from "../gateway/server.js";
+import { readMachineIdentity } from "../gateway/identity.js";
+import { bindMachineConnector, connectorMachine, machineConnectorStatus, requireMachineConnector, type ConnectorMachine } from "../gateway/connector-binding.js";
 import {
   observeMachineRuntime,
   type MachineRuntimeObservation,
@@ -308,6 +310,23 @@ function tunnelConfigView(config: OpenAiTunnelConfig | null): Record<string, unk
   };
 }
 
+function localConnectorMachine(config: OpenAiTunnelConfig, runtime?: MachineRuntimeState): ConnectorMachine {
+  const identity = runtime ?? readMachineIdentity();
+  if (!identity) throw new Error("Machine identity is unavailable; finish machine setup first.");
+  if (runtime && runtime.associationId !== config.associationId) throw new Error("Machine runtime and configured Tunnel association do not match.");
+  return { machineId: identity.machineId, tunnelId: config.tunnelId, associationId: config.associationId };
+}
+
+function localConnectorStatus(config = readOpenAiTunnelConfig(), runtime?: MachineRuntimeState) {
+  if (!config) return { status: "unconfigured" as const, binding: null };
+  return machineConnectorStatus(localConnectorMachine(config, runtime));
+}
+
+function boundConnectorName(runtime: MachineRuntimeState): string | undefined {
+  const result = localConnectorStatus(undefined, runtime);
+  return result.status === "bound" ? result.binding?.name : undefined;
+}
+
 function skillInstallView(result: SkillInstallResult): Record<string, unknown> {
   return {
     installed: result.installed,
@@ -417,6 +436,34 @@ const machine = program
   .command("machine")
   .description("Manage the one machine-wide Connector, tunnel, and MCP gateway");
 
+const machineConnector = machine.command("connector").description("Bind this device to its exact ChatGPT app");
+
+machineConnector.command("get", { isDefault: true })
+  .option("--json", "machine-readable output", false)
+  .action((opts: { json: boolean }) => {
+    try {
+      const result = localConnectorStatus();
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(`${result.status}: ${result.binding?.name ?? "Run c2c machine connector set --name <exact-app-name>"}`);
+    } catch (error) { handleCliError(error, opts.json); }
+  });
+
+machineConnector.command("set")
+  .requiredOption("--name <name>", "exact ChatGPT app display name for this device")
+  .option("--plugin-url <url>", "observed https://chatgpt.com/plugins/plugin_... stable app URL")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { name: string; pluginUrl?: string; json: boolean }) => {
+    try {
+      const binding = await withMachineSetupLock(async () => {
+        const config = readOpenAiTunnelConfig();
+        if (!config) throw new Error("Configure this device's official Tunnel before binding its ChatGPT app.");
+        return bindMachineConnector(connectorMachine(config), { name: opts.name, pluginUrl: opts.pluginUrl });
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, status: "bound", binding }));
+      else check(`本机插件已绑定：${binding.name}。所有本机项目的新请求自动复用此绑定。`);
+    } catch (error) { handleCliError(error, opts.json); }
+  });
+
 machine
   .command("setup")
   .description("Install and configure the official OpenAI Secure MCP Tunnel")
@@ -506,11 +553,13 @@ machine
           });
           newSupervisorStarted = result.spawned;
           const info = await machineInfo(result.runtime);
+          const connectorStatus = localConnectorStatus(nextDraft, result.runtime);
           return {
             ok: true,
             configured: true,
             connector: {
-              name: OPENAI_CONNECTOR_NAME,
+              name: connectorStatus.status === "bound" ? connectorStatus.binding?.name : null,
+              ...connectorStatus,
               authentication: "none",
               tunnelId: nextDraft.tunnelId,
             },
@@ -576,7 +625,7 @@ machine
       else {
         check("官方 OpenAI Secure MCP Tunnel 已配置");
         check("机器网关已启动");
-        say(`Connector：${OPENAI_CONNECTOR_NAME}（Authentication: None）`);
+        say(`Connector：${payload.connector.name ?? "尚未绑定：运行 c2c machine connector set --name <本机插件完整名称>"}（Authentication: None）`);
       }
     } catch (error) {
       handleCliError(error, opts.json);
@@ -663,6 +712,7 @@ machine
         configured: observation.config !== null,
         ready: observation.ready,
         config: tunnelConfigView(observation.config),
+        connector: localConnectorStatus(observation.config, observation.gateway.state === "healthy" ? observation.gateway.runtime : undefined),
         tunnel: openAiTunnelRuntimeStatusView(observation.tunnel),
         gateway: {
           ...machineRuntimeObservationView(observation.gateway),
@@ -1215,7 +1265,7 @@ surface
       const { binding, session: saved } = await commitMachineSurface(machine.runtime, machine.identity, lease, {
         bootRequestId: validateControlId(opts.bootRequest, "BOOT request id"),
         chatUrl: opts.chatUrl,
-        connectorName: OPENAI_CONNECTOR_NAME,
+        connectorName: boundConnectorName(machine.runtime),
       });
       if (opts.json) say(JSON.stringify({ ok: true, binding, session: saved }));
       else check(`已保存验证通过的 ChatGPT page（generation ${binding.lastGeneration}）`);
@@ -1342,7 +1392,8 @@ session
       const route = resolveConversationRoute(conversation);
       const payload = {
         ok: true,
-        connectorName: OPENAI_CONNECTOR_NAME,
+        connectorName: boundConnectorName(machine.runtime) ?? null,
+        connector: localConnectorStatus(undefined, machine.runtime),
         sessionIdentity,
         session: saved,
         conversation,
@@ -1544,6 +1595,11 @@ control
       if (ACTIVE_CONTROL_RESULT_TRANSPORT === "computer_use" && scopes.includes("c2c.result.write")) {
         throw new Error("c2c.result.write is temporarily disabled while Computer Use is the active result transport");
       }
+      const connectorConfig = readOpenAiTunnelConfig();
+      if (!connectorConfig) throw new Error("Machine Tunnel configuration is unavailable.");
+      const connector = scopes.length > 0 || correlation.phase === "BOOT"
+        ? requireMachineConnector(localConnectorMachine(connectorConfig, machine.runtime))
+        : undefined;
       const pluginPreflight = opts.pluginPreflight === undefined ? undefined : pluginPreflightSchema.parse(JSON.parse(opts.pluginPreflight));
       if (pluginIntent === "task" && pluginPreflight?.plugins.some((plugin) => plugin.usesGitHub || /github/i.test(plugin.id))) {
         const identity = inspectRepositoryIdentity(workspace.root, opts.githubRemote);
@@ -1611,8 +1667,9 @@ control
         contextId: grant.token,
         contextExpiresAt: grant.expiresAt,
         resultTransport: ACTIVE_CONTROL_RESULT_TRANSPORT,
-        resultContract: controlResultContract(correlation.phase),
-        deliveryPrompt: controlDeliveryPrompt(opened.request, grant.token),
+        connector: connector ?? null,
+        resultContract: controlResultContract(correlation.phase, connector, scopes.includes("workspace.read")),
+        deliveryPrompt: controlDeliveryPrompt(opened.request, grant.token, connector, scopes.includes("workspace.read")),
         wait: controlWaitPolicy({ requestId: opened.request.requestId, request: opened.request, status: "pending", result: null, progress: null }),
         pluginPolicy,
         surface: {

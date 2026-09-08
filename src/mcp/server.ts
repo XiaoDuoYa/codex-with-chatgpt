@@ -171,6 +171,8 @@ const gitIdentityOutputSchema = z.object({
 });
 
 const workspaceInfoOutputSchema = {
+  machineId: z.string().optional(),
+  associationId: z.string().optional(),
   workspaceId: z.string(),
   projectId: z.string(),
   workspaceName: z.string(),
@@ -363,6 +365,8 @@ const controlResultStatusOutputSchema = {
 export interface McpContext {
   gateway: MachineGateway;
   logger: Logger;
+  /** Supplied by the local server, never from ChatGPT's tool arguments. */
+  machine?: { machineId: string; associationId: string };
 }
 
 export interface McpServerOptions {
@@ -394,6 +398,7 @@ export function createMcpServer(ctx: McpContext, options: McpServerOptions = {})
         const project = workspace.detectProject();
         const git = gitInfo(workspace.root);
         return okStructured({
+          ...ctx.machine,
           workspaceId: workspace.id,
           projectId: workspace.projectId,
           workspaceName: workspace.name,

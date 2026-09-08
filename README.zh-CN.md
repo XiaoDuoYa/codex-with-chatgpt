@@ -35,7 +35,8 @@
 
 连接按机器配置一次：
 
-- 只创建一个名为 **`Codex with ChatGPT`** 的连接器。
+- 每台设备各绑定一个连接器；同一个 ChatGPT 账号可以有多台设备的 C2C 插件。
+  插件完整名称与稳定链接记录在机器级配置中，本机所有项目和会话复用。
 - 连接器的 **Authentication 必须是 `None`**。官方 OpenAI Secure MCP Tunnel
   提供连接认证，连接器不保存某个项目的凭据。
 - Tunnel 独占并托管一个 `serve-machine --stdio` 子进程。这个子进程是机器上
@@ -76,8 +77,11 @@ Tunnel 认证或 C2C 的短期任务授权。本项目不调用模型 API，但�
 当前任务的内置浏览器能力，以及已有的 C2C 安装。
 确认源码目录后再克隆和构建；保留已有修改、安装配置和会话，不覆盖或清理它们。
 如果已有健康的 C2C 安装正在使用官方 Secure MCP Tunnel，通过
-`machine setup --reuse-existing` 复用已安装的 Tunnel ID 和受保护运行密钥；不要
-重建 Tunnel，也不要再次索要密钥。否则，完成前置检查和干净源码构建后暂停，指导我
+`machine setup --reuse-existing` 复用已安装的 Tunnel ID 和受保护运行密钥，不重建
+Tunnel，也不再次索要密钥。复用已有有效的设备/插件绑定；若缺失或失效，询问当前
+电脑对应的插件完整名称及实际可用的稳定链接，用 `machine connector set` 记录一次，
+之后所有本机项目复用，不要按相似名称选择另一台电脑的插件。
+如果没有健康的已有连接，完成前置检查和干净源码构建后暂停，指导我
 创建自己的官方 Secure MCP Tunnel，并等待我提供 Tunnel ID 和私有运行密钥文件的
 绝对路径。
 不要猜测账号、组织、工作区、Tunnel ID 或凭据，不要查看、回显或上传密钥内容。
@@ -223,7 +227,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 也可以不改 PATH，直接执行 `"$HOME/.local/bin/c2c" machine status --json` 检查。
 
-### 5. 在 ChatGPT 中连接一次
+### 5. 每台设备在 ChatGPT 中连接一次
 
 切换到预期的 ChatGPT 账号/工作区，按需开启开发者模式（当前入口为设置中的
 Security and login，可能需管理员先授权）。打开 [ChatGPT 插件页](https://chatgpt.com/plugins)，
@@ -232,7 +236,7 @@ Security and login，可能需管理员先授权）。打开 [ChatGPT 插件页]
 
 | 字段 | 值 |
 | --- | --- |
-| 名称 | `Codex with ChatGPT` |
+| 名称 | 能区分设备的完整名称，例如 `Codex with ChatGPT - Laptop`；现有名称可以保留 |
 | Connection（连接方式） | `Tunnel` |
 | OpenAI Secure Tunnel | 选择第 4 步配置的同一个 Tunnel |
 | Authentication | `None` |
@@ -243,6 +247,26 @@ ChatGPT 工作区关联和 Read + Use 权限。页面若支持手动输入 Tunne
 已关联且有权使用的真实 ID；手动输入不能绕过权限。没有 Tunnel 连接方式时停止并确认
 账号功能/管理员设置，不改选公网 URL 或 OAuth。完成后通知 Codex“连接器已配置”，
 再继续第 6 步；看到连接器卡片不等于回传验收已通过。
+
+同时告诉 Codex 哪个插件属于当前电脑，由 Codex 在本机记录一次：
+
+```sh
+c2c machine connector set --name '<本机插件完整名称>' \
+  --plugin-url 'https://chatgpt.com/plugins/plugin_<实际观察到的ID>' --json
+c2c machine connector get --json
+```
+
+链接必须来自实际插件页面，不要原样使用占位符。没有可用稳定链接时可省略
+`--plugin-url`，但插件名称必须足以唯一识别目标。绑定只保存本机路由，不会创建或
+重命名远端插件；插件实际连接哪条通道，仍需通过真实读取验证返回的机器身份。
+
+两台电脑各使用自己的 Tunnel 和插件，路由层级为：
+**设备 → Tunnel → 指定插件 → Workspace/Project → Session/Chat/标签页**。
+不要跨设备复制机器 ID、凭据、插件绑定或页面归属状态。普通升级保留绑定；更换
+Tunnel 或连接身份后旧绑定会变为 `stale`。旧安装首次升级若尚无绑定，只需补记
+一次已有的设备/插件对应关系；`control open` 会在发出本地 MCP 请求前检查绑定。
+之后所有本机项目自动继承，无需逐项目安装或再次选定插件，也不强制要求界面显示
+插件标签。`machine connector get` 返回 `status: bound` 后再进行真实读取验收。
 
 创建应用或变更工具 schema 后，确认已有应用中的所需只读工具及输入契约。
 仅当当前界面提供 Refresh 且需要更新发现信息时使用一次，不假定固定菜单路径。

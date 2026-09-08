@@ -4,6 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { observeMachineRuntime } from "../src/gateway/runtime.js";
+import { bindMachineConnector, connectorMachine } from "../src/gateway/connector-binding.js";
 import {
   OPENAI_TUNNEL_ARCHIVE_SHA256,
   OPENAI_TUNNEL_BINARY_SHA256,
@@ -234,6 +235,7 @@ export async function startManagedMachineFixture(stateDir: string): Promise<Mana
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 
+  bindMachineConnector(connectorMachine(config), { name: "Codex with ChatGPT" });
   return {
     child,
     environment,

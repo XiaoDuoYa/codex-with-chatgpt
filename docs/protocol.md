@@ -76,10 +76,11 @@ reuse mode leaves the protected installed key in place:
 c2c serve-machine --stdio --port 0
 ```
 
-ChatGPT has exactly one connector association:
+Each device has one connector association; one ChatGPT account may contain
+several devices' connectors. Bind each device's exact app separately:
 
 ```text
-Name:           Codex with ChatGPT
+Name:           <this device's exact ChatGPT app name>
 Secure Tunnel:  the tunnel configured above
 Authentication: None
 ```
@@ -113,6 +114,57 @@ calls `ensureMachineGateway` and reuses the official Tunnel-owned
 another Tunnel. Disable it with `c2c autostart disable --json`.
 
 ## Workspace registration
+
+### Device connector binding
+
+Routing starts above the workspace: device identity → configured Tunnel → exact
+ChatGPT app → local workspace/Project → local session/Chat/owned tab. A product
+name or matching repository on two computers is not a device selector.
+
+After creating or choosing this device's app, record the user-confirmed exact
+name once. Add its stable URL when it is observed in the UI:
+
+```sh
+c2c machine connector set --name '<exact app name>' \
+  --plugin-url 'https://chatgpt.com/plugins/plugin_<observed-id>' --json
+c2c machine connector get --json
+```
+
+The URL is optional when not exposed; do not invent it. If names are ambiguous,
+obtain the exact app identity before dispatch. A name-only rename preserves a
+known stable app URL; choosing a different app requires its new URL explicitly.
+The binding lives in the private machine state directory, `machine/connector.json`,
+and binds `machineId + tunnelId + associationId` to the app name and optional URL.
+It is shared by all workspaces on this device and survives normal setup/updates.
+Changing machine or Tunnel association makes it stale; resolve the mapping once
+instead of guessing or copying another machine's state. Do not sync machine
+identity, credentials, connector binding, or browser ownership files across devices.
+
+Upgrades preserve old sessions but do not silently invent an app mapping.
+If no binding exists, Codex records the user's already established device/app
+choice with the command above. `control open` refuses local-MCP dispatch before
+creating a request when the binding is missing/stale. No tunnel recreation,
+per-project configuration, UI chip, login or service restart is needed to bind.
+`session get`, `machine status` and setup output expose the binding status;
+`control open` returns the exact target and includes it in the delivery prompt.
+Old per-workspace `connectorName` values are historical mirrors, not routing
+authority. Keep existing live requests on their original prompts; binding edits
+apply to new requests. Do not downgrade the runtime/Skill to a version that
+ignores device bindings.
+
+`workspace_info` reports the serving server's `machineId` and `associationId`
+after capability validation. Check them and the workspace identity before further
+reads. These are actual server identity fields, not a claim that the server can
+inspect ChatGPT's plugin registration. The configured URL/name guides app
+selection; independent gateways reject each other's capabilities. A mismatched
+or unknown target ends this attempt with BLOCKED instead of trying the token
+against another device's app. Visible app selection remains optional. Results
+still use Computer Use with the exact local request/page correlation.
+For least-privilege turns without `workspace.read`, the generated contract skips
+workspace_info and preserves the requested scopes; it still specifies the exact
+target app, and that gateway validates its own capability before any scoped read.
+
+### Register this workspace
 
 Run workspace-scoped commands from the workspace root. The local harness
 derives the trusted root from the current process `cwd`; an optional `-w` may
@@ -740,10 +792,10 @@ A visible C2C chip or picker entry is optional, not a dispatch prerequisite.
 If available, the host may select the existing connector for convenience;
 absence or loss of that visual selection does not require manual intervention.
 
-Send the normal correlated request once, naming "Codex with ChatGPT" and asking
-ChatGPT to discover and call its available C2C tools with the supplied context_id.
+Send the normal correlated request once, naming its bound device connector and
+asking ChatGPT to discover that app's C2C tools with the supplied context_id.
 For workspace tasks, request workspace_info first and verify the expected
-workspace/project identity before further reads. Add this to the existing
+machine/association and workspace/project identity before further reads. Add this to the existing
 BOOT/task question, not as a second message or a repeated BOOT. A healthy
 connection with unknown UI visibility permits this bounded discovery; known
 authorization failures do not. Web-only work needs no connector read.

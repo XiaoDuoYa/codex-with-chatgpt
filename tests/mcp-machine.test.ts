@@ -38,11 +38,12 @@ function planPayload() {
 async function connectedClient(
   gateway: MachineGateway,
   resultTransport: "computer_use" | "mailbox" = "computer_use",
+  machine?: { machineId: string; associationId: string },
 ): Promise<{
   client: Client;
   close: () => Promise<void>;
 }> {
-  const server = createMcpServer({ gateway, logger: nullLogger }, { resultTransport });
+  const server = createMcpServer({ gateway, logger: nullLogger, machine }, { resultTransport });
   const client = new Client({ name: "machine-mcp-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -63,6 +64,29 @@ afterEach(() => {
 });
 
 describe("machine MCP capability correlation", () => {
+  it("reports the serving device and rejects another device's context before a workspace read", async () => {
+    cleanups.push(isolateStateDir());
+    const root = makeTmpDir("mcp-two-devices"); cleanups.push(root);
+    const a = new MachineGateway(), b = new MachineGateway();
+    const registration = a.registerWorkspace(root);
+    b.registerWorkspace(root);
+    const request = openControlResultRequest(registration.workspaceId, { ...correlation(), ttlMs: 60_000 });
+    const grant = a.issueTurn({ ...registration, ...correlation(), requestId: request.requestId, scopes: ["workspace.read"], compactionEpoch: 0, generation: 1 });
+    const machineA = { machineId: `machine-${"a".repeat(32)}`, associationId: `assoc-${"a".repeat(32)}` };
+    const machineB = { machineId: `machine-${"b".repeat(32)}`, associationId: `assoc-${"b".repeat(32)}` };
+    const ca = await connectedClient(a, "computer_use", machineA);
+    const cb = await connectedClient(b, "computer_use", machineB);
+    try {
+      const wrong = await cb.client.callTool({ name: "workspace_info", arguments: { context_id: grant.token } });
+      expect(wrong.isError).toBe(true);
+      expect(JSON.stringify(wrong)).toContain("TOKEN_NOT_FOUND");
+      expect(wrong.structuredContent).toBeUndefined();
+      const correct = await ca.client.callTool({ name: "workspace_info", arguments: { context_id: grant.token } });
+      expect(correct.isError).not.toBe(true);
+      expect(correct.structuredContent).toMatchObject({ ...machineA, workspaceId: registration.workspaceId });
+    } finally { await ca.close(); await cb.close(); }
+  });
+
   it("hides mailbox callback tools while Computer Use is the active result transport", async () => {
     cleanups.push(isolateStateDir());
     const connection = await connectedClient(new MachineGateway());

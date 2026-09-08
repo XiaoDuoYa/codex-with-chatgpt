@@ -36,6 +36,10 @@ function readIdentity(file: string): MachineIdentity | null {
 }
 
 /** Stable, owner-only identity for the single machine-scoped connector. */
+export function readMachineIdentity(): MachineIdentity | null {
+  return readIdentity(path.join(getStateDir(), "machine", "identity.json"));
+}
+
 export function resolveMachineIdentity(): MachineIdentity {
   const file = machineIdentityFile();
   const lock = path.join(path.dirname(file), "identity.lock");

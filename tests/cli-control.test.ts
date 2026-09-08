@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { submitControlResult } from "../src/control/mailbox.js";
 import { readMachineRuntime } from "../src/gateway/runtime.js";
 import { Workspace } from "../src/workspace/manager.js";
+import { machineConnectorFile } from "../src/gateway/connector-binding.js";
 import {
   cleanup,
   isolateStateDir,
@@ -152,6 +153,28 @@ function receiveBoot(localSessionId: string): string {
 }
 
 describe("control CLI correlation", () => {
+  it("binds one device app for all workspaces and gates an unconfigured dispatch before opening a request", () => {
+    const session = "session-device-binding";
+    claimSurface(session);
+    const epoch = readMachineRuntime()!.bootEpoch;
+    fs.unlinkSync(machineConnectorFile());
+    const args = ["--local-session", session, "--task", "task-device-binding", "--iteration", "0", "--phase", "PLAN"];
+    const missing = runJson(["control", "open", ...args]);
+    expect(missing.command.status).toBe(1);
+    expect(missing.command.stdout + missing.command.stderr).toContain("unconfigured");
+    expect(runJson(["surface", "get", "--local-session", session]).body.control).toBeNull();
+    const named = runJson(["machine", "connector", "set", "--name", "Codex with ChatGPT - Device B", "--plugin-url", "https://chatgpt.com/plugins/plugin_device_b"]);
+    expect(named.command.status).toBe(0);
+    expect(readMachineRuntime()!.bootEpoch).toBe(epoch);
+    const otherCwd = runJson(["machine", "connector", "get"], projectRoot);
+    expect(otherCwd.body).toMatchObject({ status: "bound", binding: { name: "Codex with ChatGPT - Device B" } });
+    const opened = runJson(["control", "open", ...args]);
+    expect(opened.command.status).toBe(0);
+    expect(opened.body.connector).toMatchObject({ name: "Codex with ChatGPT - Device B", pluginUrl: "https://chatgpt.com/plugins/plugin_device_b", machineId: readMachineRuntime()!.machineId });
+    expect((opened.body.resultContract as { connector: unknown }).connector).toEqual(opened.body.connector);
+    expect(opened.body.deliveryPrompt).toContain(JSON.stringify(opened.body.connector));
+  }, 90_000);
+
   it("reconciles exact terminal page evidence through the authenticated machine client", () => {
     const localSessionId = "session-observe";
     claimSurface(localSessionId, "browser-use:fc6c0073-5fb5-4a4e-81f7-307535575b6a");
@@ -465,7 +488,7 @@ describe("control CLI correlation", () => {
     expect(opened.body.resultContract).toMatchObject({
       phase: "RESEARCH",
       resultTransport: "computer_use",
-      requiredTools: [],
+      requiredTools: ["workspace_info"],
       examples: [
         { kind: "RESEARCH", payload: { sources: [] } },
         { kind: "BLOCKED", payload: { reason: expect.any(String), needs: expect.any(Array) } },

@@ -46,7 +46,8 @@ repository contents, diffs, logs, credentials, or full command output.
 
 The connection is configured once per machine:
 
-- One connector named **`Codex with ChatGPT`**.
+- One connector per device, with an exact device-specific name recorded locally.
+  One ChatGPT account can contain several devices' C2C connectors.
 - Connector authentication is **`None`**. The official OpenAI Secure MCP Tunnel
   provides the authenticated transport; the connector does not contain a
   project-specific credential.
@@ -98,6 +99,10 @@ If a healthy C2C installation already uses an official Secure MCP Tunnel, reuse
 its installed tunnel ID and protected runtime key through
 `machine setup --reuse-existing`; do not recreate the tunnel or ask for the key
 again.
+Reuse an existing valid device-to-app binding. If it is missing or stale, ask
+which exact ChatGPT app belongs to this computer, record its confirmed name and
+observed stable plugin URL with `machine connector set`, and reuse that binding
+for all projects. Never choose another computer's app by a similar name.
 Otherwise, after preflight and a clean source build, pause and guide me through
 creating my own official Secure MCP Tunnel. Wait for my tunnel ID and the
 absolute path to a private runtime-key file.
@@ -277,7 +282,7 @@ export PATH="$HOME/.local/bin:$PATH"
 For an immediate check without changing PATH, use
 `"$HOME/.local/bin/c2c" machine status --json`.
 
-### 5. Connect ChatGPT once
+### 5. Connect ChatGPT once per device
 
 In the intended ChatGPT account/workspace, enable developer mode if needed
 (currently Settings > Security and login; an administrator may need to grant
@@ -287,7 +292,7 @@ UI version, the entry may be called an app, plugin, or connector.
 
 | Field | Value |
 | --- | --- |
-| Name | `Codex with ChatGPT` |
+| Name | A distinct device name, e.g. `Codex with ChatGPT - Laptop`; existing single-device names can be kept |
 | Connection | `Tunnel` |
 | OpenAI Secure Tunnel | Select the same tunnel configured in step 4 |
 | Authentication | `None` |
@@ -302,6 +307,29 @@ If Tunnel is not an available connection type, stop and check account access
 or administrator settings, rather than selecting a public URL or OAuth.
 Tell Codex the connector is configured before proceeding to step 6. A connector
 card alone is not proof of result delivery.
+
+Tell Codex which exact app belongs to this computer. Codex records it locally:
+
+```sh
+c2c machine connector set --name '<exact app name>' \
+  --plugin-url 'https://chatgpt.com/plugins/plugin_<observed-id>' --json
+c2c machine connector get --json
+```
+
+Use the real app URL observed in ChatGPT, not the placeholder. Omit `--plugin-url`
+if no stable app URL is exposed; names must then identify the app unambiguously.
+The binding is shared by this device's workspaces and sessions, and is preserved
+by normal upgrades. It does not create or rename a remote app or verify its
+Tunnel selection by itself; a real read validates the serving machine.
+
+For two computers, install on each and bind each computer's own Tunnel/app.
+Both apps may live in the same ChatGPT account. The route is **device → Tunnel
+→ bound app → workspace/Project → session/Chat/tab**. Do not copy machine state,
+credentials or browser ownership files between devices. A missing binding after
+upgrade needs this one-time step; changing the Tunnel association marks the old
+binding stale. Codex must resolve it before local-MCP dispatch, without changing
+existing sessions or requiring per-project app installation. See
+[Device connector binding](docs/protocol.md#device-connector-binding).
 
 After creating the app or changing its tool schemas, verify the task-needed
 read tools and input contracts in the existing app while the gateway is healthy.
@@ -320,7 +348,8 @@ c2c machine status --json
 c2c machine doctor --no-fix --json
 ```
 
-Expect Skill `installed: true` and `matches: true`, machine `ready: true`, and
+Expect Skill `installed: true` and `matches: true`, machine `ready: true`,
+`machine connector get` status `bound`, and
 doctor `ok: true`. These checks do not prove ChatGPT can return results.
 
 Open your actual project in Codex desktop. In a new session, ask:
