@@ -324,6 +324,60 @@ describe("OpenAI tunnel release installation", () => {
 });
 
 describe("OpenAI tunnel runtime lifecycle", () => {
+  it.each([true, false])("keeps current runtime identity despite historical auth logs (ready=%s)", (ready) => {
+    const status = parseOpenAiTunnelStatus(JSON.stringify({
+      process_running: true, healthy: ready, ready, runtime_state: ready ? "ready" : "starting",
+      tunnel_id: "tunnel_0123456789abcdef0123456789abcdef",
+      process: { pid: 401, target_kind: "command", target_value: "node /workspace/403/server.js" },
+      logs: ["yesterday: 401 unauthorized", "previous run: 403 forbidden"],
+    }));
+    expect(status).toMatchObject({ ok: ready, processRunning: true, healthy: ready, ready, pid: 401 });
+    expect(status.detail).not.toMatch(/authorization|permission was denied/);
+  });
+
+  it("ignores historical authentication diagnostics during successful lifecycle commands", () => {
+    const stateRoot = makeStateRoot();
+    const keyFile = write(stateRoot, "key", "runtime-key");
+    fs.chmodSync(keyFile, 0o600);
+    const config = createOpenAiTunnelConfig({
+      stateRoot, tunnelId: "tunnel_0123456789abcdef0123456789abcdef", runtimeKeyFile: keyFile,
+    });
+    prepareManagedRelease(stateRoot, config);
+    const runner = vi.fn(() => result(JSON.stringify({
+      process_running: true, healthy: true, ready: true,
+      logs: ["old request failed: 401 unauthorized"],
+    }), 0, "historical log: 403 forbidden"));
+    expect(connectOpenAiTunnel(config, "node server.js", { runner }).ok).toBe(true);
+    expect(statusOpenAiTunnel(config, { runner }).ok).toBe(true);
+    expect(doctorOpenAiTunnel(config, { runner }).ok).toBe(true);
+    expect(stopOpenAiTunnel(config, {
+      runner: vi.fn(() => result(JSON.stringify({ stopped: true, logs: ["401 unauthorized"] }), 0, "old 403 forbidden")),
+    }).stopped).toBe(true);
+  });
+
+  it.each(["error", "remote_error"])("retains process identity while reporting current %s authentication failure", (field) => {
+    const status = parseOpenAiTunnelStatus(JSON.stringify({
+      process_running: true, healthy: true, ready: true, process: { pid: 42 },
+      [field]: "403 forbidden",
+    }));
+    expect(status).toMatchObject({ ok: false, processRunning: true, pid: 42 });
+    expect(status.detail).toContain("Tunnels Read + Use");
+  });
+
+  it("does not accept failed commands with a ready snapshot and current stderr auth failure", () => {
+    const stateRoot = makeStateRoot();
+    const keyFile = write(stateRoot, "key", "runtime-key");
+    fs.chmodSync(keyFile, 0o600);
+    const config = createOpenAiTunnelConfig({
+      stateRoot, tunnelId: "tunnel_0123456789abcdef0123456789abcdef", runtimeKeyFile: keyFile,
+    });
+    prepareManagedRelease(stateRoot, config);
+    const runner = vi.fn(() => result(JSON.stringify({ process_running: true, healthy: true, ready: true }), 1, "401 unauthorized"));
+    expect(statusOpenAiTunnel(config, { runner })).toMatchObject({ ok: false, detail: expect.stringContaining("401") });
+    expect(() => connectOpenAiTunnel(config, "node server.js", { runner })).toThrow(/401/);
+    expect(() => stopOpenAiTunnel(config, { runner })).toThrow(/401/);
+  });
+
   it("parses the pinned 0.0.14 runtime identity fields", () => {
     const config = createOpenAiTunnelConfig({
       stateRoot: makeStateRoot(),

@@ -744,7 +744,7 @@ function defaultRunner(command: string, args: string[], options: TunnelCommandOp
 
 function commandOutput(result: TunnelCommandResult): string {
   // JSON mode writes the machine-readable payload to stdout and diagnostics to
-  // stderr. Parse stdout alone when it exists; callers separately scan both.
+  // stderr. Historical logs must not override a structured runtime snapshot.
   return result.stdout.trim() || result.stderr.trim();
 }
 
@@ -775,6 +775,21 @@ function authFailure(output: string): { code: "UNAUTHORIZED" | "FORBIDDEN"; mess
   return null;
 }
 
+function commandAuthFailure(result: TunnelCommandResult): ReturnType<typeof authFailure> {
+  try {
+    const parsed: unknown = JSON.parse(commandOutput(result));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const snapshot = parsed as Record<string, unknown>;
+    // Only explicit current error fields describe authentication. Logs, paths,
+    // PIDs and target commands may contain unrelated or historical 401/403 text.
+    const currentError = JSON.stringify([snapshot.error, snapshot.remote_error]);
+    return authFailure(currentError)
+      ?? (result.status !== 0 ? authFailure(result.stderr) : null);
+  } catch {
+    return authFailure(allCommandOutput(result));
+  }
+}
+
 export class OpenAiTunnelError extends Error {
   readonly code: "UNAUTHORIZED" | "FORBIDDEN" | "COMMAND_FAILED" | "NOT_READY";
 
@@ -790,23 +805,14 @@ export function parseOpenAiTunnelStatus(
   exitStatus = 0,
   associationNonce?: string,
 ): OpenAiTunnelRuntimeStatus {
-  const auth = authFailure(output);
-  if (auth) {
-    return {
-      ok: false,
-      processRunning: false,
-      healthy: false,
-      ready: false,
-      detail: auth.message,
-    };
-  }
+  const auth = commandAuthFailure({ stdout: output, stderr: "", status: exitStatus });
   if (exitStatus !== 0) {
     return {
       ok: false,
       processRunning: false,
       healthy: false,
       ready: false,
-      detail: safeTunnelDetail(output || `tunnel-client exited with status ${exitStatus}`, associationNonce ? [associationNonce] : []),
+      detail: auth?.message ?? safeTunnelDetail(output || `tunnel-client exited with status ${exitStatus}`, associationNonce ? [associationNonce] : []),
     };
   }
   try {
@@ -820,7 +826,7 @@ export function parseOpenAiTunnelStatus(
     const state = typeof parsed.runtime_state === "string"
       ? parsed.runtime_state
       : typeof parsed.status === "string" ? parsed.status : undefined;
-    const detail = processRunning && healthy && ready
+    const detail = auth?.message ?? (processRunning && healthy && ready
       ? "process_running=true healthy=true ready=true"
       : safeTunnelDetail([
           `process_running=${processRunning}`,
@@ -829,7 +835,7 @@ export function parseOpenAiTunnelStatus(
           ...(state ? [`state=${state}`] : []),
           ...(typeof parsed.error === "string" ? [parsed.error] : []),
           ...(typeof parsed.remote_error === "string" ? [parsed.remote_error] : []),
-        ].join("; "), associationNonce ? [associationNonce] : []);
+        ].join("; "), associationNonce ? [associationNonce] : []));
     const alias = typeof parsed.alias === "string" ? parsed.alias : undefined;
     const tunnelId = typeof parsed.tunnel_id === "string"
       ? parsed.tunnel_id
@@ -844,7 +850,7 @@ export function parseOpenAiTunnelStatus(
     const rawPid = processInfo?.pid ?? parsed.pid;
     const pid = typeof rawPid === "number" && Number.isSafeInteger(rawPid) && rawPid > 0 ? rawPid : undefined;
     return {
-      ok: processRunning && healthy && ready,
+      ok: !auth && processRunning && healthy && ready,
       processRunning,
       healthy,
       ready,
@@ -865,7 +871,7 @@ export function parseOpenAiTunnelStatus(
       processRunning: false,
       healthy: false,
       ready: false,
-      detail: `tunnel-client returned non-JSON status: ${safeTunnelDetail(output, associationNonce ? [associationNonce] : [])}`,
+      detail: auth?.message ?? `tunnel-client returned non-JSON status: ${safeTunnelDetail(output, associationNonce ? [associationNonce] : [])}`,
     };
   }
 }
@@ -915,8 +921,7 @@ export function connectOpenAiTunnel(
     env: managedTunnelEnvironment(parsed),
   });
   const output = commandOutput(result);
-  const diagnostics = allCommandOutput(result);
-  const auth = authFailure(diagnostics);
+  const auth = commandAuthFailure(result);
   if (auth) throw new OpenAiTunnelError(auth.code, auth.message);
   const status = parseOpenAiTunnelStatus(output, result.status, parsed.associationNonce);
   if (!status.ok) throw new OpenAiTunnelError("NOT_READY", `OpenAI tunnel runtime is not ready: ${status.detail}`);
@@ -938,10 +943,9 @@ export function statusOpenAiTunnel(
     timeoutMs: 10_000,
     env: minimalTunnelEnvironment(tunnelStateRoot(parsed.profileDir)),
   });
-  const diagnostics = allCommandOutput(result);
-  const auth = authFailure(diagnostics);
-  if (auth) return { ok: false, processRunning: false, healthy: false, ready: false, detail: auth.message };
-  return parseOpenAiTunnelStatus(commandOutput(result), result.status, parsed.associationNonce);
+  const status = parseOpenAiTunnelStatus(commandOutput(result), result.status, parsed.associationNonce);
+  const auth = commandAuthFailure(result);
+  return auth ? { ...status, ok: false, detail: auth.message } : status;
 }
 
 /** Remove the stdio command from user-facing status payloads. */
@@ -1005,7 +1009,7 @@ export function stopOpenAiTunnel(
   });
   const output = commandOutput(result);
   const diagnostics = allCommandOutput(result);
-  const auth = authFailure(diagnostics);
+  const auth = commandAuthFailure(result);
   if (auth) throw new OpenAiTunnelError(auth.code, auth.message);
   if (result.status !== 0 && !/not found|not running|unknown alias|alias[^\r\n]{0,160}is not known/i.test(diagnostics)) {
     throw new OpenAiTunnelError(

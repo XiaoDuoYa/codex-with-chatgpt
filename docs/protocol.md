@@ -164,6 +164,33 @@ For least-privilege turns without `workspace.read`, the generated contract skips
 workspace_info and preserves the requested scopes; it still specifies the exact
 target app, and that gateway validates its own capability before any scoped read.
 
+### Account migration
+
+Changing the device connector does not migrate saved ChatGPT Projects or chats.
+After a user-confirmed account change, inspect each affected workspace's
+`surface get` result. A `bound` connector proves only local device/app routing;
+an isolated acceptance workspace does not migrate the user's existing projects.
+
+For an authorized reset of an inaccessible old-account Project, first back up
+the machine surface ownership state and the affected checkout's session and
+ownership metadata. Resolve registered checkout identities and check for active
+requests before using `machine workspace unregister` with the exact returned
+workspace/project/registration IDs. A Project's authority is removed only when
+its last registered checkout is unregistered. Coordinate other checkouts rather
+than resetting an active shared Project. Re-register from each trusted checkout
+and run `surface get` for its saved local sessions: reconciliation clears stale
+Project/chat routes while retaining task/checkpoint history. A machine absence
+marker prevents an old checkout mirror from restoring the removed binding.
+
+When `projectUrl`, `binding` and `control` are null, that session is ready for
+the normal first-Project selection and BOOT/commit flow. Preserve healthy
+new-account mappings, device identity, connector configuration and credentials.
+Legacy session directories that have been superseded can be moved to a private
+backup after verifying their old-account routes. Do not delete the entire
+machine state directory, use session retirement to migrate task history, or
+copy another device's state. The host still needs browser tools to create and
+verify the new Project/chat; clearing a route does not supply browser capability.
+
 ### Register this workspace
 
 Run workspace-scoped commands from the workspace root. The local harness

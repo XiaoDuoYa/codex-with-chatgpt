@@ -4,6 +4,16 @@
 
 状态只表示已实现和实际验证的范围；自动化测试与真实 ChatGPT 验证分别记录。
 
+## Tunnel 状态与账户迁移
+
+- 2026-09-09：状态解析以当前结构化快照为准，历史日志、进程 ID、路径或成功命令的
+  stderr 中出现 401/403，不再覆盖 healthy/ready 或抹掉进程归属信息。
+- 当前 error/remote_error 以及失败命令的认证错误仍报告失败；connect、status、doctor
+  和 stop 均有回归覆盖。当前认证失败时保留可用的进程身份供归属检查。
+- 账户迁移需要分别处理设备插件绑定和工作区 Project/Chat 路由；增加
+  [备份、注销和重新配对流程](protocol.md#account-migration)。独立验收目录的测试
+  不代表原项目已迁移，浏览器能力缺失也不能靠删除路由解决。
+
 ## 多设备插件路由
 
 - 2026-09-08：增加机器级 `machine connector get/set`，把本机身份、Tunnel、连接身份

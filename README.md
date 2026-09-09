@@ -338,6 +338,12 @@ do not assume a fixed menu path exists. Opening Manage or restarting the Tunnel
 does not prove that schemas were refreshed. A real scoped read is verified
 separately in step 6. Keep the same global app; do not recreate it per project.
 
+After changing ChatGPT accounts, also check access to the workspace's saved
+Project/chat. A bound connector does not migrate old projects. Follow the
+[account migration procedure](docs/protocol.md#account-migration) to back up and
+clear confirmed stale routes before Codex pairs a new Project/chat. Retain valid
+bindings for the new account.
+
 ### 6. Verify installation, then the real round trip
 
 Use the global command from now on:
