@@ -91,3 +91,20 @@ describe.each(engines())("search engine: %s", (engine) => {
     expect(paths).not.toContain("README.md");
   });
 });
+
+describe("search input safety", () => {
+  it("never evaluates model-provided regular expressions in the Node fallback", async () => {
+    process.env.C2C_DISABLE_RG = "1";
+    resetRipgrepCache();
+
+    await expect(
+      searchWorkspace(ws, { query: "^(a+)+$", regex: true })
+    ).rejects.toMatchObject({ code: "REGEX_ENGINE_UNAVAILABLE" });
+  });
+
+  it("rejects oversized queries before selecting a search engine", async () => {
+    await expect(
+      searchWorkspace(ws, { query: "a".repeat(1_025) })
+    ).rejects.toMatchObject({ code: "SEARCH_QUERY_TOO_LARGE" });
+  });
+});

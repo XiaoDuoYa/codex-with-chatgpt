@@ -49,11 +49,14 @@ function truncate(text: string): { text: string; truncated: boolean } {
     truncated = true;
   }
   if (Buffer.byteLength(next, "utf8") > MAX_OUTPUT_BYTES) {
+    const marker = "\n…[truncated]";
+    const contentBudget = MAX_OUTPUT_BYTES - Buffer.byteLength(marker, "utf8");
     let cut = next;
-    while (Buffer.byteLength(cut, "utf8") > MAX_OUTPUT_BYTES && cut.length > 0) {
+    while (Buffer.byteLength(cut, "utf8") > contentBudget && cut.length > 0) {
       cut = cut.slice(0, Math.floor(cut.length * 0.9));
     }
-    next = `${cut}\n…[truncated]`;
+    while (Buffer.byteLength(cut, "utf8") > contentBudget) cut = cut.slice(0, -1);
+    next = `${cut}${marker}`;
     truncated = true;
   }
   return { text: next, truncated };

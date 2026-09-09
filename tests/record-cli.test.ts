@@ -3,7 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { listExecutionOutputs } from "../src/execution/output.js";
-import { appendExecutionRecord, readExecutionRecords, type ExecutionRecord } from "../src/execution/records.js";
+import {
+  appendExecutionRecord,
+  readExecutionRecords,
+  type ExecutionRecordInput,
+} from "../src/execution/records.js";
 import { Workspace } from "../src/workspace/manager.js";
 import { cleanup, makeTmpDir } from "./helpers.js";
 
@@ -13,8 +17,20 @@ const cliEntry = path.join(projectRoot, "src/cli/index.ts");
 function runRecord(root: string, args: string[]) {
   return spawnSync(
     process.execPath,
-    ["--import", "tsx", cliEntry, "record", "--workspace", root, "--task", "c2c_test", ...args],
-    { cwd: projectRoot, encoding: "utf8", env: process.env }
+    [
+      "--import",
+      "tsx/esm",
+      cliEntry,
+      "record",
+      "--workspace",
+      root,
+      "--local-session",
+      "session-record-cli",
+      "--task",
+      "c2c_test",
+      ...args,
+    ],
+    { cwd: root, encoding: "utf8", env: process.env }
   );
 }
 
@@ -52,10 +68,20 @@ describe("c2c record", () => {
 
       expect(result.status).toBe(0);
       expect(readExecutionRecords(workspace.id)).toEqual([
-        expect.objectContaining({ taskId: "c2c_test", iteration: 2, changedFiles: 3 }),
+        expect.objectContaining({
+          localSessionId: "session-record-cli",
+          taskId: "c2c_test",
+          iteration: 2,
+          changedFiles: 3,
+        }),
       ]);
       expect(listExecutionOutputs(workspace.id)).toEqual([
-        expect.objectContaining({ command: "pnpm test", exitCode: 1, iteration: 2 }),
+        expect.objectContaining({
+          command: "pnpm test",
+          exitCode: 1,
+          localSessionId: "session-record-cli",
+          iteration: 2,
+        }),
       ]);
     });
   });
@@ -120,7 +146,8 @@ describe("c2c record", () => {
 describe("execution record persistence", () => {
   it("rejects invalid records at the write boundary", () => {
     withRecordEnvironment((_root, workspace) => {
-      const invalidRecord: ExecutionRecord = {
+      const invalidRecord: ExecutionRecordInput = {
+        localSessionId: "session-record-cli",
         taskId: "c2c_invalid",
         iteration: Number.NaN,
         changedFiles: 0,

@@ -1,4 +1,5 @@
 {
   "name": "Remi",
-  "maxIterations": 12
+  "maxIterations": 12,
+  "resultTransport": "auto"
 }

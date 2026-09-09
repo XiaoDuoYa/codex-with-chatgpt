@@ -34,6 +34,7 @@ export const SENSITIVE_PATTERNS: string[] = [
   "*.keychain",
   "*.keychain-db",
   ".cloudflared/",
+  ".codex-with-chatgpt/",
   "credentials.json",
   "service-account*.json",
   "secrets.json",

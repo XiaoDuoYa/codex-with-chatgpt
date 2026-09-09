@@ -8,12 +8,36 @@ export interface GitCommandResult {
   code: number | null;
 }
 
+const REPOSITORY_SELECTING_ENV = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NAMESPACE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_PREFIX",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_SHALLOW_FILE",
+  "GIT_WORK_TREE",
+] as const;
+
+function workspaceGitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of REPOSITORY_SELECTING_ENV) delete env[name];
+  return env;
+}
+
 export function runGit(root: string, args: string[]): GitCommandResult {
   const result = spawnSync("git", args, {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
+    env: workspaceGitEnv(),
   });
   return {
     ok: result.status === 0,
