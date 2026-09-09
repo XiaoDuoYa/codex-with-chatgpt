@@ -34,7 +34,7 @@ Agent（Codex），然后去倒杯咖啡：
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
 5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
+  （运行 c2c gateway setup，用内置浏览器打开 ChatGPT 配置一次共享连接器并输入配对码）。
    全程只用内置浏览器，禁止打开任何第三方浏览器。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
@@ -58,7 +58,7 @@ Codex 会自动完成所有配置，你只会看到：
 Codex with ChatGPT
 
 ✓ 当前项目已识别
-✓ Workspace Bridge 已启动
+✓ 共享 Gateway 已启动
 ✓ 安全连接已建立
 ✓ ChatGPT 已连接
 ✓ 文件读取测试通过
@@ -70,9 +70,13 @@ Ready.
 
 ### 可选的固定域名
 
-默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
+默认公网地址是临时的。共享 Gateway 只配置一个 ChatGPT 连接器；新工作区由 Codex 自动附加，不会再创建连接器。
 
-如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
+如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时会问你要不要用固定域名，例如 `example.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改连接器。没有账号、不想用、登录失败：继续用临时地址，功能一样。
+
+从旧版“每个工作区一个 Bridge”升级到共享 Gateway 时，第一次启动会在本机一次性迁移旧的
+OAuth 状态。固定连接器会继续复用，不需要再次配对；只有旧授权已经失效时，`c2c gateway setup`
+才会打印新的配对码。
 
 凭证放在系统目录，不进项目。
 
@@ -88,16 +92,16 @@ Ready.
               数据面    │          │ 控制面（消息 < 1 KB）
                         ▼          │
              ┌─────────────────────┐
-             │      C2C Bridge     │   仅监听本机回环地址
-             │  只读 MCP           │   OAuth 2.1 + 一次性配对码
-             │  OAuth + 配对       │   Cloudflare Quick Tunnel
+             │      C2C Gateway   │   仅监听本机回环地址
+             │  只读 MCP           │   单一 OAuth 凭据
+             │  OAuth + 配对       │   短期工作区租约
              │  Tunnel 管理        │
              └──────────┬──────────┘
-                        │  只读
+                        │  只读，不透明 workspace_id
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
-             │     本地工作区      │◀─────────│    Codex Harness    │
-             └─────────────────────┘ 编辑/git │  Shell / 测试 / 修复 │
+             │    已附加工作区     │◀─────────│    Codex Harness    │
+             └─────────────────────┘ 自动附加 │  Shell / 测试 / 修复 │
                                               └─────────────────────┘
 ```
 
@@ -115,8 +119,10 @@ Ready.
 
 - **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
   注入都无法启用它们。
-- **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
-  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
+- **Gateway 租约边界**：OAuth 凭据只属于本机 Gateway，MCP 调用通过 Codex
+  自动创建的短期租约和 active 的不透明 `workspace_id` 解析工作区，不接受原始
+  Windows 路径；模型不能选择另一个已附加但非 active 的工作区。每个工作区仍
+  基于规范化 realpath 校验（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
   （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
 - **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
@@ -133,9 +139,10 @@ pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
 pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
 
-c2c setup           # 一条命令：Bridge + 隧道 + 配对码
+c2c gateway setup   # 一条命令：共享 Gateway + 隧道 + 首次配对码
+c2c gateway attach  # 每个任务自动附加当前工作区
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
-c2c status / doctor / pair / unpair / logs / stop
+c2c status / doctor / gateway status / gateway pair / stop
 ```
 
 环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`

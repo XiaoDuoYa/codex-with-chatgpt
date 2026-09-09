@@ -43,9 +43,16 @@ export interface TokenRecord {
   revoked: boolean;
 }
 
-interface PersistedAuthState {
+export interface PersistedAuthState {
   clients: ClientRegistration[];
   tokens: TokenRecord[];
+}
+
+export interface AuthStateMigrationResult {
+  migrated: boolean;
+  sourceFiles: string[];
+  importedClients: number;
+  importedTokens: number;
 }
 
 export type VerifyTokenResult =
@@ -58,6 +65,160 @@ const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 
 function sha256hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function authStoreFileFor(workspaceId: string): string {
+  return path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspaceId}.json`);
+}
+
+function migrationMarkerFileFor(targetFile: string): string {
+  const parsed = path.parse(targetFile);
+  return path.join(parsed.dir, `${parsed.name}.migration.json`);
+}
+
+interface AuthStateMigrationMarker {
+  version: 1;
+  migratedAt: string;
+  sourceFiles: string[];
+}
+
+interface EndpointState {
+  workspaceId?: unknown;
+  publicUrl?: unknown;
+  mcpUrl?: unknown;
+}
+
+function endpointUrl(endpoint: EndpointState | null): string | null {
+  if (!endpoint) return null;
+  if (typeof endpoint.mcpUrl === "string" && endpoint.mcpUrl.trim() !== "") return endpoint.mcpUrl;
+  if (typeof endpoint.publicUrl === "string" && endpoint.publicUrl.trim() !== "") return `${endpoint.publicUrl}/mcp`;
+  return null;
+}
+
+function legacyAuthCandidates(targetFile: string): string[] {
+  const authDir = path.dirname(targetFile);
+  let files: string[];
+  try {
+    files = fs
+      .readdirSync(authDir)
+      .filter((name) => name.endsWith(".json") && path.join(authDir, name) !== targetFile)
+      .map((name) => path.join(authDir, name));
+  } catch {
+    return [];
+  }
+
+  // Prefer auth stores belonging to the same stable endpoint. This keeps an
+  // upgrade from importing credentials for unrelated old connectors while
+  // still finding the previous per-workspace store after a Gateway upgrade.
+  const endpointDir = path.join(getStateDir(), "endpoints");
+  const gatewayEndpoint = readJsonIfExists<EndpointState>(path.join(endpointDir, "gateway.json"));
+  const gatewayUrl = endpointUrl(gatewayEndpoint);
+  if (!gatewayUrl) return files;
+
+  const matchingIds = new Set<string>();
+  try {
+    for (const name of fs.readdirSync(endpointDir)) {
+      if (!name.endsWith(".json") || name === "gateway.json") continue;
+      const endpoint = readJsonIfExists<EndpointState>(path.join(endpointDir, name));
+      if (endpointUrl(endpoint) !== gatewayUrl) continue;
+      const id = typeof endpoint?.workspaceId === "string" ? endpoint.workspaceId : path.basename(name, ".json");
+      matchingIds.add(id);
+    }
+  } catch {
+    // If endpoint state is unavailable, the caller can still recover by
+    // considering all legacy auth files in this local state directory.
+  }
+  const linked = files.filter((file) => matchingIds.has(path.basename(file, ".json")));
+  return linked.length > 0 ? linked : files;
+}
+
+/**
+ * Import the previous per-workspace OAuth state into the shared Gateway.
+ *
+ * Only persisted hashes are copied; plaintext access/refresh tokens are never
+ * reconstructed or logged. Imported records are rebound to `targetWorkspaceId`
+ * so an existing ChatGPT authorization can keep using the stable connector.
+ * A marker makes the upgrade one-shot, including after the user later revokes
+ * all Gateway tokens.
+ */
+export function migrateLegacyAuthState(opts: {
+  targetFile: string;
+  targetWorkspaceId?: string;
+}): AuthStateMigrationResult {
+  const targetWorkspaceId = opts.targetWorkspaceId ?? "*";
+  const markerFile = migrationMarkerFileFor(opts.targetFile);
+  if (readJsonIfExists<AuthStateMigrationMarker>(markerFile)?.version === 1) {
+    return { migrated: false, sourceFiles: [], importedClients: 0, importedTokens: 0 };
+  }
+
+  const target = readJsonIfExists<PersistedAuthState>(opts.targetFile);
+  if ((target?.tokens ?? []).some((token) => !token.revoked && token.expiresAt > Date.now())) {
+    // A Gateway that already has a live credential has either completed this
+    // migration or was paired directly. Do not resurrect an old credential
+    // after a later `unpair`.
+    writeSecureJson(markerFile, {
+      version: 1,
+      migratedAt: new Date().toISOString(),
+      sourceFiles: [],
+    } satisfies AuthStateMigrationMarker);
+    return { migrated: false, sourceFiles: [], importedClients: 0, importedTokens: 0 };
+  }
+
+  const sources = legacyAuthCandidates(opts.targetFile);
+  const clients = new Map<string, ClientRegistration>();
+  const tokens = new Map<string, TokenRecord>();
+  for (const client of target?.clients ?? []) {
+    if (client && typeof client.clientId === "string") clients.set(client.clientId, client);
+  }
+  for (const token of target?.tokens ?? []) {
+    if (token && typeof token.hash === "string") tokens.set(token.hash, token);
+  }
+
+  const importedSources: string[] = [];
+  let importedClientIds = new Set<string>();
+  let importedTokenHashes = new Set<string>();
+  for (const sourceFile of sources) {
+    const source = readJsonIfExists<PersistedAuthState>(sourceFile);
+    if (!source || !Array.isArray(source.tokens) || source.tokens.length === 0) continue;
+    let importedFromSource = false;
+    for (const client of source.clients ?? []) {
+      if (client && typeof client.clientId === "string") {
+        clients.set(client.clientId, client);
+        importedClientIds.add(client.clientId);
+        importedFromSource = true;
+      }
+    }
+    for (const token of source.tokens) {
+      if (
+        !token ||
+        typeof token.hash !== "string" ||
+        (token.kind !== "access" && token.kind !== "refresh") ||
+        token.revoked ||
+        token.expiresAt <= Date.now()
+      ) {
+        continue;
+      }
+      tokens.set(token.hash, { ...token, workspaceId: targetWorkspaceId });
+      importedTokenHashes.add(token.hash);
+      importedFromSource = true;
+    }
+    if (importedFromSource) importedSources.push(sourceFile);
+  }
+
+  if (importedSources.length === 0) return { migrated: false, sourceFiles: [], importedClients: 0, importedTokens: 0 };
+
+  writeSecureJson(opts.targetFile, { clients: [...clients.values()], tokens: [...tokens.values()] });
+  writeSecureJson(markerFile, {
+    version: 1,
+    migratedAt: new Date().toISOString(),
+    sourceFiles: importedSources,
+  } satisfies AuthStateMigrationMarker);
+  return {
+    migrated: true,
+    sourceFiles: importedSources,
+    importedClients: [...importedClientIds].filter((id) => !(target?.clients ?? []).some((client) => client.clientId === id)).length,
+    importedTokens: [...importedTokenHashes].filter((hash) => !(target?.tokens ?? []).some((token) => token.hash === hash)).length,
+  };
 }
 
 function newToken(prefix: string): string {
@@ -86,8 +247,7 @@ export class AuthStore {
     readonly workspaceId: string,
     opts: { file?: string } = {}
   ) {
-    this.file =
-      opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspaceId}.json`);
+    this.file = opts.file ?? authStoreFileFor(workspaceId);
     this.load();
   }
 

@@ -14,6 +14,10 @@ export interface BearerAuthDeps {
  * Bearer-token guard for /mcp.
  * - missing/invalid/expired token  -> 401 (+ WWW-Authenticate with resource metadata)
  * - valid token for another workspace -> 403
+ *
+ * A Gateway passes `workspaceId: "*"`. In that mode the token is a global
+ * Gateway credential and the selected workspace is checked by the MCP
+ * resolver against the locally attached workspace leases.
  */
 export function bearerAuth(deps: BearerAuthDeps) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -39,7 +43,11 @@ export function bearerAuth(deps: BearerAuthDeps) {
         .json({ error: "unauthorized", error_description: `Token ${verdict.reason}` });
       return;
     }
-    if (verdict.record.workspaceId !== deps.workspaceId) {
+    const workspaceMatches =
+      deps.workspaceId === "*"
+        ? verdict.record.workspaceId === "*"
+        : verdict.record.workspaceId === deps.workspaceId;
+    if (!workspaceMatches) {
       deps.logger.warn("Rejected MCP request: token bound to a different workspace");
       res.status(403).json({
         error: "forbidden",

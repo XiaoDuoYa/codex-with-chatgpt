@@ -9,7 +9,9 @@ import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
 export interface OAuthDeps {
   store: AuthStore;
   pairing: PairingManager;
-  workspaceName: string;
+  workspaceName: string | (() => string);
+  /** Token binding used by a multi-workspace Gateway ("*" for global). */
+  tokenWorkspaceId?: string;
   getBaseUrl: (req: Request) => string;
   logger: Logger;
 }
@@ -23,6 +25,10 @@ interface PendingAuthRequest {
   codeChallenge: string;
   resource?: string;
   expiresAt: number;
+}
+
+function currentWorkspaceName(value: OAuthDeps["workspaceName"]): string {
+  return typeof value === "function" ? value() : value;
 }
 
 function isAllowedRedirectUri(uri: string): boolean {
@@ -237,7 +243,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     res
       .status(200)
       .type("html")
-      .send(pairingPage({ requestId: request.id, workspaceName: deps.workspaceName, scopes }));
+      .send(pairingPage({ requestId: request.id, workspaceName: currentWorkspaceName(deps.workspaceName), scopes }));
   });
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
@@ -266,7 +272,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         .send(
           pairingPage({
             requestId: request.id,
-            workspaceName: deps.workspaceName,
+            workspaceName: currentWorkspaceName(deps.workspaceName),
             scopes: request.scopes,
             error: messages[verdict.reason] ?? "Verification failed.",
           })
@@ -315,7 +321,11 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
-      const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
+      const tokens = deps.store.issueTokens({
+        clientId,
+        scopes: record.scopes,
+        workspaceId: deps.tokenWorkspaceId,
+      });
       deps.logger.info(`Issued access token for client ${clientId}`);
       res.json({
         access_token: tokens.accessToken,

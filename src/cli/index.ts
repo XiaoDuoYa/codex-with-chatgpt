@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
+import { GATEWAY_ID, findLiveGateway, type GatewayRuntimeState } from "../gateway/runtime.js";
+import { adminFetch, ensureBridge, ensureGateway, gatewayAdminFetch, stopBridge, stopGateway } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
@@ -23,6 +24,7 @@ import {
   needsTunnelChoice,
   readTunnelState,
   TUNNEL_CHOICE_PROMPT,
+  writeTunnelState,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
@@ -189,6 +191,29 @@ interface AdminInfo {
   startedAt: string;
 }
 
+interface GatewayAdminInfo {
+  service: string;
+  version: string;
+  gatewayId: string;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  workspaces: Array<{
+    workspaceId: string;
+    workspaceRoot: string;
+    workspaceName: string;
+    attachedAt: string;
+    lastSeenAt: string;
+    expiresAt: number;
+  }>;
+  port: number;
+  publicUrl: string | null;
+  tunnel: { running: boolean; url: string | null; provider: string };
+  tokenCount: number;
+  pairingActive: boolean;
+  pid: number;
+  startedAt: string;
+}
+
 async function ensureBridgeAndTunnel(
   workspaceRoot: string,
   opts: { tunnel: boolean }
@@ -211,6 +236,40 @@ async function ensureBridgeAndTunnel(
   return { runtime, info, mcpUrl };
 }
 
+async function ensureGatewayAndTunnel(
+  workspaceRoot: string,
+  opts: { tunnel: boolean }
+): Promise<{ runtime: GatewayRuntimeState; info: GatewayAdminInfo; mcpUrl: string | null; attached: Record<string, unknown> }> {
+  // Preserve a previously provisioned per-workspace named tunnel when this
+  // installation is upgraded to the shared Gateway. The hostname remains the
+  // user's stable endpoint; only its local state key changes to `gateway`.
+  const workspace = new Workspace(workspaceRoot);
+  const gatewayTunnel = readTunnelState(GATEWAY_ID);
+  const legacyTunnel = readTunnelState(workspace.id);
+  if (!isNamedTunnelReady(gatewayTunnel) && isNamedTunnelReady(legacyTunnel)) {
+    writeTunnelState({ ...legacyTunnel, workspaceId: GATEWAY_ID });
+  }
+  const { runtime } = await ensureGateway(workspaceRoot);
+  const attached = await gatewayAdminFetch<Record<string, unknown>>(runtime, "POST", "/admin/attach", {
+    workspaceRoot: path.resolve(workspaceRoot),
+  });
+  let info = await gatewayAdminFetch<GatewayAdminInfo>(runtime, "GET", "/admin/info");
+  let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
+  if (opts.tunnel && !info.publicUrl) {
+    const binaries = detectTunnelBinaries();
+    if (!binaries.cloudflared) {
+      throw new Error(
+        "NEED_CLOUDFLARED: cloudflared is not installed. Install it first (Windows: winget install Cloudflare.cloudflared)."
+      );
+    }
+    const result = await gatewayAdminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", undefined, 90_000);
+    if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
+    info = await gatewayAdminFetch<GatewayAdminInfo>(runtime, "GET", "/admin/info");
+    mcpUrl = `${result.url}/mcp`;
+  }
+  return { runtime, info, mcpUrl, attached };
+}
+
 program
   .name("c2c")
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
@@ -224,8 +283,24 @@ program
   .description("Run the bridge in the foreground (internal)")
   .requiredOption("--workspace <path>")
   .option("--port <port>", "preferred port")
-  .action(async (opts: { workspace: string; port?: string }) => {
+  .option("--gateway", "run the multi-workspace Gateway", false)
+  .action(async (opts: { workspace: string; port?: string; gateway: boolean }) => {
     const logger = new Logger({ name: "bridge", console: true });
+    if (opts.gateway) {
+      const { startGateway } = await import("../gateway/server.js");
+      const gateway = await startGateway({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        port: opts.port ? parseInt(opts.port, 10) : undefined,
+        logger,
+      });
+      const shutdown = (): void => {
+        void gateway.close().then(() => process.exit(0));
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+      say(`gateway ready on ${gateway.localBaseUrl()}`);
+      return;
+    }
     const bridge = await startBridge({
       workspaceRoot: resolveWorkspace(opts.workspace),
       port: opts.port ? parseInt(opts.port, 10) : undefined,
@@ -239,44 +314,224 @@ program
     say(`bridge ready on ${bridge.localBaseUrl()} (workspace ${bridge.workspace.name})`);
   });
 
-// ---------------------------------------------------------------- start
+// ---------------------------------------------------------------- gateway (single endpoint, automatic workspace attachment)
+
+const gatewayCmd = program
+  .command("gateway")
+  .description("Use one MCP Gateway for all Codex workspaces");
+
+function gatewayConnectorName(): string {
+  return PRODUCT_NAME;
+}
+
+function persistGatewayEndpoint(info: GatewayAdminInfo, mcpUrl: string): void {
+  writeLastEndpoint({
+    workspaceId: GATEWAY_ID,
+    port: info.port,
+    publicUrl: info.publicUrl,
+    mcpUrl,
+    connectorName: gatewayConnectorName(),
+  });
+}
+
+gatewayCmd
+  .command("setup")
+  .description("Start the shared Gateway and return the one-time connector details")
+  .option("-w, --workspace <path>")
+  .option("--no-tunnel", "local-only setup (development)")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
+    const root = resolveWorkspace(opts.workspace);
+    try {
+      const { runtime, info, mcpUrl } = await ensureGatewayAndTunnel(root, { tunnel: opts.tunnel });
+      const endpoint = mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`;
+      if (mcpUrl) persistGatewayEndpoint(info, mcpUrl);
+      const pairing = info.tokenCount === 0
+        ? await gatewayAdminFetch<PairingResponse>(runtime, "POST", "/admin/pairing")
+        : null;
+      if (opts.json) {
+        say(JSON.stringify({
+          ok: true,
+          gateway: true,
+          gatewayId: GATEWAY_ID,
+          workspaceId: info.workspaceId,
+          workspaceName: info.workspaceName,
+          connectorName: gatewayConnectorName(),
+          mcpUrl: endpoint,
+          local: mcpUrl === null,
+          pairingCode: pairing?.code ?? null,
+          pairingExpiresAt: pairing?.expiresAt ?? null,
+          needsPairing: pairing !== null,
+          workspaces: info.workspaces,
+        }));
+        return;
+      }
+      check(`当前项目已自动附加（${info.workspaceName ?? "未命名"}）`);
+      check("共享 Gateway 已启动");
+      say(`连接地址：${endpoint}`);
+      if (pairing) say(`首次配对码：${pairing.code}`);
+      else check("ChatGPT 连接已复用，新项目无需重新授权");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("attach")
+  .description("Automatically attach the current workspace to the shared Gateway")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    const root = resolveWorkspace(opts.workspace);
+    try {
+      const { runtime, info, mcpUrl, attached } = await ensureGatewayAndTunnel(root, { tunnel: false });
+      const endpoint = mcpUrl ?? (info.publicUrl ? `${info.publicUrl}/mcp` : `http://127.0.0.1:${runtime.port}/mcp`);
+      if (info.publicUrl) persistGatewayEndpoint(info, `${info.publicUrl}/mcp`);
+      const payload = {
+        ok: true,
+        gateway: true,
+        gatewayId: GATEWAY_ID,
+        workspaceId: info.workspaceId,
+        workspaceName: info.workspaceName,
+        workspaceRoot: root,
+        leaseExpiresAt: (attached.leaseExpiresAt as number | undefined) ?? null,
+        connectorName: gatewayConnectorName(),
+        mcpUrl: endpoint,
+        needsPairing: info.tokenCount === 0,
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else check(`已自动附加当前项目（${info.workspaceName ?? "未命名"}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("status")
+  .description("Show the shared Gateway and attached workspace leases")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const runtime = await findLiveGateway();
+      if (!runtime) {
+        const payload = { ok: false, running: false, gateway: true };
+        if (opts.json) say(JSON.stringify(payload));
+        else say("共享 Gateway 未运行。");
+        return;
+      }
+      const info = await gatewayAdminFetch<GatewayAdminInfo>(runtime, "GET", "/admin/info");
+      if (opts.json) say(JSON.stringify({ ok: true, running: true, gateway: true, ...info }));
+      else {
+        check(`共享 Gateway 运行中（端口 ${info.port}）`);
+        check(`当前项目：${info.workspaceName ?? "未选择"}`);
+        say(`已附加项目数：${info.workspaces.length}`);
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("pair")
+  .description("Generate a one-time pairing code for the shared connector")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const runtime = await findLiveGateway();
+      if (!runtime) throw new Error("Gateway 未运行，请先执行 c2c gateway setup");
+      const pairing = await gatewayAdminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+      if (opts.json) say(JSON.stringify({ ok: true, pairingCode: pairing.code, expiresAt: pairing.expiresAt }));
+      else say(`配对码：${pairing.code}`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("unpair")
+  .description("Revoke the shared Gateway OAuth credentials")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const runtime = await findLiveGateway();
+      if (!runtime) throw new Error("Gateway 未运行，请先执行 c2c gateway setup");
+      const result = await gatewayAdminFetch<{ revoked: number }>(runtime, "POST", "/admin/revoke-all");
+      if (opts.json) say(JSON.stringify({ ok: true, revoked: result.revoked }));
+      else check(`已撤销共享 Gateway 授权（${result.revoked} 个令牌）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("doctor")
+  .description("Check the shared Gateway after automatically attaching the current workspace")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    const root = resolveWorkspace(opts.workspace);
+    try {
+      const { runtime, info, mcpUrl } = await ensureGatewayAndTunnel(root, { tunnel: false });
+      const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),
+      });
+      const report = {
+        ok: response.status === 401,
+        gateway: { ok: true, port: runtime.port, activeWorkspaceId: info.workspaceId },
+        mcp: { ok: response.status === 401, status: response.status },
+        workspace: { ok: info.workspaceId !== null, workspaceId: info.workspaceId, workspaceName: info.workspaceName },
+        connector: { name: gatewayConnectorName(), mcpUrl: mcpUrl ?? (info.publicUrl ? `${info.publicUrl}/mcp` : null) },
+      };
+      if (opts.json) say(JSON.stringify(report));
+      else if (report.ok) check(`共享 Gateway 正常，当前项目已附加（${info.workspaceName ?? "未命名"}）`);
+      else cross(`共享 Gateway 检查失败（MCP 返回 ${response.status}）`);
+      if (!report.ok) process.exitCode = 1;
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+gatewayCmd
+  .command("stop")
+  .description("Stop the shared Gateway")
+  .action(async () => {
+    if (await stopGateway()) check("共享 Gateway 已停止");
+    else say("共享 Gateway 未运行。");
+  });
+
+// ---------------------------------------------------------------- start (shared Gateway compatibility alias)
 
 program
   .command("start")
-  .description("Start (or reuse) the bridge for this workspace")
+  .description("Start (or reuse) the shared Gateway and attach this workspace")
   .option("-w, --workspace <path>", "workspace root (defaults to current directory)")
   .option("--tunnel", "also establish the secure public connection", false)
   .option("--json", "machine-readable output", false)
   .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     try {
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : readLastEndpoint(info.workspaceId)?.connectorName;
+      const { runtime, info, mcpUrl } = await ensureGatewayAndTunnel(root, { tunnel: opts.tunnel });
+      if (mcpUrl) persistGatewayEndpoint(info, mcpUrl);
+      const connectorName = gatewayConnectorName();
       if (opts.json) {
-        say(JSON.stringify({ ok: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl, connectorName }));
+        say(JSON.stringify({ ok: true, gateway: true, port: runtime.port, workspaceId: info.workspaceId, mcpUrl, connectorName }));
         return;
       }
       check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
+      check("共享 Gateway 已启动");
       if (mcpUrl) check("安全连接已建立");
     } catch (error) {
       handleCliError(error, opts.json);
     }
   });
 
-// ---------------------------------------------------------------- setup
+// ---------------------------------------------------------------- setup (shared Gateway compatibility alias)
 
 program
   .command("setup")
-  .description("First-time setup: bridge + secure connection + pairing code")
+  .description("First-time setup: shared Gateway + secure connection + pairing code")
   .option("-w, --workspace <path>")
   .option("--no-tunnel", "local-only setup (development)")
   .option("--json", "machine-readable output", false)
@@ -290,23 +545,13 @@ program
         say("");
       }
       const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : connectorNameFor({
-            workspaceName: info.workspaceName,
-            workspaceId: info.workspaceId,
-            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
-            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
-          });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      const tunnelState = readTunnelState(info.workspaceId);
+      const { runtime, info, mcpUrl } = await ensureGatewayAndTunnel(root, { tunnel: opts.tunnel });
+      if (mcpUrl) persistGatewayEndpoint(info, mcpUrl);
+      const connectorName = gatewayConnectorName();
+      const pairingResult = info.tokenCount === 0
+        ? await gatewayAdminFetch<PairingResponse>(runtime, "POST", "/admin/pairing")
+        : null;
+      const tunnelState = readTunnelState(GATEWAY_ID);
       if (opts.json) {
         say(
           JSON.stringify({
@@ -314,10 +559,12 @@ program
             workspaceId: info.workspaceId,
             workspaceName: info.workspaceName,
             connectorName,
+            gateway: true,
             mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
             local: mcpUrl === null,
-            pairingCode: pairingResult.code,
-            pairingExpiresAt: pairingResult.expiresAt,
+            pairingCode: pairingResult?.code ?? null,
+            pairingExpiresAt: pairingResult?.expiresAt ?? null,
+            needsPairing: pairingResult !== null,
             sandbox,
             tunnel: {
               mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
@@ -329,13 +576,14 @@ program
         return;
       }
       check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
+      check("共享 Gateway 已启动");
       if (mcpUrl) check("安全连接已建立");
       say("");
       say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
-      say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
+      if (pairingResult) say(`首次配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
       say("");
-      say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
+      if (pairingResult) say("下一步：在 ChatGPT 的连接器设置中添加一次以上地址（OAuth），并在授权页输入配对码。");
+      else say("ChatGPT 连接已复用，新工作区无需再次授权。");
       say("如果你在使用 Codex Skill，这一步会自动完成。");
     } catch (error) {
       handleCliError(error, opts.json);
@@ -346,26 +594,26 @@ program
 
 program
   .command("stop")
-  .description("Stop the bridge for this workspace")
+  .description("Stop the shared Gateway")
   .option("-w, --workspace <path>")
   .action(async (opts: { workspace?: string }) => {
-    const stopped = await stopBridge(resolveWorkspace(opts.workspace));
-    if (stopped) check("Bridge 已停止");
-    else say("没有正在运行的 Bridge。");
+    const stopped = await stopGateway();
+    if (stopped) check("共享 Gateway 已停止");
+    else say("共享 Gateway 未运行。");
   });
 
 program
   .command("restart")
-  .description("Restart the bridge for this workspace")
+  .description("Restart the shared Gateway and attach this workspace")
   .option("-w, --workspace <path>")
   .option("--tunnel", "re-establish the secure public connection", false)
   .action(async (opts: { workspace?: string; tunnel: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
-    await stopBridge(root);
+    await stopGateway();
     await new Promise((resolve) => setTimeout(resolve, 500));
     try {
-      const { info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      check(`Bridge 已重启（${info.workspaceName}）`);
+      const { info, mcpUrl } = await ensureGatewayAndTunnel(root, { tunnel: opts.tunnel });
+      check(`共享 Gateway 已重启（${info.workspaceName}）`);
       if (mcpUrl) check(`安全连接已建立`);
     } catch (error) {
       handleCliError(error, false);
@@ -376,39 +624,33 @@ program
 
 program
   .command("status")
-  .description("Show bridge status for this workspace")
+  .description("Show shared Gateway status and attached workspaces")
   .option("-w, --workspace <path>")
   .option("--json", "machine-readable output", false)
   .action(async (opts: { workspace?: string; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    const workspace = new Workspace(root);
-    const observation = await findBridgeObservation(workspace.id);
-    if (observation.state === "unknown") {
-      if (opts.json) {
-        say(JSON.stringify({ ok: false, running: null, state: "unknown", reason: observation.reason }));
-      } else {
-        cross(`Bridge 状态无法确认（${observation.reason}），未将其视为未运行。`);
+    try {
+      const runtime = await findLiveGateway();
+      if (!runtime) {
+        if (opts.json) say(JSON.stringify({ ok: false, running: false, gateway: true }));
+        else say("共享 Gateway 未运行。使用 `c2c gateway setup` 启动。");
+        return;
       }
-      return;
+      const info = await gatewayAdminFetch<GatewayAdminInfo>(runtime, "GET", "/admin/info");
+      if (opts.json) {
+        say(JSON.stringify({ ok: true, running: true, gateway: true, ...info }));
+        return;
+      }
+      say(PRODUCT_NAME);
+      say("");
+      check(`共享 Gateway：运行中（端口 ${info.port}）`);
+      check(`当前项目：${info.workspaceName ?? "未选择"}`);
+      say(`已附加项目数：${info.workspaces.length}`);
+      if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
+      else say("· 安全连接：未启用（本地模式）");
+      say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
-    if (observation.state === "stopped") {
-      if (opts.json) say(JSON.stringify({ ok: false, running: false }));
-      else say("Bridge 未运行。使用 `c2c start` 启动。");
-      return;
-    }
-    const runtime = observation.runtime;
-    const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    if (opts.json) {
-      say(JSON.stringify({ ok: true, running: true, ...info }));
-      return;
-    }
-    say(PRODUCT_NAME);
-    say("");
-    check(`Workspace：${info.workspaceName}`);
-    check(`Bridge：运行中（端口 ${info.port}）`);
-    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
-    else say("· 安全连接：未启用（本地模式）");
-    say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
   });
 
 // ---------------------------------------------------------------- doctor
