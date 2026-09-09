@@ -14,6 +14,7 @@ export function runGit(root: string, args: string[]): GitCommandResult {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
+    windowsHide: true,
   });
   return {
     ok: result.status === 0,

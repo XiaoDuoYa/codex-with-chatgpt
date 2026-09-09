@@ -30,7 +30,11 @@ export function findBinary(name: string): string | null {
     if (configured) return configured;
   }
   try {
-    const probe = spawnSync(exe, ["--version"], { stdio: "ignore", timeout: 5000 });
+    const probe = spawnSync(exe, ["--version"], {
+      stdio: "ignore",
+      timeout: 5000,
+      windowsHide: true,
+    });
     if (probe.status === 0 || probe.status === 1) return exe; // on PATH
   } catch {
     // not on PATH
