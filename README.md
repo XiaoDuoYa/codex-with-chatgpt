@@ -50,7 +50,7 @@ Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
 5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
+   （运行 c2c gateway setup，用内置浏览器打开 ChatGPT 配置一次共享连接器并输入配对码）。
    全程只用内置浏览器，禁止打开任何第三方浏览器。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
@@ -110,7 +110,7 @@ just see:
 Codex with ChatGPT
 
 ✓ Project detected
-✓ Workspace Bridge started
+✓ Shared Gateway started
 ✓ Secure connection established
 ✓ ChatGPT connected
 ✓ File read test passed
@@ -129,16 +129,22 @@ style until you ask to switch.
 
 ### Optional stable hostname
 
-The default public address is a temporary Cloudflare URL. It changes when the
-bridge restarts, and Codex repairs ChatGPT by deleting that workspace's
-connector and adding it again.
+The default public address is a temporary Cloudflare URL. With the shared
+Gateway there is one public endpoint and one ChatGPT connector for the machine;
+new workspaces are attached automatically by Codex and do not create another
+connector.
 
 If you have a Cloudflare account and a domain already on Cloudflare, first-time
 setup (and the next coding session, once) will ask whether you want a stable
-hostname such as `c2c-<project>.your-domain.com`. That path opens a browser so
+hostname such as `example.your-domain.com`. That path opens a browser so
 you can authorize Cloudflare. After that, the ChatGPT connector keeps working
 across restarts. If you skip it, or the login fails, Codex stays on the temporary
 address — same features, just a slower repair.
+
+When an existing per-workspace installation is upgraded to the shared Gateway,
+the first Gateway start migrates its local OAuth state once. A stable connector
+keeps working without another pairing; if no valid old authorization remains,
+`c2c gateway setup` prints a new pairing code.
 
 Credentials stay in the OS app state directory, not in the project.
 
@@ -154,16 +160,16 @@ Credentials stay in the OS app state directory, not in the project.
             Data Plane  │          │ Control Plane (<1 KB messages)
                         ▼          │
              ┌─────────────────────┐
-             │      C2C Bridge     │   loopback-only HTTP server
-             │  read-only MCP      │   OAuth 2.1 + one-time pairing code
-             │  OAuth + Pairing    │   Cloudflare Quick Tunnel
+             │      C2C Gateway    │   loopback-only HTTP server
+             │  read-only MCP      │   one OAuth credential
+             │  OAuth + Pairing    │   short-lived workspace leases
              │  Tunnel Manager     │
              └──────────┬──────────┘
-                        │  read-only
+                        │  read-only, opaque workspace_id
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
-             │   Local Workspace   │◀─────────│    Codex Harness    │
-             └─────────────────────┘ edit/git │ shell / tests / fix │
+             │ Attached Workspaces │◀─────────│    Codex Harness    │
+             └─────────────────────┘ attach   │ shell / tests / fix │
                                               └─────────────────────┘
 ```
 
@@ -182,9 +188,13 @@ Credentials stay in the OS app state directory, not in the project.
 
 - **Read-only by construction**: write/delete/shell/commit tools simply do not
   exist on the server. No prompt injection can enable them.
-- **One workspace = one boundary**: every token is bound to a single workspace;
-  path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
-  are all blocked and tested).
+- **Gateway lease boundary**: the OAuth credential is scoped to this local
+  Gateway, while each MCP call resolves the active opaque workspace id from a
+  short-lived lease created by the local Codex process. Raw Windows paths are
+  never accepted, and a non-active attached workspace cannot be selected by the
+  model.
+  Each workspace still uses canonical realpaths (symlink/`../`/absolute-path
+  escapes are all blocked and tested).
 - **Sensitive files never leave**: `.env*`, keys, SSH, credentials are denied by
   default (`.env.example` allowed); `.c2cignore` adds your own rules.
 - **Knowing the URL grants nothing**: the public MCP endpoint requires OAuth 2.1
@@ -203,9 +213,10 @@ pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
 pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
 
-c2c setup           # bridge + tunnel + pairing code, all in one
+c2c gateway setup   # shared Gateway + tunnel + first pairing code
+c2c gateway attach  # automatic per-task workspace attachment
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
-c2c status / doctor / pair / unpair / logs / stop
+c2c status / doctor / gateway status / gateway pair / stop
 ```
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
@@ -218,7 +229,8 @@ Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 
 ```
 src/
-  bridge/     loopback HTTP server, port recovery, admin API
+  gateway/    shared loopback HTTP server, workspace leases, admin API
+  bridge/      legacy single-workspace compatibility server
   mcp/        9 read-only tools, stateless Streamable HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)

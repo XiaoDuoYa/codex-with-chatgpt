@@ -10,17 +10,17 @@
             Data Plane  │          │ Control Plane
                         ▼          │
              ┌─────────────────────┐
-             │      C2C Bridge     │
+             │      C2C Gateway    │
              │  MCP Server (RO)    │
              │  OAuth AS + PRM     │
              │  Pairing Manager    │
              │  Tunnel Manager     │
              │  Admin API (local)  │
              └──────────┬──────────┘
-                        │  read-only
+                        │  read-only + opaque workspace_id
                         ▼
              ┌─────────────────────┐
-             │   Local Workspace   │
+             │ Attached Workspaces │
              └──────────▲──────────┘
                         │ edit / shell / git / test
              ┌──────────┴──────────┐
@@ -34,13 +34,16 @@
 - **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
-- **Workspace is the security boundary**: one bridge = one workspace = one token audience.
+- **Gateway lease is the public boundary**: one Gateway and one connector serve
+  many workspaces, but each workspace must be attached locally and is resolved
+  only through an opaque id and a short-lived lease.
 
 ## Components (src/)
 
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
+| `gateway/` | Shared Express endpoint, automatic workspace leases, opaque workspace routing, Gateway runtime state |
 | `mcp/` | McpServer with 9 read-only tools; stateless Streamable HTTP transport (fresh server per request, JSON responses) |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
@@ -53,8 +56,9 @@
 
 ## Request lifecycles
 
-**MCP call**: ChatGPT → tunnel (https) → bridge `/mcp` → bearer middleware
-(401/403) → stateless StreamableHTTP transport → tool handler → workspace layer
+**MCP call**: ChatGPT → tunnel (https) → Gateway `/mcp` → bearer middleware
+(401/403) → stateless StreamableHTTP transport → opaque workspace resolver →
+tool handler → workspace layer
 (path containment → ignore rules → pagination) → JSON result.
 
 **Authorization**: 401 with `WWW-Authenticate: resource_metadata=…` →
@@ -68,12 +72,12 @@ whether the occupant is a c2c bridge for the same workspace (reuse) or not
 runtime state file; users never see ports.
 
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
-The URL changes per start, so `c2c doctor` can restart it and tell the Skill to
-Delete + recreate that workspace's ChatGPT connector. A workspace may instead
-choose a named hostname once (`c2c tunnel choose --mode named`). The Skill asks
-before the first public URL exists; `cloudflared tunnel login` is the only extra
-user step. Tunnel name, hostname and preference live under the OS state dir
-(`tunnels/<workspaceId>.json`), never in the project. Named starts use
+The URL changes per start, so the Gateway can restart it without creating a new
+connector for each workspace. A named hostname can be chosen once
+(`c2c tunnel choose --mode named`); the Gateway migrates an existing named
+binding to `tunnels/gateway.json`. The Skill asks before the first public URL
+exists; `cloudflared tunnel login` is the only extra user step. Tunnel name,
+hostname and preference live under the OS state dir, never in the project. Named starts use
 `cloudflared tunnel --url … run <name>` so the public URL stays stable. If named
 provisioning fails, C2C falls back to Quick Tunnel. If a named tunnel later
 drops, doctor asks for a Cloudflare re-login (`namedRepair`) instead of

@@ -14,9 +14,9 @@ ChatGPT thinks. Codex works.
 
 You (Codex) own execution: editing, shell, git, tests, recovery.
 ChatGPT owns high-level reasoning: understanding, planning, review, debug strategy.
-The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, so
-control messages between you and ChatGPT stay tiny (< 1 KB) — ChatGPT pulls
-whatever data it needs by itself.
+The C2C Gateway gives ChatGPT read-only MCP access to the currently attached
+workspace, so control messages between you and ChatGPT stay tiny (< 1 KB) —
+ChatGPT pulls whatever data it needs by itself.
 
 **Golden rules**
 
@@ -27,7 +27,7 @@ whatever data it needs by itself.
    field labels/values the user must enter, without explaining internals.
 3. The pairing code is the ONLY credential you may ever type into a browser.
    Never touch OAuth tokens, cookies, or session storage.
-4. If something fails, run `c2c doctor` and repair silently. Only involve the user
+4. If something fails, run `c2c gateway doctor` and repair silently. Only involve the user
    for logins, CAPTCHA, 2FA, explicit consent screens, or **guided manual
    ChatGPT setup** below — and then give them ONE action.
    Before the first ChatGPT connection on this machine, `c2c prefs --json`:
@@ -69,16 +69,16 @@ whatever data it needs by itself.
      conversation opens a new chat from the Project collection page — never
      `goto` `https://chatgpt.com/` to create it, and never reuse another
      Codex conversation's chat URL just because `session.url` exists.
-   Each workspace also has exactly ONE ChatGPT connector. Do not create a
-   second connector for the same workspace. Other workspaces may have their
-   own connectors — never edit those.
+   The shared Gateway has exactly ONE ChatGPT connector for this machine.
+   Never create a connector per workspace and never edit a connector belonging
+   to another installation.
 7. After first-time setup, never ask the user to approve writing C2C's local
    settings directory. Run `c2c sandbox-allow --json` (idempotent). If it fails
    with EPERM / Operation not permitted, request elevated permissions and retry
    ONCE. After `{ "alreadyAllowed": true }` or `{ "added": true }`, stay silent.
 8. ChatGPT pages: only the URLs in **In-app browser (ChatGPT)**. Never start
    from chatgpt.com and click through menus.
-9. **Doctor gate.** After `c2c doctor --json`, do not `goto` ChatGPT and do not
+9. **Doctor gate.** After `c2c gateway doctor --json`, do not `goto` ChatGPT and do not
    send `[C2C]` until local is green — except the reconnect settings pages when
    `chatgptRepair.needed` is true. Not green:
    - `report.bridge.ok` is not true
@@ -93,6 +93,27 @@ whatever data it needs by itself.
      `chatgptRepair`. Wait and run doctor again.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
+
+**Shared Gateway mode (current implementation)**
+
+The connector is global to this machine. There is exactly one connector named
+`Codex with ChatGPT` and one stable MCP URL. A workspace is attached by the
+local Codex process, not by a user-maintained directory list.
+
+- At the start of every workflow, silently run `c2c gateway attach -w <workspace> --json`.
+  This creates or refreshes a short-lived lease and makes that workspace active.
+- For the first setup on a machine, run `c2c gateway setup -w <workspace> --json`.
+  Only that first setup may create/authorize the global connector. Later
+  workspaces must never create, delete, rename, or reconnect a connector.
+- Before sending C2C control messages, run `c2c gateway doctor -w <workspace> --json`.
+  If it is not green, repair the local Gateway first.
+- MCP tools accept an opaque `workspace_id`; never pass a Windows path as a
+  workspace selector. Omit it to use the active lease selected by `attach`.
+  Explicit ids are accepted only for that active lease; switching projects is
+  always a local `attach`/`activate` action.
+- `c2c gateway pair --json` is the only pairing-code refresh command. The old
+  per-workspace `c2c pair`/`c2c setup` flow is legacy and must not be used for a
+  new workspace.
 
 ## In-app browser (ChatGPT)
 
@@ -206,13 +227,15 @@ Inside the checkout directory (see Locations):
 5. Tell the user "✓ 已更新到最新版本" — then resume whatever task triggered this.
    (The updated SKILL.md takes effect from the next Codex session; that's expected.)
 
-## Connection choice (once per workspace)
+## Connection choice (once per Gateway)
 
-Ask this **before** the public address exists (`c2c setup` / first `doctor --fix`
-that starts a tunnel). Do not mention tunnels, wrangler, DNS, or hostnames.
+Ask this **before** the shared public address exists (`c2c gateway setup`). Do
+not repeat it for each new workspace. Do not mention tunnels, wrangler, DNS, or
+hostnames.
 Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
 
-1. `c2c tunnel status -w <workspace> --json`
+1. `c2c tunnel status -w <workspace> --json` (legacy state may be used only to
+   choose the Gateway's first connection)
 2. If `needsChoice` is false: do not ask again.
 3. If `needsChoice` is true: tell the user exactly `userPrompt` and wait.
    - 没有账号 / 没有域名 / 临时 / 不用 →
@@ -235,14 +258,14 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      `winget install Cloudflare.cloudflared`. Do this yourself; don't ask.
 2. If the c2c repo has no `node_modules`, run `pnpm install && pnpm build` in it.
 3. Run `c2c sandbox-allow --json`, then **Connection choice**, then
-   `c2c setup -w <workspace> --json`.
+   `c2c gateway setup -w <workspace> --json`.
    `sandbox-allow` edits Codex `config.toml` only — it adds C2C's state directory
    to `[sandbox_workspace_write].writable_roots` so later chats can write logs
    without elevation. If the write is denied, request approval and retry once.
-   → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, ... }`.
-   `connectorName` is this workspace's plugin title (legacy installs stay
-   `Codex with ChatGPT`; additional workspaces get `Codex with ChatGPT · <name>`).
-   Pairing codes expire in ~5 minutes: run `c2c pair --json` for a fresh one if you're slow.
+   → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, needsPairing, ... }`.
+   The connector name is always `Codex with ChatGPT`; it is shared by all
+   workspaces. Pairing codes expire in ~5 minutes: run `c2c gateway pair --json`
+   for a fresh one if you're slow.
 4. `c2c prefs --json` (this machine, not this workspace).
    - If `setupMode` is null: tell the user exactly `setupChoicePrompt`. Wait
      for「1」or「2」. Then `c2c prefs set --setup-mode auto` or `--setup-mode manual`.
@@ -257,20 +280,22 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
    - `setupMode: "auto"`: continue with step 5. Keep the two-failure fallback.
 5. Open ChatGPT on the ONE iab tab (see **In-app browser**). Foreground +
    markHandoff immediately. Same tab, `goto` only:
+   - If `needsPairing` is false, keep the existing `Codex with ChatGPT`
+     connector unchanged. Do not open connector settings; continue directly to
+     the workspace verification in step 6.
    - 开发人员模式: skip `https://chatgpt.com/#settings/Security` when
      `developerModeEnabled` is true. Otherwise open it, enable 开发人员模式
      ("Developer mode") if it is off, then `c2c prefs set --developer-mode`.
      Never record it as off. If creating the connector later says developer
      mode is required, open this page, enable it, save `--developer-mode`,
      and retry create — do not skip that recovery.
-   - 已有该 `connectorName`: `https://chatgpt.com/plugins` — Delete it (never
-     Reconnect). Then `goto` the 加插件 URL below.
+   - Only when `needsPairing` is true, inspect `https://chatgpt.com/plugins`
+     for the exact global connector name. Do not delete or edit connectors for
+     other installations.
    - 还没有 / 刚删掉: `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
-     Operate ONLY on `connectorName` from step 3:
-      - If that exact name exists: Delete it, then create it again. Never
-        Reconnect, never edit-in-place, never open the old Server URL.
-      - If it does not exist: create one with that exact name.
-      - Never rename, delete, or edit a connector that belongs to another workspace.
+     create the exact global `connectorName` if it does not exist. Never
+     create one for a workspace, reconnect an old per-workspace connector, or
+     edit a connector belonging to another installation.
       - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
       - Server URL: the `mcpUrl` from step 3
       - Authentication: OAuth
@@ -292,7 +317,7 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
 Codex with ChatGPT
 
 ✓ 当前项目已识别
-✓ Workspace Bridge 已启动
+✓ 共享 Gateway 已启动
 ✓ 安全连接已建立
 ✓ ChatGPT 已连接
 ✓ 文件读取测试通过
@@ -329,16 +354,18 @@ next action:
    `https://chatgpt.com/#settings/Security` and enable 开发人员模式. After they
    say「好了」, `c2c prefs set --developer-mode`. If it is already remembered,
    skip this step.
-2. Ask them to open `https://chatgpt.com/plugins`. If the exact `connectorName`
-   exists, delete only that connector. Never ask them to touch another workspace's connector.
+2. Ask them to open `https://chatgpt.com/plugins`. If the exact global
+   `connectorName` exists and the address is unchanged, keep it. Never ask
+   them to delete it merely because a new workspace is being attached.
 3. Ask them to open
    `https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins`
-   and create the exact `connectorName` with:
+   and, only when `needsPairing` is true or the address changed, create the exact
+   global `connectorName` with:
    - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
    - Server URL: the current `mcpUrl`
    - Authentication: OAuth
 4. Ask them to Connect / Authorize and enter the current pairing code. If it
-   expired, run `c2c pair --json` and give them only the fresh pairing code.
+   expired, run `c2c gateway pair --json` and give them only the fresh pairing code.
 5. When they report Connected / authorized / pairing accepted, resume the normal
    setup/reconnect flow at its ChatGPT verification step. If automatic browser
    verification then hits the same explicit failure twice, stop and report the
@@ -493,15 +520,13 @@ Do not invent `STATE: RESUME`. If the original chat is gone, send HANDOFF.
 All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 KB.
 ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
 
-0. `c2c tunnel status -w <workspace> --json`. If `needsChoice`, follow
-   **Connection choice** first (existing installs: ask once, then remember).
-   Then `c2c doctor -w <workspace> --json` (auto-repairs). **Doctor gate:** if local
-   is not green, do not open ChatGPT and do not send INIT. If
-   `namedRepair.needed` is true, tell the user `namedRepair.userMessage`, run
-   `c2c tunnel login --json` (their browser; Cloudflare exception), then doctor
-   again. If `chatgptRepair.needed` is true, tell the user `chatgptRepair.userMessage`
-   (one paragraph, no internals), run **Workflow: reconnect after address
-   reclaim**, then doctor again and only continue when the gate is green.
+0. Run `c2c gateway attach -w <workspace> --json` on every task. This is the
+   automatic current-workspace attach; never ask the user to add a directory.
+   Then run `c2c gateway doctor -w <workspace> --json`. **Doctor gate:** if
+   local is not green, do not open ChatGPT and do not send INIT. If the shared
+   address needs a Cloudflare login, tell the user the one login action and
+   repeat the Gateway doctor. Do not delete or recreate the global connector
+   for a new workspace.
    Generate task id: `c2c_` + 4 random hex chars — unless a checkpoint already
    has one (reuse that id; do not mint a second task).
 1. `c2c session -w <workspace> --json`. Open ChatGPT on the same iab tab
@@ -611,13 +636,28 @@ If status is restricted, ignore it and review from git_diff.
     decision the user must make.
     `c2c session set -w <ws> --protocol-state BLOCKED --waiting-for USER --known-issues "<short reason>"`
 
+## Shared Gateway repair override
+
+The older per-workspace reconnect procedure below is retained for legacy
+installations only. In the current shared Gateway mode, use this shorter path:
+
+1. Run `c2c gateway attach -w <workspace> --json`, then
+   `c2c gateway doctor -w <workspace> --json`.
+2. If the stable hostname is unavailable, ask for the one Cloudflare login and
+   repeat the Gateway doctor. Do not delete the global connector when the
+   hostname is unchanged.
+3. If a temporary address changed, run `c2c gateway pair --json` and
+   re-authorize the single `Codex with ChatGPT` connector with the returned
+   `mcpUrl`; never create a connector named after the workspace.
+4. Verify `workspace_info` in the existing C2C conversation. A new workspace
+   is selected by the next local `gateway attach`, not by connector changes.
+
 ## Workflow: disconnect（"断开 ChatGPT"）
 
-1. `c2c unpair -w <workspace>` (revokes all tokens immediately).
-2. Optionally remove the connector on the same iab tab via
-   `https://chatgpt.com/plugins` (foreground + markHandoff). Only touch
-   this workspace's `connectorName`.
-3. Tell the user: "已断开 ChatGPT 对该项目的访问。"
+1. `c2c gateway unpair` (revokes all shared Gateway tokens immediately).
+2. Optionally remove the single global connector on the same iab tab via
+   `https://chatgpt.com/plugins` (foreground + markHandoff).
+3. Tell the user: "已断开 ChatGPT 对当前机器工作区的访问。"
 
 ## Workflow: reconnect after address reclaim（全关掉以后地址失效）
 
