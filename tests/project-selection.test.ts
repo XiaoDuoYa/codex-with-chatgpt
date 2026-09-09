@@ -1,11 +1,33 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { validateProjectSelection } from "../src/session/project-selection.js";
+import { planProjectPairing, validateProjectSelection } from "../src/session/project-selection.js";
 import { MachineGateway } from "../src/gateway/machine-gateway.js";
 import { cleanup, isolateStateDir, makeTmpDir, projectSelection, receiveBootResult } from "./helpers.js";
 
 const url = "https://chatgpt.com/g/g-p-test-project/project";
 const dirs: string[] = [];
 afterEach(() => { dirs.splice(0).forEach(cleanup); delete process.env.C2C_STATE_DIR; });
+
+describe("Project pairing guidance", () => {
+  const empty = { projectUrl: null, lease: null, binding: null, control: null };
+  it("defaults an unpaired workspace to creation and accepts an explicit URL without writing a route", () => {
+    expect(planProjectPairing(empty)).toMatchObject({ action: "create-project", projectUrl: null, selectionSource: "created" });
+    expect(planProjectPairing(empty, url)).toMatchObject({ action: "use-requested-project", projectUrl: url, selectionSource: "user-confirmed" });
+    expect(empty).toEqual({ projectUrl: null, lease: null, binding: null, control: null });
+    expect(() => planProjectPairing(empty, "https://example.com/project")).toThrow(/invalid/);
+  });
+  it("reuses a saved Project and rejects a different requested Project", () => {
+    const state = { ...empty, projectUrl: url };
+    expect(planProjectPairing(state, url)).toMatchObject({ action: "create-project-chat", projectUrl: url });
+    expect(() => planProjectPairing(state, "https://chatgpt.com/g/g-p-other/project")).toThrow(/saved route/);
+  });
+  it("resumes an owned candidate instead of recreating a Project or adopting the older chat", () => {
+    const state = { ...empty, lease: { projectUrl: url }, binding: { projectUrl: url, chatUrl: url.replace("/project", "/c/old") } };
+    expect(planProjectPairing(state)).toMatchObject({ action: "inspect-owned-page", projectUrl: url, chatUrl: null });
+  });
+  it.each(["pending", "received"])("prioritizes an unresolved %s request", (status) => {
+    expect(planProjectPairing({ ...empty, lease: { projectUrl: url }, control: { status } })).toMatchObject({ action: "resume-control" });
+  });
+});
 
 describe("first Project provenance", () => {
   it("rejects missing, wrong-name, mismatched-URL and stale observations", () => {

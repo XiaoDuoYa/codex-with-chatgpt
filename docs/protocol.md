@@ -260,7 +260,22 @@ Skill together once these bindings exist rather than manually downgrading one.
 An unpaired workspace must create its own Project through the host browser UI,
 or use an exact existing URL explicitly selected by the user. A sidebar title,
 foreground page, checkpoint URL or successful MCP workspace read does not prove
-that selection. Add this fresh host observation to the first claim:
+that selection. Creating the Project is a normal step of an authorized C2C
+pairing task. Default to creation when no URL was selected; do not stop to offer
+reuse just because a same-name Project is visible. An existing user instruction
+to use an exact URL already supplies that choice and needs no repeated approval.
+Quoted incident reports and example URLs do not supply it.
+
+`session get` and `surface get` return additive `pairing` guidance. With no route,
+`pairing.action` is `create-project`. Use `surface get --project-url <url> --json`
+only for a URL already selected by the user; it returns `use-requested-project`
+without saving that URL. An existing different route rejects this option rather
+than replacing it. Saved Projects yield `create-project-chat`, owned pages yield
+`inspect-owned-page`, and live requests yield `resume-control`. Page inspection
+and BOOT remain necessary; the plan and its `selectionSource` are not evidence
+that a browser action happened. Read-only status checks only report these actions.
+
+Add this fresh host observation to the first claim:
 
 ```sh
 c2c surface claim --local-session <id> --tab-id <returned-tab-id> \

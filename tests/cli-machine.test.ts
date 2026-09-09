@@ -119,6 +119,18 @@ describe("machine CLI lifecycle", () => {
       registrationId: string;
     };
 
+    const initial = runJson(stateDir, ["surface", "get", "--local-session", "session-cli-machine"]);
+    expect(initial.command.status).toBe(0);
+    expect(initial.body).toMatchObject({ projectUrl: null, binding: null, pairing: { action: "create-project" } });
+    const selected = runJson(stateDir, ["surface", "get", "--local-session", "session-cli-machine",
+      "--project-url", "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project"]);
+    expect(selected.command.status).toBe(0);
+    expect(selected.body).toMatchObject({ projectUrl: null, binding: null,
+      pairing: { action: "use-requested-project", selectionSource: "user-confirmed" } });
+    const sessionPlan = runJson(stateDir, ["session", "get", "--local-session", "session-cli-machine"]);
+    expect(sessionPlan.command.status).toBe(0);
+    expect(sessionPlan.body.pairing.action).toBe("create-project");
+
     const claimed = runJson(stateDir, [
       "surface",
       "claim",
@@ -168,6 +180,7 @@ describe("machine CLI lifecycle", () => {
       "session-cli-machine",
     ]);
     expect(surface.command.status).toBe(0);
+    expect(surface.body.pairing.action).toBe("inspect-owned-page");
     expect(surface.body.projectUrl).toBe(
       "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project",
     );

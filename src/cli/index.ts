@@ -132,6 +132,7 @@ import { checkGitUpdate } from "../update/check.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { Workspace } from "../workspace/manager.js";
 import { assessPageHealth, PAGE_STATES, pageObservationSchema } from "../session/page-health.js";
+import { planProjectPairing } from "../session/project-selection.js";
 
 const program = new Command();
 const DEFAULT_TURN_TTL_MS = 30 * 60_000;
@@ -1103,20 +1104,24 @@ surface
   .command("get", { isDefault: true })
   .option("-w, --workspace <path>")
   .option("--local-session <id>")
+  .option("--project-url <url>", "plan first pairing with an exact Project URL already selected by the user; does not bind it")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; localSession?: string; json: boolean }) => {
+  .action(async (opts: { workspace?: string; localSession?: string; projectUrl?: string; json: boolean }) => {
     try {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const localSessionId = resolveLocalSession(opts.localSession);
       const machine = await machineSurfaceContext(workspace, localSessionId);
       const { projectUrl, lease, binding, control } = await getMachineSurface(machine.runtime, machine.identity);
-      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, projectUrl, lease, binding, control }));
+      const pairing = planProjectPairing({ projectUrl, lease, binding, control }, opts.projectUrl);
+      if (opts.json) say(JSON.stringify({ ok: true, localSessionId, projectUrl, lease, binding, control, pairing }));
       else if (lease) {
         const route = lease.chatUrl ? `ChatGPT page：${lease.chatUrl}` : "ChatGPT Project candidate page";
         say(`${route}（generation ${lease.generation}）`);
       }
       else if (projectUrl) say(`Project：${projectUrl}`);
-      else say("当前本地会话尚未认领 ChatGPT page。");
+      else say(pairing.action === "use-requested-project"
+        ? `使用用户已指定的 Project：${pairing.projectUrl}；通过浏览器验证并完成 BOOT 后绑定。`
+        : `为 ${workspace.name} 创建 ChatGPT Project，再创建本会话专属 Chat 并完成 BOOT 绑定。`);
     } catch (error) {
       handleCliError(error, opts.json);
     }
@@ -1384,7 +1389,8 @@ session
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const sessionIdentity = currentLocalSessionIdentity(opts.localSession);
       const machine = await machineSurfaceContext(workspace, sessionIdentity.id);
-      const { lease } = await getMachineSurface(machine.runtime, machine.identity);
+      const currentSurface = await getMachineSurface(machine.runtime, machine.identity);
+      const { lease } = currentSurface;
       // surface get reconciles any partially-written route before this
       // command reads and reports the session snapshot.
       const saved = readSession(workspace.id, sessionIdentity.id);
@@ -1399,6 +1405,7 @@ session
         conversation,
         route,
         surface: lease,
+        pairing: planProjectPairing(currentSurface),
       };
       if (opts.json) say(JSON.stringify(payload));
       else if (!saved) say("尚未记录本会话的 ChatGPT Project chat。");
