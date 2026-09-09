@@ -151,17 +151,32 @@ that close the tab, hide the window, or stall on the settings page.
    the session URL. If validation fails, keep the old saved URL. Do not open a
    throwaway verify chat and later another C2C chat.
 
-8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
-   send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
-   the tab foreground, and stay in this same task. Do not `waitFor` 5 minutes
-   and do not screenshot-poll. Every 20–30 seconds, one cheap DOM check:
-   - still generating → wait again (do not type, do not resend);
-   - `STATE: PLAN` / `DONE` / `BLOCKED` / the verify workspace name → read it
-     and continue the existing protocol;
-   - visible error → repair; do not start a new chat.
-   A browser/js timeout is not failure. Claim the same tab, read the page, keep
-   standby. If ChatGPT is still thinking, keep polling. Never open a second
-   tab and never resend INIT/EXECUTED just because a wait timed out.
+8. **Wait for a ChatGPT reply (quota-preserving pause; NO polling loop).** After
+   you send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`,
+   keep the same ChatGPT tab foreground, and rely on the saved session checkpoint
+   for what is being awaited. In the current Codex turn, perform at most ONE cheap
+   DOM check:
+   - final reply is ready (`STATE: PLAN` / `DONE` / `BLOCKED` / the verify
+     workspace name) → read the collected reply and continue the existing protocol;
+   - visible error → repair; do not start a new chat;
+   - still generating / loading / no final reply yet → DO NOT wait, sleep, poll,
+     screenshot-poll, or repeatedly inspect the page. `markHandoff` and
+     `markDeliverable`, leave the same tab open in standby, then END THE CURRENT
+     CODEX TURN and return control to the user. Tell them once:
+     `ChatGPT is still working. Send anything and I will check the response and continue.`
+
+   Any later user message counts as permission to resume checking; they do not need
+   to repeat the task or say a special keyword. On that new Codex turn, resume from
+   `session.checkpoint` BEFORE any INIT, claim the exact same ChatGPT tab/chat, and
+   perform one cheap DOM check. If the reply is ready, read the already-collected
+   ChatGPT response and continue from the saved protocol state. If ChatGPT is still
+   generating, pause/end the Codex turn again in the same way.
+
+   A browser/js timeout without a visible error is treated exactly like "still
+   generating": preserve the checkpoint, leave the tab in standby, and end the
+   current Codex turn. Never keep Codex active merely to check whether ChatGPT has
+   finished. Never open a second tab and never resend INIT/EXECUTED just because a
+   wait timed out or the user returned later.
 
 ## Locations
 
@@ -283,7 +298,7 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
    open a new Chat conversation instead). Send the boot prompt from
    `docs/protocol.md` §Boot Prompt, then (same chat) send:
    `Use the "<connectorName>" connector: call workspace_info and read hello-style top-level file. Reply with the workspace name.`
-   Confirm the reply matches `workspaceName` (wait per **In-app browser** §8).
+   Confirm the reply matches `workspaceName` (follow the pause/resume behavior in **In-app browser** §8).
    Only then save the chat URL with `c2c session set` (see Conversation
    management). If the name does not match, do not save. markDeliverable.
 7. Report to the user exactly in this shape (no internals):
@@ -513,23 +528,28 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    `docs/protocol.md` §Boot Prompt and the workspace_info check (name the
    exact `connectorName`). Confirm the reply names the current workspace
    before saving the session URL. Do not use the browser to re-read code MCP
-   already provides. After sending a control message, wait per
-   **In-app browser** §8.
+   already provides. After sending a control message, follow the quota-preserving
+   pause/resume behavior in **In-app browser** §8.
 
    **Resume from `session.checkpoint` before any INIT.** Missing checkpoint
    (legacy session): continue as a normal new/continued loop. A browser/js
    timeout is not a lost task — claim the original tab; do not INIT, re-run,
    or resend EXECUTED just because a wait timed out.
    - `EXECUTED_SENT` + `waitingFor=GPT_REVIEW`: do not INIT, do not re-run,
-     do not resend EXECUTED. Stay on the saved chat and wait for review. If
-     that chat 404s: HANDOFF from checkpoint fields (no logs), then wait.
+     do not resend EXECUTED. On this user-triggered resume turn, claim the saved
+     chat and do the single cheap check from **In-app browser** §8. If ChatGPT is
+     still generating, end this Codex turn again; if the review is ready, read the
+     collected reply and continue. If that chat 404s: HANDOFF from checkpoint
+     fields (no logs), then use the same §8 pause behavior.
    - `EXECUTED_LOCAL`: local work is done; only send EXECUTED (record first
      if this iteration has no record yet). Do not re-run.
    - `EXECUTING`: not finished. Continue the current PLAN if you still have
      it; otherwise HANDOFF and ask ChatGPT to restate the last PLAN. Do not
      treat it as done and do not INIT a new task.
    - `PLAN_RECEIVED`: execute that plan. Do not INIT.
-   - `INIT` / `waitingFor=GPT_PLAN`: claim the tab and wait. Do not resend INIT.
+   - `INIT` / `waitingFor=GPT_PLAN`: on this user-triggered resume turn, claim
+     the tab and do the single cheap check from **In-app browser** §8. If it is
+     still generating, end this Codex turn again. Do not resend INIT.
    - `DONE`: summarize to the user if needed; `c2c session set --clear-checkpoint`.
    - `BLOCKED`: surface ChatGPT's reason; do not INIT.
    Never re-pair, never recreate the connector, and never rewrite Project
@@ -552,8 +572,10 @@ Produce a C2C PLAN message.
 
    Then:
    `c2c session set -w <ws> --task <id> --iteration 0 --state INIT --protocol-state INIT --waiting-for GPT_PLAN --goal "<short goal>" --next-step "wait for PLAN"`
-3. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
-   checks, same tab; do not treat a 5-minute browser timeout as failure).
+3. Check for ChatGPT's `STATE: PLAN` reply using **In-app browser** §8. Do only
+   the single cheap DOM check allowed there. If ChatGPT is still generating, preserve
+   the checkpoint and end the current Codex turn; continue only after the user sends
+   another message. A browser/js timeout without a visible error is not failure.
    Read GOAL/ACTIONS/TESTS/SUCCESS_CRITERIA.
    A good PLAN also carries RATIONALE and concrete natural-language edit
    suggestions (which file, what to change, why). If the reply is a bare
