@@ -18,6 +18,38 @@ The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, so
 control messages between you and ChatGPT stay tiny (< 1 KB) — ChatGPT pulls
 whatever data it needs by itself.
 
+## Browser navigation recovery (takes precedence over direct-goto rules below)
+
+In the Windows in-app browser, a direct load of a ChatGPT Project collection
+can render only a `Retry` / `重试` button, while following the Project link
+from a working chat renders the same collection correctly (observed 2026-09-09).
+Treat this as a page error, not generation, a missing composer, or a pairing failure.
+
+- Reuse the existing tab. Prefer a visible same-site link to the intended chat or
+  Project over `goto`. Verify its href identifies the saved Project. The
+  `Open … project` / `打开“… ”项目` link in a working chat is an allowed route;
+  do not interpret the URLs-only guidance below as forbidding this link.
+- When only Retry is present, try it once. If the error remains, open the last
+  verified chat URL from this task's context/checkpoint, inspect the DOM, then
+  click its Project link. This is a navigation anchor only: do not submit a new
+  task to that old chat when the user requested a new conversation.
+- On the collection, require the project chat list and new-chat composer before
+  continuing. Create the requested new chat with that composer. Preserve the
+  old saved URL/checkpoint until the replacement chat passes workspace validation;
+  do not run `session clear` as a prerequisite for creating a replacement.
+- After navigating, use one bounded DOM check. An explicit Retry-only page is
+  an error; an ordinary tool timeout alone is not. If recovery fails, retain the
+  tab and checkpoint and report the actual page failure instead of repeatedly
+  reloading, repairing pairing, or waiting for a nonexistent response.
+- Record INIT / GPT_PLAN or EXECUTED_SENT / GPT_REVIEW only after the submitted
+  message is visibly in the chat. If submission is uncertain, inspect first;
+  never resend solely because a browser call timed out.
+
+Use the current browser API exposed by the tool: `cua.getState()` then
+`cua.getTab(id, {browser})`, with the documented `tab.playwright` DOM/locator
+API when available. Do not bootstrap obsolete browser runtimes or assume a
+browser control method exists without its returned documentation.
+
 **Golden rules**
 
 1. NEVER paste file contents, diffs, or logs into ChatGPT. ChatGPT reads them through MCP.
