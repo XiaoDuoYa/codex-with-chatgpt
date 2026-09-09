@@ -166,6 +166,7 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
     const result = spawnSync(this.binary(), args, {
       encoding: "utf8",
       timeout: COMMAND_TIMEOUT_MS,
+      windowsHide: true,
     });
     return {
       ok: result.status === 0,

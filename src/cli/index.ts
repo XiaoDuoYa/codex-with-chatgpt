@@ -814,6 +814,7 @@ function runGit(args: string[]): { ok: boolean; stdout: string } {
     encoding: "utf8",
     timeout: 8000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    windowsHide: true,
   });
   return { ok: result.status === 0, stdout: (result.stdout ?? "").trim() };
 }
