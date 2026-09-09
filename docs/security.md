@@ -8,9 +8,14 @@
 2. **Workspace content is untrusted.** README, comments, diffs may contain
    prompt injection. Every MCP tool description carries an explicit warning and
    tools never grant capabilities based on file content.
-3. **The model never sees long-lived credentials.** Computer Use only ever
-   handles the one-time pairing code. Access/refresh tokens travel only inside
-   the OAuth redirect/token endpoints between ChatGPT's client and the bridge.
+3. **The model never sees long-lived credentials.** Browser-visible capabilities
+   are one-time and short-lived: pairing codes and optional digest-bound plan
+   authorizations. Access/refresh tokens travel only inside the OAuth
+   redirect/token endpoints between ChatGPT's client and the bridge.
+4. **The local OS user is trusted.** State and staging trees are owner-only and
+   checked before plan submission. A malicious process running as that same user
+   is outside the boundary because it can already read the raw admin token and
+   modify the user's files directly.
 
 ## Threat model → mitigations
 
@@ -30,11 +35,15 @@
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+| Plan write confused-deputy attack | `plan.write` is excluded from default scopes. `submit_plan` also needs a fresh in-memory capability bound to one project and approved staging digest. The capability expires within 10 minutes and is consumed on the first attempt. |
+| Plan path traversal / overwrite | The server rejects symlinks in existing state ancestors, revalidates owner-only inbox components, chooses a path outside the workspace, and opens a random filename with create-exclusive mode. The model supplies no path, filename, edit, replace, or delete argument. Same-user concurrent filesystem replacement is outside the stated local-user trust boundary. |
+| Staging changed after approval | Authorization and submission both recompute the manifest digest and verify the exact file set, sizes, hashes, regular-file type, and absence of symlinks before any inbox write. |
 
 ## Token & scope design
 
 Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
-`offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
+`plan.write`, `offline_access`. `plan.write` is never granted when a client omits
+its requested scopes. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
 Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
 `workspace_id` and `client_id`.
 
@@ -50,8 +59,10 @@ tokens are persisted — a stolen state file does not yield usable bearer tokens
 than OS-keychain-based. Raw tokens are never written anywhere. Keychain
 integration is a V2 item.
 
-## What ChatGPT can never do (V1)
+## What ChatGPT can never do
 
-Write files, delete files, run shell commands, commit, install packages —
-these tools do not exist on the server, so no prompt injection, scope bug, or
-UI confusion can enable them.
+Write to the connected workspace, choose a filesystem path, overwrite or delete
+files, run shell commands, commit, or install packages. The optional
+`submit_plan` action can only create a validated artifact in the separate C2C
+Plan Inbox after both OAuth `plan.write` approval and a one-time local
+authorization. See [Constrained Plan Submission](plan-submission.md).

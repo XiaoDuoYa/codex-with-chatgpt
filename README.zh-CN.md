@@ -8,13 +8,14 @@
 
 ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的 API 额度做
 规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，Codex 只负责
-执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+执行。不用 API Key、不搞逆向代理——官方网页 + 默认只读的 MCP 桥接。
 
 ## 这是什么
 
 把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，而执行权完全保留在
 Codex 手里。你的仓库永远不会被上传——ChatGPT 通过一条安全的、OAuth 保护的
-**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
+MCP 连接，按需读取当前工作区里它真正需要的那几行代码。9 个工具只读；可选的
+独立授权操作只能把计划提交到工作区之外、由服务端控制的收件箱。
 
 ## 一段话安装（纯小白专用）
 
@@ -89,11 +90,11 @@ Ready.
                         ▼          │
              ┌─────────────────────┐
              │      C2C Bridge     │   仅监听本机回环地址
-             │  只读 MCP           │   OAuth 2.1 + 一次性配对码
+             │  分权限 MCP         │   OAuth 2.1 + 一次性配对码
              │  OAuth + 配对       │   Cloudflare Quick Tunnel
              │  Tunnel 管理        │
              └──────────┬──────────┘
-                        │  只读
+                        │  工作区只读
                         ▼
              ┌─────────────────────┐          ┌─────────────────────┐
              │     本地工作区      │◀─────────│    Codex Harness    │
@@ -107,22 +108,23 @@ Ready.
 - **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
   `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
   `git_status`、`git_diff`、`test_status`、`execution_summary`、
-  `execution_output`。
+  `execution_output`。支持完整 MCP 写操作的 ChatGPT 工作区还可选用
+  `submit_plan`，但它只能在独立的 C2C 计划收件箱中新建经过验证的文件。
 - **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
   和测试记录——绝不因为 Codex 说"测试全过"就直接相信。
 
 ## 安全模型（简版）
 
-- **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
-  注入都无法启用它们。
+- **工作区从构造上只读**：服务端不存在工作区写入、删除、Shell 或提交类工具。
+  可选的 `submit_plan` 还需要独立 OAuth 权限和一次性本机授权，并且只能写入独立收件箱。
 - **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
   realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
   （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
 - **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
   客户端注册、refresh token 轮换）。无令牌：401；令牌属于别的工作区：403。
-- **模型永远接触不到长期凭据**：唯一会出现在浏览器里的秘密是一次性配对码
-  （5 分钟有效、限 5 次尝试、限速、用后即毁）。
+- **模型永远接触不到长期凭据**：浏览器中只会出现短期、一次性的能力值，
+  包括配对码和可选的摘要绑定计划授权。
 
 完整威胁模型：[docs/security.md](docs/security.md)
 
@@ -131,10 +133,11 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # 路径安全、OAuth、配对、MCP 和计划收件箱测试
 
 c2c setup           # 一条命令：Bridge + 隧道 + 配对码
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
+c2c authorize-plan  # 可选的一次性 submit_plan 授权
 c2c status / doctor / pair / unpair / logs / stop
 ```
 
@@ -142,19 +145,21 @@ c2c status / doctor / pair / unpair / logs / stop
 （自动检测，Skill 会替你安装）。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
-[安全](docs/security.md) · [故障排查](docs/troubleshooting.md)
+[安全](docs/security.md) · [计划提交](docs/plan-submission.md) ·
+[故障排查](docs/troubleshooting.md)
 
 ## 目录结构
 
 ```
 src/
   bridge/     本机回环 HTTP 服务、端口自动恢复、管理 API
-  mcp/        9 个只读工具、无状态 Streamable HTTP
+  mcp/        9 个只读工具 + 受限计划收件箱提交
   auth/       OAuth 2.1（PKCE、动态注册、refresh 轮换、吊销）
   pairing/    一次性配对码（CSPRNG、TTL、限速）
   workspace/  路径收敛、敏感文件策略、搜索、git
   tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
   execution/  审查闭环所需的执行记录
+  plans/      摘要绑定、只新建的计划收件箱
   process/    守护进程生命周期
   cli/        c2c 命令行
 skill/        Codex Skill（真正的 UX 层）

@@ -7,6 +7,7 @@ import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js"
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
 import type { Logger } from "../logger/index.js";
+import { PlanInbox, PlanInboxError } from "../plans/inbox.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
 const UNTRUSTED_NOTE =
@@ -36,6 +37,7 @@ function fail(code: string, message: string): ToolResult {
 
 function mapError(error: unknown): ToolResult {
   if (error instanceof WorkspaceError) return fail(error.code, error.message);
+  if (error instanceof PlanInboxError) return fail(error.code, error.message);
   return fail("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
 }
 
@@ -175,9 +177,19 @@ const executionOutputOutputSchema = {
   text: z.string().optional().describe("Sanitized command output returned by the read operation"),
 };
 
+const planReceiptOutputSchema = {
+  path: z.string(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  bytes: z.number().int().positive(),
+  project: z.string(),
+  stagedDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  createdAt: z.string(),
+};
+
 export interface McpContext {
   workspace: Workspace;
   logger: Logger;
+  planInbox: PlanInbox;
 }
 
 export function createMcpServer(ctx: McpContext): McpServer {
@@ -464,6 +476,46 @@ export function createMcpServer(ctx: McpContext): McpServer {
         truncated: result.meta.truncated,
         text: result.text,
       });
+    }
+  );
+
+  server.registerTool(
+    "submit_plan",
+    {
+      title: "Submit plan",
+      description:
+        "Create one validated planning artifact in the server-owned C2C Plan Inbox. " +
+        "This cannot edit the connected workspace, overwrite a prior plan, delete files, run commands, or change Git. " +
+        "Call it only after the user confirms the write and supplies a fresh one-time authorization bound to the exact project and staged digest.",
+      inputSchema: {
+        project: z.string().min(1).max(255).describe("Exact staged project directory name"),
+        staged_digest: z.string().regex(/^[0-9a-f]{64}$/).describe("Exact approved staging SHA-256 digest"),
+        authorization: z.string().min(1).max(128).describe("Fresh one-time plan authorization from the local operator"),
+        content: z.string().min(1).max(262144).describe("Complete plan with FILES_USED, ASSUMPTIONS, PLAN, and OPEN_QUESTIONS sections"),
+      },
+      outputSchema: planReceiptOutputSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "plan.write");
+      if (denied) return denied;
+      try {
+        return okStructured(
+          ctx.planInbox.submit({
+            project: args.project,
+            digest: args.staged_digest,
+            authorization: args.authorization,
+            content: args.content,
+          })
+        );
+      } catch (error) {
+        return mapError(error);
+      }
     }
   );
 

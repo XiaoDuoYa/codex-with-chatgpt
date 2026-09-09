@@ -1,0 +1,17 @@
+{
+  "approval_digest": "50cf047d1b8563455f24d4dfa26a39a9e5c702fc1cba9ff3a92253c5c2b580f7",
+  "classification": "synthetic",
+  "files": [
+    {
+      "bytes": 29,
+      "path": "PROJECT.md",
+      "sha256": "858be65bc3f16984d260c81db17544e423db9d8670a1fe6135768d982dc9fdb6"
+    }
+  ],
+  "limits": {
+    "max_file_bytes": 1000000,
+    "max_total_bytes": 10000000
+  },
+  "project": "manifest-v2-golden",
+  "schema": 2
+}
