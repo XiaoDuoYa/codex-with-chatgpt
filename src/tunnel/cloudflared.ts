@@ -4,6 +4,7 @@ import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { SERVICE_NAME } from "../version.js";
 import { findBinary } from "./detect.js";
+import { tunnelProtocolArgs, type TunnelProtocol } from "./protocol.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
 const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
@@ -53,6 +54,8 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  /** cloudflared transport (`--protocol`); omitted keeps cloudflared's default. */
+  protocol?: TunnelProtocol | null;
   spawnImpl?: (
     command: string,
     args: string[],
@@ -72,6 +75,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private url: string | null = null;
   private lastError: string | null = null;
   private readonly startTimeoutMs: number;
+  private readonly protocol: TunnelProtocol | null;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
   private starting: Promise<string> | null = null;
@@ -83,6 +87,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     options: CloudflaredQuickTunnelOptions = {}
   ) {
     this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.protocol = options.protocol ?? null;
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
@@ -118,7 +123,13 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       try {
         child = this.spawnImpl(
           bin,
-          ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
+          [
+            "tunnel",
+            "--url",
+            `http://127.0.0.1:${localPort}`,
+            "--no-autoupdate",
+            ...tunnelProtocolArgs(this.protocol),
+          ],
           { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
         );
       } catch (error) {
@@ -128,6 +139,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       this.child = child;
       this.url = null;
       this.lastError = null;
+      if (this.protocol) this.logger.info(`cloudflared transport protocol: ${this.protocol}`);
       let settled = false;
       let candidateUrl: string | null = null;
       let cancel: (() => void) | null = null;

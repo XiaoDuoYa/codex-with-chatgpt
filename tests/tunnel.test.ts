@@ -9,7 +9,8 @@ import {
   parseQuickTunnelUrl,
   type CloudflaredQuickTunnelOptions,
 } from "../src/tunnel/cloudflared.js";
-import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
+import { namedTunnelArgs, normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
+import { resolveTunnelProtocol, tunnelProtocolArgs } from "../src/tunnel/protocol.js";
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
   chooseQuickTunnel,
@@ -40,13 +41,18 @@ class FakeCloudflaredProcess extends EventEmitter {
   });
 }
 
-function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
+function setupTunnel(
+  fetchImpl: FetchImpl,
+  startTimeoutMs = 1_000,
+  extra: Pick<CloudflaredQuickTunnelOptions, "protocol"> = {}
+) {
   const child = new FakeCloudflaredProcess();
   const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
   const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
     spawnImpl,
     fetchImpl,
     startTimeoutMs,
+    ...extra,
   });
   return { child, spawnImpl, tunnel };
 }
@@ -115,6 +121,21 @@ describe("CloudflaredQuickTunnel", () => {
       signal: expect.any(AbortSignal),
     });
     expect(tunnel.status()).toMatchObject({ running: true, url: QUICK_URL });
+    await tunnel.stop();
+  });
+
+  it("passes the configured transport protocol to cloudflared", async () => {
+    const fetchImpl = vi.fn(async () => healthResponse());
+    const { child, spawnImpl, tunnel } = setupTunnel(fetchImpl, 1_000, { protocol: "http2" });
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(spawnImpl).toHaveBeenCalledWith(
+      "cloudflared",
+      ["tunnel", "--url", "http://127.0.0.1:3333", "--no-autoupdate", "--protocol", "http2"],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+    );
     await tunnel.stop();
   });
 
@@ -200,6 +221,48 @@ describe("CloudflaredQuickTunnel", () => {
     expect(calls).toBe(2);
     expect(cancelBody).toHaveBeenCalledTimes(1);
     await tunnel.stop();
+  });
+});
+
+describe("tunnel transport protocol", () => {
+  it("keeps cloudflared's default when C2C_TUNNEL_PROTOCOL is unset or empty", () => {
+    expect(resolveTunnelProtocol({})).toBeNull();
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "  " })).toBeNull();
+    expect(tunnelProtocolArgs(null)).toEqual([]);
+  });
+
+  it("accepts the cloudflared protocol names case-insensitively", () => {
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "HTTP2" })).toBe("http2");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: " quic " })).toBe("quic");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "auto" })).toBe("auto");
+    expect(tunnelProtocolArgs("http2")).toEqual(["--protocol", "http2"]);
+  });
+
+  it("rejects unknown protocols instead of silently falling back", () => {
+    expect(() => resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "tcp" })).toThrow(
+      /C2C_TUNNEL_PROTOCOL must be one of auto, quic, http2/
+    );
+  });
+
+  it("places --protocol before the named tunnel run subcommand", () => {
+    expect(namedTunnelArgs("c2c-demo", 4242, "http2")).toEqual([
+      "tunnel",
+      "--no-autoupdate",
+      "--url",
+      "http://127.0.0.1:4242",
+      "--protocol",
+      "http2",
+      "run",
+      "c2c-demo",
+    ]);
+    expect(namedTunnelArgs("c2c-demo", 4242, null)).toEqual([
+      "tunnel",
+      "--no-autoupdate",
+      "--url",
+      "http://127.0.0.1:4242",
+      "run",
+      "c2c-demo",
+    ]);
   });
 });
 

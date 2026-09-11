@@ -3,6 +3,7 @@ import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
+import { tunnelProtocolArgs, type TunnelProtocol } from "./protocol.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
 const CONNECTED_RE = /registered tunnel connection/i;
@@ -14,6 +15,25 @@ export interface CloudflaredNamedTunnelOptions {
   logger?: Logger;
   binaryOverride?: string;
   startTimeoutMs?: number;
+  /** cloudflared transport (`--protocol`); omitted keeps cloudflared's default. */
+  protocol?: TunnelProtocol | null;
+}
+
+/** Arguments for `cloudflared tunnel run <name>` against a local bridge port. */
+export function namedTunnelArgs(
+  tunnelName: string,
+  localPort: number,
+  protocol: TunnelProtocol | null | undefined
+): string[] {
+  return [
+    "tunnel",
+    "--no-autoupdate",
+    "--url",
+    `http://127.0.0.1:${localPort}`,
+    ...tunnelProtocolArgs(protocol),
+    "run",
+    tunnelName,
+  ];
 }
 
 export function normalizeNamedTunnelHostname(hostname: string): string {
@@ -38,6 +58,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private readonly logger: Logger;
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
+  private readonly protocol: TunnelProtocol | null;
   private child: ChildProcess | null = null;
   private connected = false;
   private lastError: string | null = null;
@@ -52,6 +73,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     this.logger = opts.logger ?? nullLogger;
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
+    this.protocol = opts.protocol ?? null;
   }
 
   private binary(): string | null {
@@ -72,21 +94,14 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     }
 
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(
-        bin,
-        [
-          "tunnel",
-          "--no-autoupdate",
-          "--url",
-          `http://127.0.0.1:${localPort}`,
-          "run",
-          this.tunnelName,
-        ],
-        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
-      );
+      const child = spawn(bin, namedTunnelArgs(this.tunnelName, localPort, this.protocol), {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
       this.child = child;
       this.connected = false;
       this.lastError = null;
+      if (this.protocol) this.logger.info(`cloudflared transport protocol: ${this.protocol}`);
       let settled = false;
 
       const finish = (fn: () => void): void => {

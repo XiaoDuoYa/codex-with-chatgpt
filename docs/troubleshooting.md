@@ -71,6 +71,22 @@ The Skill installs this automatically during setup.
 If cloudflared is installed in a custom location that is not on `PATH`, set
 `C2C_CLOUDFLARED_PATH` to the executable's absolute path before running `c2c`.
 
+### The public connection keeps dropping (`Connection terminated`, `no recent network activity`)
+`c2c status` shows the tunnel running but its `detail` line repeats
+`ERR Connection terminated ... control stream error` or
+`failed to accept QUIC stream: timeout: no recent network activity`, and ChatGPT
+intermittently reports the connector as unavailable. cloudflared defaults to
+QUIC (UDP); corporate firewalls and some NATs silently drop idle UDP flows, so
+the tunnel reconnects every few minutes and tool calls that land in the gap fail.
+
+Run the tunnel over TCP instead by setting `C2C_TUNNEL_PROTOCOL=http2` in the
+environment that starts the bridge (`auto` and `quic` are also accepted; an
+unknown value refuses to start rather than silently falling back). The setting
+applies to both temporary and named tunnels and takes effect on the next bridge
+start — a temporary address changes when the bridge restarts, so reconnect the
+ChatGPT connector afterwards as usual. `c2c logs` then shows
+`cloudflared transport protocol: http2`.
+
 ### Every new Codex chat “repairs” the connection / cannot write logs
 The C2C state directory lives outside the project (macOS:
 `~/Library/Application Support/codex-with-chatgpt`; Windows:
