@@ -60,6 +60,28 @@ describe("c2c record", () => {
     });
   });
 
+  it("records the executor that ran the iteration", () => {
+    withRecordEnvironment((root, workspace) => {
+      const result = runRecord(root, ["--iteration", "1", "--executor", "claude-code"]);
+
+      expect(result.status).toBe(0);
+      expect(readExecutionRecords(workspace.id)).toEqual([
+        expect.objectContaining({ taskId: "c2c_test", iteration: 1, executor: "claude-code" }),
+      ]);
+    });
+  });
+
+  it("keeps recording when no executor is given, so older callers still work", () => {
+    withRecordEnvironment((root, workspace) => {
+      const result = runRecord(root, ["--iteration", "1"]);
+
+      expect(result.status).toBe(0);
+      const [record] = readExecutionRecords(workspace.id);
+      expect(record.taskId).toBe("c2c_test");
+      expect(record.executor).toBeUndefined();
+    });
+  });
+
   it("rejects a non-integer iteration without recording the execution", () => {
     withRecordEnvironment((root, workspace) => {
       const result = runRecord(root, ["--iteration", "abc"]);

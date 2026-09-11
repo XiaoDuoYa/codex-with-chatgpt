@@ -4,9 +4,13 @@ import { z } from "zod";
 import { ensureDir, getStateDir } from "../config/paths.js";
 
 /**
- * Lightweight execution records written by the Codex harness after each
- * iteration (via `c2c record`). ChatGPT reads them through the
- * `execution_summary` and `test_status` MCP tools.
+ * Lightweight execution records written by the harness after each iteration
+ * (via `c2c record`). ChatGPT reads them through the `execution_summary` and
+ * `test_status` MCP tools.
+ *
+ * `executor` is optional so records written before this field existed keep
+ * parsing. When it is absent the executor is simply unknown; historically that
+ * meant Codex, but the record itself does not say so.
  */
 export const executionRecordSchema = z.object({
   taskId: z.string(),
@@ -15,6 +19,7 @@ export const executionRecordSchema = z.object({
   tests: z.string().nullable(),
   exitStatus: z.string(),
   timestamp: z.string(),
+  executor: z.string().min(1).max(80).optional(),
   notes: z.string().optional(),
   outputId: z.number().int().positive().optional(),
   outputAvailable: z.boolean().optional(),
