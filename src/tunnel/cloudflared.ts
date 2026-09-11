@@ -10,7 +10,24 @@ import { tunnelProtocolArgs } from "./protocol.js";
 const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
 const HEALTH_CHECK_INTERVAL_MS = 250;
+// A freshly created *.trycloudflare.com hostname is not resolvable for a few seconds after
+// cloudflared prints it. Probing it immediately returns NODATA/ENOTFOUND, which recursive
+// resolvers then cache for the zone's *negative* TTL (1800s for trycloudflare.com). Once that
+// happens, every later probe fails until the start timeout, even though the tunnel is up.
+// So we wait before the first lookup. Configurable for slow/aggressive-caching networks.
+const HEALTH_CHECK_INITIAL_DELAY_MS = readEnvInt(
+  "C2C_TUNNEL_HEALTH_INITIAL_DELAY_MS",
+  12_000
+);
 const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const DEFAULT_START_TIMEOUT_MS = readEnvInt("C2C_TUNNEL_START_TIMEOUT_MS", 90_000);
+
+function readEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
 
 function isBridgeHealth(payload: unknown): boolean {
   if (!payload || typeof payload !== "object") return false;
@@ -54,6 +71,8 @@ export function parseQuickTunnelUrl(line: string): string | null {
 
 export interface CloudflaredQuickTunnelOptions {
   startTimeoutMs?: number;
+  /** Delay before the first health probe, so a fresh hostname is not queried (and negatively cached) too early. */
+  initialHealthDelayMs?: number;
   spawnImpl?: (
     command: string,
     args: string[],
@@ -73,6 +92,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
   private url: string | null = null;
   private lastError: string | null = null;
   private readonly startTimeoutMs: number;
+  private readonly initialHealthDelayMs: number;
   private readonly spawnImpl: NonNullable<CloudflaredQuickTunnelOptions["spawnImpl"]>;
   private readonly fetchImpl: NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
   private starting: Promise<string> | null = null;
@@ -83,7 +103,8 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
     private readonly binaryOverride?: string,
     options: CloudflaredQuickTunnelOptions = {}
   ) {
-    this.startTimeoutMs = options.startTimeoutMs ?? 45_000;
+    this.startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
+    this.initialHealthDelayMs = options.initialHealthDelayMs ?? HEALTH_CHECK_INITIAL_DELAY_MS;
     this.spawnImpl = options.spawnImpl ?? ((command, args, spawnOptions) => spawn(command, args, spawnOptions));
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
   }
@@ -191,6 +212,16 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       const waitForHealth = async (): Promise<void> => {
         const publicUrl = candidateUrl;
         if (!publicUrl) return;
+        // A fresh trycloudflare hostname takes a few seconds to propagate. Querying it too early
+        // yields NODATA, which recursive resolvers cache for the zone's negative TTL (1800s for
+        // trycloudflare.com), so every later probe fails until the start timeout. Wait first.
+        if (this.initialHealthDelayMs > 0) {
+          this.logger.info(
+            `Quick tunnel URL detected: ${publicUrl}; first health check in ${this.initialHealthDelayMs}ms`
+          );
+          await new Promise((resolveWait) => setTimeout(resolveWait, this.initialHealthDelayMs));
+          if (settled) return;
+        }
         while (!settled) {
           if (!isAlive()) {
             fail(new Error("cloudflared exited before the public health endpoint became ready"));
@@ -205,9 +236,13 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
               return;
             }
             this.lastError = result.detail;
+            this.logger.warn(`Quick tunnel not ready yet: ${result.detail}`);
           } catch (error) {
             if (settled) return;
-            this.lastError = error instanceof Error ? error.message : String(error);
+            const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+            const causeText = cause ? ` (${cause.code ?? cause.message ?? "unknown cause"})` : "";
+            this.lastError = error instanceof Error ? `${error.message}${causeText}` : String(error);
+            this.logger.warn(`Quick tunnel health check error: ${this.lastError}`);
           }
           if (settled) return;
           await new Promise((resolveWait) => setTimeout(resolveWait, HEALTH_CHECK_INTERVAL_MS));

@@ -48,6 +48,7 @@ function setupTunnel(fetchImpl: FetchImpl, startTimeoutMs = 1_000) {
     spawnImpl,
     fetchImpl,
     startTimeoutMs,
+    initialHealthDelayMs: 0,
   });
   return { child, spawnImpl, tunnel };
 }
@@ -99,6 +100,31 @@ describe("parseQuickTunnelUrl", () => {
 });
 
 describe("CloudflaredQuickTunnel", () => {
+  it("waits initialHealthDelayMs before the first health probe", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async () => healthResponse());
+      const child = new FakeCloudflaredProcess();
+      const spawnImpl = vi.fn(() => child as unknown as ChildProcess);
+      const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
+        spawnImpl,
+        fetchImpl,
+        startTimeoutMs: 60_000,
+        initialHealthDelayMs: 5_000,
+      });
+      const starting = tunnel.start(3333);
+      child.stderr.write(`INF ${QUICK_URL}\n`);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(starting).resolves.toBe(QUICK_URL);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      await tunnel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resolves only after the public health endpoint identifies the bridge", async () => {
     const fetchImpl = vi.fn(async () => healthResponse());
     const { child, spawnImpl, tunnel } = setupTunnel(fetchImpl);
