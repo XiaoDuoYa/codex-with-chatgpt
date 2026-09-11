@@ -122,6 +122,10 @@ const gitStatusOutputSchema = {
   unstaged: z.array(gitChangeOutputSchema),
   untracked: z.array(z.string()),
   conflicted: z.array(z.string()),
+  hidden: z.object({
+    changes: z.number().int().nonnegative(),
+    conflicts: z.number().int().nonnegative(),
+  }),
 };
 
 const gitDiffOutputSchema = {
@@ -317,7 +321,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
-        return okStructured(gitStatus(workspace.root));
+        return okStructured(gitStatus(workspace));
       } catch (error) {
         return mapError(error);
       }

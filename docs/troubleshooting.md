@@ -27,6 +27,12 @@ connector (`chatgptRepair.connectorName`) and create it again with the new
 address (never click Reconnect — the old URL is dead). Other workspaces keep
 their own connectors so two projects can stay connected at once.
 
+Mint the pairing code only when the ChatGPT Authorize form is on screen
+(`c2c pair`). After the connector is recreated, doctor being green is not
+enough: the saved ChatGPT conversation must pass `workspace_info` again. If
+that old chat still cannot read the workspace, open a new chat in the same
+Project (or switch long-chat) and continue there.
+
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
 - Developer mode: https://chatgpt.com/#settings/Security
@@ -36,7 +42,8 @@ Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
 ### Tunnel URL unreachable / ChatGPT says the connector is broken
 Same as above: `c2c doctor`, then Delete + recreate THIS workspace's
-connector if `chatgptRepair.needed`. Fresh pairing code: `c2c pair`.
+connector if `chatgptRepair.needed`. Mint a pairing code with `c2c pair` only
+when the Authorize form is on screen.
 If this workspace uses a stable hostname, doctor sets `namedRepair` instead —
 re-login to Cloudflare (`c2c tunnel login`) and doctor again. Do not Delete
 the connector; the address did not change.
@@ -49,13 +56,19 @@ address, say you do not have a domain. Switching later: tell Codex you want
 the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
 
 ### "配对码无效/过期"
-Pairing codes are one-time and expire after ~5 minutes:
+Pairing codes are one-time and expire after ~5 minutes. Generate one only
+when the ChatGPT Authorize page is ready:
 
 ```
 c2c pair
 ```
 
-generates a fresh one (older codes become invalid immediately).
+Older codes become invalid immediately. Do not mint a code during `c2c doctor`.
+
+### Temporary address keeps dropping on a UDP-filtered network
+cloudflared defaults to QUIC. If the tunnel reconnects over and over on a
+corporate network, set `C2C_TUNNEL_PROTOCOL=http2` and restart the bridge.
+Leave it unset to keep cloudflared's default.
 
 ### ChatGPT gets 401 on every tool call
 The access token expired and refresh failed (e.g. after `c2c unpair` or a

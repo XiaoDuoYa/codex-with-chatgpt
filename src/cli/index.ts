@@ -609,14 +609,7 @@ program
           previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
         };
         if (action === "update") {
-          try {
-            const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-            chatgptRepair.pairingCode = pairing.code;
-            chatgptRepair.pairingExpiresAt = pairing.expiresAt;
-            results.push(`已生成新的配对码，需要更新「${boundName}」`);
-          } catch (error) {
-            report.oauth = { ok: false, detail: (error as Error).message };
-          }
+          results.push(`安全连接地址已更换，需要更新「${boundName}」`);
         }
       } else if (namedReady) {
         report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };

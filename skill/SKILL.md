@@ -91,6 +91,10 @@ whatever data it needs by itself.
    - `report.bridge` says 状态无法确认: the local bridge may still be running.
      Do not `c2c start`, do not Delete the connector, do not treat it as
      `chatgptRepair`. Wait and run doctor again.
+   If doctor is already green and `chatgptRepair.needed` is false, do not
+   `c2c restart`, do not start a second tunnel, and do not Delete the
+   connector. ChatGPT/IAB-only errors are not permission to churn the
+   public address.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
 
@@ -150,6 +154,16 @@ that close the tab, hide the window, or stall on the settings page.
    Confirm the reply names the current workspace **before** saving or replacing
    the session URL. If validation fails, keep the old saved URL. Do not open a
    throwaway verify chat and later another C2C chat.
+
+   A collection or chat page that shows only `Retry` / `重试` is a navigation
+   error, not generation and not a pairing failure. Reuse the same iab tab.
+   Try Retry once. If it stays Retry-only, `goto` the last working chat URL
+   from this thread (or `session.url` if that is the only saved chat), then
+   click the on-page `Open … project` / `打开“… ”项目` link — that same-site
+   hop is allowed. Do not treat the URLs-only rule as forbidding this link.
+   On the collection, require the project chat list and new-chat composer
+   before continuing. Keep the old saved URL/checkpoint until the replacement
+   chat passes workspace_info. Do not `session clear`. Do not use Computer Use.
 
 8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
    send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
@@ -242,7 +256,9 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
    → returns `{ mcpUrl, pairingCode, workspaceName, connectorName, ... }`.
    `connectorName` is this workspace's plugin title (legacy installs stay
    `Codex with ChatGPT`; additional workspaces get `Codex with ChatGPT · <name>`).
-   Pairing codes expire in ~5 minutes: run `c2c pair --json` for a fresh one if you're slow.
+   Pairing codes expire in ~5 minutes. Do not mint one until the ChatGPT
+   Authorize / pairing form is on screen: run `c2c pair --json` then type
+   that code immediately. Doctor does not pre-mint a code.
 4. `c2c prefs --json` (this machine, not this workspace).
    - If `setupMode` is null: tell the user exactly `setupChoicePrompt`. Wait
      for「1」or「2」. Then `c2c prefs set --setup-mode auto` or `--setup-mode manual`.
@@ -274,9 +290,10 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
       - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
       - Server URL: the `mcpUrl` from step 3
       - Authentication: OAuth
-     Fill the known form in one script when you can. Then Connect / Authorize
-     and type the pairing code. As soon as it shows Connected / authorized /
-     pairing accepted, continue — do NOT wait for 8 tools on this page.
+     Fill the known form in one script when you can. Then Connect / Authorize.
+     Only then run `c2c pair --json` and type that code. As soon as it shows
+     Connected / authorized / pairing accepted, continue — do NOT wait for 8
+     tools on this page.
 6. Same tab: open the first C2C chat per **Conversation management**
    (Project collection for a new workspace; `https://chatgpt.com/` only
    in long-chat). Confirm Chat mode per **In-app browser** §7 (if it is Work,
@@ -337,8 +354,8 @@ next action:
    - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
    - Server URL: the current `mcpUrl`
    - Authentication: OAuth
-4. Ask them to Connect / Authorize and enter the current pairing code. If it
-   expired, run `c2c pair --json` and give them only the fresh pairing code.
+4. Ask them to Connect / Authorize. Then run `c2c pair --json` and give them
+   only that pairing code. If it expires before they finish, run pair again.
 5. When they report Connected / authorized / pairing accepted, resume the normal
    setup/reconnect flow at its ChatGPT verification step. If automatic browser
    verification then hits the same explicit failure twice, stop and report the
@@ -550,6 +567,10 @@ Inspect the connected workspace through the Codex with ChatGPT MCP connector.
 Produce a C2C PLAN message.
 ```
 
+   Confirm the INIT message is visibly in that ChatGPT conversation (one cheap
+   DOM check). If the page is Retry-only, recover per **In-app browser** §7
+   first. Do not write the waiting checkpoint, and do not wait for PLAN, until
+   that message is visible.
    Then:
    `c2c session set -w <ws> --task <id> --iteration 0 --state INIT --protocol-state INIT --waiting-for GPT_PLAN --goal "<short goal>" --next-step "wait for PLAN"`
 3. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
@@ -626,7 +647,7 @@ the previous public address is gone. Doctor already started a new one.
 `connectorAction: "update"` means Delete + create again — not Reconnect.
 
 `c2c doctor --json` will look like:
-`{ "chatgptRepair": { "needed": true, "connectorAction": "update", "connectorName": "...", "userMessage": "...", "mcpUrl": "...", "pairingCode": "...", "pages": { ... } } }`
+`{ "chatgptRepair": { "needed": true, "connectorAction": "update", "connectorName": "...", "userMessage": "...", "mcpUrl": "...", "pages": { ... } } }`
 
 1. Tell the user exactly `chatgptRepair.userMessage`. Then you repair. Do not
    ask them to click around ChatGPT unless a login wall appears. Do not open
@@ -652,19 +673,26 @@ the previous public address is gone. Doctor already started a new one.
       - Description: `Securely connect ChatGPT to the current Codex workspace for planning and review.`
       - Server URL: `chatgptRepair.mcpUrl`
       - Authentication: OAuth
-     Then Connect / Authorize and type `chatgptRepair.pairingCode`
-     (or `c2c pair --json` if it expired). Continue as soon as it is Connected —
-     do not wait for 8 tools on the settings page.
+     Then Connect / Authorize. Only then run `c2c pair --json` and type that
+     code. Continue as soon as it is Connected — do not wait for 8 tools on
+     the settings page.
    - If the name is already gone, skip Delete and only create.
 4. `c2c doctor --json` again. Same tab: only after the Doctor gate is green,
    reopen the chat this Codex thread was already using (`session.url` /
-   the URL you saved earlier in THIS thread). Do not start a new
-   audit/task chat just because the address changed. Do not rewrite Project
+   the URL you saved earlier in THIS thread). Do not rewrite Project
    instructions — they store the connector **name**, which did not change.
-5. If the ChatGPT conversation was lost: long-chat → Conversation
-   management switch. project → collection page, new chat, boot + HANDOFF.
-   No file re-uploading (the workspace lives in MCP). After recreating the
-   same-name connector, the Project still uses that name. If tools point at
+   In that same chat, send the workspace_info check from setup step 6
+   (exact `connectorName`). Doctor green is not enough: the old conversation
+   may still be bound to the deleted connector.
+   - If the reply names this workspace: continue there. Save the URL if needed.
+   - If workspace_info fails, times out, or cannot read the name: do **not**
+     keep retrying that old URL. project → collection page, new chat in this
+     Project, boot + HANDOFF from `session.checkpoint` (no logs) +
+     workspace_info, then `c2c session set --url` only after the name matches.
+     long-chat → Conversation management switch, same checks. Keep the old
+     saved URL until the new chat passes.
+5. If the ChatGPT conversation was lost: same as the failure path in step 4.
+   No file re-uploading (the workspace lives in MCP). If tools point at
    the wrong connector, open 项目设置 and confirm 指令 still names
    `connectorName` (never paste the new public address).
 
@@ -684,7 +712,8 @@ the previous public address is gone. Doctor already started a new one.
 | Symptom | Action |
 | --- | --- |
 | Bridge not running | `c2c start` (doctor does this automatically) |
-| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. |
+| Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. After recreate, re-check `workspace_info` in the saved chat; if it still fails, new chat in the same Project (or long-chat switch) + HANDOFF. |
+| Collection page shows only Retry | Same iab tab: Retry once, then open the last working chat and click its Project link. Do not write INIT/EXECUTED waiting checkpoints until the message is visible. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |
