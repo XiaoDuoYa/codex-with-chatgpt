@@ -5,6 +5,7 @@ import { nullLogger } from "../logger/index.js";
 import { SERVICE_NAME } from "../version.js";
 import { findBinary } from "./detect.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
+import { tunnelProtocolArgs } from "./protocol.js";
 
 const QUICK_TUNNEL_URL_RE = /https:\/\/[^\s|]+/gi;
 const QUICK_TUNNEL_HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.trycloudflare\.com$/i;
@@ -118,7 +119,7 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
       try {
         child = this.spawnImpl(
           bin,
-          ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate"],
+          ["tunnel", "--url", `http://127.0.0.1:${localPort}`, "--no-autoupdate", ...tunnelProtocolArgs()],
           { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
         );
       } catch (error) {

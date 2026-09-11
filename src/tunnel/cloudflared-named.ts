@@ -3,6 +3,7 @@ import readline from "node:readline";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
+import { tunnelProtocolArgs } from "./protocol.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provider.js";
 
 const CONNECTED_RE = /registered tunnel connection/i;
@@ -79,6 +80,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
           "--no-autoupdate",
           "--url",
           `http://127.0.0.1:${localPort}`,
+          ...tunnelProtocolArgs(),
           "run",
           this.tunnelName,
         ],

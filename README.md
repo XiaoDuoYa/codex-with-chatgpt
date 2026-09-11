@@ -201,7 +201,7 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest: 150 tests (path security, OAuth, pairing, MCP e2e)
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
@@ -209,7 +209,8 @@ c2c status / doctor / pair / unpair / logs / stop
 ```
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
-(auto-detected; the Skill installs it for you).
+(auto-detected; the Skill installs it for you). If QUIC is blocked, set
+`C2C_TUNNEL_PROTOCOL=http2` and restart the bridge.
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)

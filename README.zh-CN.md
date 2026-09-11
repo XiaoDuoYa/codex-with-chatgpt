@@ -131,7 +131,7 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # vitest：150 个测试（路径安全、OAuth、配对、MCP 端到端）
 
 c2c setup           # 一条命令：Bridge + 隧道 + 配对码
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
@@ -139,7 +139,8 @@ c2c status / doctor / pair / unpair / logs / stop
 ```
 
 环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
-（自动检测，Skill 会替你安装）。
+（自动检测，Skill 会替你安装）。如果 QUIC 被拦截，设置
+`C2C_TUNNEL_PROTOCOL=http2` 后重启 Bridge。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
 [安全](docs/security.md) · [故障排查](docs/troubleshooting.md)

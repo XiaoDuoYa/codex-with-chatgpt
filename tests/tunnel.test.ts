@@ -19,6 +19,7 @@ import {
   provisionNamedTunnel,
   type CloudflaredAccount,
 } from "../src/tunnel/named-provision.js";
+import { resolveTunnelProtocol, tunnelProtocolArgs } from "../src/tunnel/protocol.js";
 import { isNamedTunnelReady, needsTunnelChoice, readTunnelState } from "../src/tunnel/state.js";
 import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
 
@@ -118,6 +119,21 @@ describe("CloudflaredQuickTunnel", () => {
     await tunnel.stop();
   });
 
+  it("passes --protocol when C2C_TUNNEL_PROTOCOL is set", async () => {
+    vi.stubEnv("C2C_TUNNEL_PROTOCOL", "http2");
+    const { child, spawnImpl, tunnel } = setupTunnel(async () => healthResponse());
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(spawnImpl).toHaveBeenCalledWith(
+      "cloudflared",
+      ["tunnel", "--url", "http://127.0.0.1:3333", "--no-autoupdate", "--protocol", "http2"],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+    );
+    await tunnel.stop();
+    vi.unstubAllEnvs();
+  });
+
   it("keeps consuming cloudflared errors after the tunnel is ready", async () => {
     const { child, tunnel } = setupTunnel(async () => healthResponse());
     const starting = tunnel.start(3333);
@@ -200,6 +216,27 @@ describe("CloudflaredQuickTunnel", () => {
     expect(calls).toBe(2);
     expect(cancelBody).toHaveBeenCalledTimes(1);
     await tunnel.stop();
+  });
+});
+
+describe("tunnel transport protocol", () => {
+  it("keeps cloudflared's default when C2C_TUNNEL_PROTOCOL is unset or empty", () => {
+    expect(resolveTunnelProtocol({})).toBeNull();
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "  " })).toBeNull();
+    expect(tunnelProtocolArgs(null)).toEqual([]);
+  });
+
+  it("accepts the cloudflared protocol names case-insensitively", () => {
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "HTTP2" })).toBe("http2");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: " quic " })).toBe("quic");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "auto" })).toBe("auto");
+    expect(tunnelProtocolArgs("http2")).toEqual(["--protocol", "http2"]);
+  });
+
+  it("rejects unknown protocols instead of silently falling back", () => {
+    expect(() => resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "tcp" })).toThrow(
+      /C2C_TUNNEL_PROTOCOL must be one of auto, quic, http2/
+    );
   });
 });
 
