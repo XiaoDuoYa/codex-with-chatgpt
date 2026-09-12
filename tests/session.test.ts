@@ -151,11 +151,11 @@ describe("mergeSession", () => {
       {
         checkpoint: {
           protocolState: "PLAN_RECEIVED",
-          originalGoal: "x".repeat(600),
+          originalGoal: "x".repeat(1600),
         },
       }
     );
-    expect(next.checkpoint?.originalGoal?.length).toBeLessThanOrEqual(501);
+    expect(next.checkpoint?.originalGoal?.length).toBeLessThanOrEqual(1501);
     expect(next.checkpoint?.originalGoal?.endsWith("…")).toBe(true);
   });
 

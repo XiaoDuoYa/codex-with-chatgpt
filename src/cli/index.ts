@@ -1,5 +1,6 @@
 import { Command, InvalidArgumentError } from "commander";
 import fs from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -27,7 +28,14 @@ import {
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
-import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
+import {
+  BROWSER_MODES,
+  mergeUiPrefs,
+  readUiPrefs,
+  SETUP_MODES,
+  type BrowserMode,
+  type SetupMode,
+} from "../config/ui-prefs.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
@@ -56,6 +64,23 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
+import { importMediaAsset } from "../media/import.js";
+import {
+  claudeAdapterInstalled,
+  claudeGuardHook,
+  claudeHandoff,
+  claudePostToolHook,
+  claudePromptHook,
+  finishClaudeTask,
+  installClaudeAdapter,
+  installClaudeGlobalAdapter,
+  launchClaudeCode,
+  markClaudeExecuted,
+  markClaudePlan,
+  readClaudeCheckpoint,
+  resolveClaudeWorkspaceRoot,
+  startClaudeTask,
+} from "../adapters/claude-code.js";
 
 const program = new Command();
 
@@ -67,6 +92,10 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
+}
+
+function selfCommand(): string {
+  return `node ${JSON.stringify(path.resolve(process.argv[1]))}`;
 }
 
 function parseInteger(value: string): number {
@@ -211,6 +240,53 @@ async function ensureBridgeAndTunnel(
   return { runtime, info, mcpUrl };
 }
 
+async function prepareWorkspaceSetup(root: string, defaultQuick: boolean): Promise<Record<string, unknown>> {
+  const workspace = new Workspace(root);
+  const tunnelStateBefore = readTunnelState(workspace.id);
+  if (defaultQuick && needsTunnelChoice(tunnelStateBefore)) chooseQuickTunnel(workspace.id);
+  const sandbox = trySandboxAllow();
+  const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: true });
+  const previous = readLastEndpoint(info.workspaceId);
+  const connectorName = mcpUrl
+    ? persistWorkspaceEndpoint({
+        workspaceId: info.workspaceId,
+        workspaceName: info.workspaceName,
+        port: runtime.port,
+        publicUrl: info.publicUrl,
+        mcpUrl,
+        previous,
+      })
+    : connectorNameFor({
+        workspaceName: info.workspaceName,
+        workspaceId: info.workspaceId,
+        previousName: previous?.connectorName,
+        hadEndpointBefore: Boolean(previous),
+      });
+  const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+  const tunnelState = readTunnelState(info.workspaceId);
+  return {
+    ok: true,
+    workspaceId: info.workspaceId,
+    workspaceName: info.workspaceName,
+    connectorName,
+    mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
+    local: mcpUrl === null,
+    pairingCode: pairingResult.code,
+    pairingExpiresAt: pairingResult.expiresAt,
+    sandbox,
+    tunnel: {
+      mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
+      hostname: tunnelState.hostname ?? null,
+      fallback: Boolean(tunnelState.fallbackReason),
+    },
+    chatgpt: {
+      createConnectorUrl: CHATGPT_CREATE_CONNECTOR_URL,
+      description: "Securely connect ChatGPT to the current Codex workspace for planning and review.",
+      authentication: "OAuth",
+    },
+  };
+}
+
 program
   .name("c2c")
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
@@ -289,51 +365,50 @@ program
         say("正在连接 ChatGPT…");
         say("");
       }
-      const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : connectorNameFor({
-            workspaceName: info.workspaceName,
-            workspaceId: info.workspaceId,
-            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
-            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
-          });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      const tunnelState = readTunnelState(info.workspaceId);
-      if (opts.json) {
-        say(
-          JSON.stringify({
-            ok: true,
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            connectorName,
-            mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
-            local: mcpUrl === null,
-            pairingCode: pairingResult.code,
-            pairingExpiresAt: pairingResult.expiresAt,
-            sandbox,
-            tunnel: {
-              mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
-              hostname: tunnelState.hostname ?? null,
-              fallback: Boolean(tunnelState.fallbackReason),
-            },
-          })
-        );
+      if (!opts.tunnel) {
+        const sandbox = trySandboxAllow();
+        const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: false });
+        const previous = readLastEndpoint(info.workspaceId);
+        const connectorName = connectorNameFor({
+          workspaceName: info.workspaceName,
+          workspaceId: info.workspaceId,
+          previousName: previous?.connectorName,
+          hadEndpointBefore: Boolean(previous),
+        });
+        const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
+        const payload = {
+          ok: true,
+          workspaceId: info.workspaceId,
+          workspaceName: info.workspaceName,
+          connectorName,
+          mcpUrl: `http://127.0.0.1:${runtime.port}/mcp`,
+          local: true,
+          pairingCode: pairingResult.code,
+          pairingExpiresAt: pairingResult.expiresAt,
+          sandbox,
+          tunnel: { mode: "quick", hostname: null, fallback: false },
+        };
+        if (opts.json) say(JSON.stringify(payload));
+        else {
+          check(`当前项目已识别（${info.workspaceName}）`);
+          check("Workspace Bridge 已启动");
+          say("");
+          say(`连接地址：http://127.0.0.1:${runtime.port}/mcp`);
+          say(`配对码：${pairingResult.code}`);
+        }
         return;
       }
-      check(`当前项目已识别（${info.workspaceName}）`);
+      const payload = await prepareWorkspaceSetup(root, false);
+      if (opts.json) {
+        say(JSON.stringify(payload));
+        return;
+      }
+      check(`当前项目已识别（${String(payload.workspaceName)}）`);
       check("Workspace Bridge 已启动");
-      if (mcpUrl) check("安全连接已建立");
+      check("安全连接已建立");
       say("");
-      say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
-      say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
+      say(`连接地址：${String(payload.mcpUrl)}`);
+      say(`配对码：${String(payload.pairingCode)}`);
       say("");
       say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
       say("如果你在使用 Codex Skill，这一步会自动完成。");
@@ -892,6 +967,343 @@ session
     }
   });
 
+// ---------------------------------------------------------------- generated media handoff
+
+const assetCmd = program
+  .command("asset")
+  .description("Safely hand downloaded media into the current workspace");
+
+assetCmd
+  .command("import", { isDefault: true })
+  .description("Validate and copy a downloaded image or video into the workspace")
+  .requiredOption("--from <path>", "downloaded source file")
+  .requiredOption("--to <path>", "new workspace-relative destination")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { from: string; to: string; workspace?: string; json: boolean }) => {
+    try {
+      const result = await importMediaAsset({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        sourcePath: opts.from,
+        destinationPath: opts.to,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`媒体已导入：${result.destinationPath}`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+// ---------------------------------------------------------------- Claude Code adapter
+
+const claudeCmd = program
+  .command("claude")
+  .description("Use ChatGPT planning and review from Claude Code");
+
+function readHookInput(): Record<string, unknown> {
+  const raw = fs.readFileSync(0, "utf8").trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Claude hook input must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function useGlobalClaudeFallback(input: Record<string, unknown>, enabled: boolean | undefined): boolean {
+  if (!enabled) return true;
+  const root = resolveClaudeWorkspaceRoot(
+    resolveWorkspace(typeof input.cwd === "string" ? input.cwd : undefined)
+  );
+  return !claudeAdapterInstalled(root);
+}
+
+claudeCmd
+  .command("prompt-hook", { hidden: true })
+  .description("Inject and start the mandatory C2C workflow for matching prompts")
+  .option("--workspace-root <path>", "canonical workspace bound when the adapter was installed")
+  .option("--global-fallback", "run only when no project-local adapter exists", false)
+  .action((opts: { workspaceRoot?: string; globalFallback?: boolean }) => {
+    try {
+      const input = readHookInput();
+      if (!useGlobalClaudeFallback(input, opts.globalFallback)) return say("{}");
+      const result = claudePromptHook({
+        workspaceRoot: resolveWorkspace(opts.workspaceRoot ?? (typeof input.cwd === "string" ? input.cwd : undefined)),
+        prompt: typeof input.prompt === "string" ? input.prompt : "",
+        command: selfCommand(),
+        agentSessionId: typeof input.session_id === "string" ? input.session_id : undefined,
+      });
+      say(JSON.stringify(result));
+    } catch (error) {
+      handleCliError(error, true);
+    }
+  });
+
+claudeCmd
+  .command("guard-hook", { hidden: true })
+  .description("Prevent implementation before the ChatGPT PLAN is recorded")
+  .option("--workspace-root <path>", "canonical workspace bound when the adapter was installed")
+  .option("--global-fallback", "run only when no project-local adapter exists", false)
+  .action((opts: { workspaceRoot?: string; globalFallback?: boolean }) => {
+    try {
+      const input = readHookInput();
+      if (!useGlobalClaudeFallback(input, opts.globalFallback)) return say("{}");
+      const result = claudeGuardHook({
+        workspaceRoot: resolveWorkspace(opts.workspaceRoot ?? (typeof input.cwd === "string" ? input.cwd : undefined)),
+        toolName: typeof input.tool_name === "string" ? input.tool_name : "",
+        toolInput:
+          input.tool_input && typeof input.tool_input === "object" && !Array.isArray(input.tool_input)
+            ? (input.tool_input as Record<string, unknown>)
+            : {},
+        agentSessionId: typeof input.session_id === "string" ? input.session_id : undefined,
+      });
+      say(JSON.stringify(result));
+    } catch (error) {
+      handleCliError(error, true);
+    }
+  });
+
+claudeCmd
+  .command("post-hook", { hidden: true })
+  .description("Send the recorded execution to ChatGPT for independent review")
+  .option("--workspace-root <path>", "canonical workspace bound when the adapter was installed")
+  .option("--global-fallback", "run only when no project-local adapter exists", false)
+  .action((opts: { workspaceRoot?: string; globalFallback?: boolean }) => {
+    try {
+      const input = readHookInput();
+      if (!useGlobalClaudeFallback(input, opts.globalFallback)) return say("{}");
+      const result = claudePostToolHook({
+        workspaceRoot: resolveWorkspace(opts.workspaceRoot ?? (typeof input.cwd === "string" ? input.cwd : undefined)),
+        agentSessionId: typeof input.session_id === "string" ? input.session_id : undefined,
+      });
+      say(JSON.stringify(result));
+    } catch (error) {
+      handleCliError(error, true);
+    }
+  });
+
+claudeCmd
+  .command("install-global")
+  .description("Install universal fallback hooks for every Claude project")
+  .option("--settings <path>", "Claude global settings file", path.join(homedir(), ".claude", "settings.json"))
+  .option("--json", "machine-readable output", false)
+  .action((opts: { settings: string; json: boolean }) => {
+    try {
+      const result = installClaudeGlobalAdapter(opts.settings, selfCommand());
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`Claude global C2C dispatcher 已安装（${result.settingsPath}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("bootstrap")
+  .description("Prepare a new workspace for one-pass setup from Claude's browser")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; json: boolean }) => {
+    const root = resolveClaudeWorkspaceRoot(resolveWorkspace(opts.workspace));
+    try {
+      const adapter = installClaudeAdapter(root, selfCommand());
+      const payload = await prepareWorkspaceSetup(root, true);
+      const result = { ...payload, adapter };
+      if (opts.json) say(JSON.stringify(result));
+      else check(`Claude C2C workspace prepared (${String(payload.workspaceName)})`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("install", { isDefault: true })
+  .description("Install or refresh the project-local Claude Code C2C skill")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const result = installClaudeAdapter(resolveWorkspace(opts.workspace), selfCommand());
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`Claude Code adapter 已安装（${result.workspaceRoot}）`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("status")
+  .description("Show Claude adapter and saved ChatGPT session status")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; agentSession?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveClaudeWorkspaceRoot(resolveWorkspace(opts.workspace)));
+      const saved = readSession(workspace.id);
+      const conversation = resolveConversation(saved);
+      const endpoint = readLastEndpoint(workspace.id);
+      const connectionMatches = Boolean(
+        endpoint && conversation.connectorName && endpoint.connectorName === conversation.connectorName
+      );
+      const payload = {
+        ok: true,
+        workspaceName: workspace.name,
+        installed: claudeAdapterInstalled(workspace.root),
+        chatUrl: conversation.chatUrl,
+        connectorName: conversation.connectorName,
+        connectionMatches,
+        ready:
+          claudeAdapterInstalled(workspace.root) &&
+          Boolean(conversation.chatUrl && conversation.connectorName) &&
+          connectionMatches,
+        checkpoint: saved ? readClaudeCheckpoint(workspace.root, opts.agentSession) : null,
+      };
+      if (opts.json) say(JSON.stringify(payload));
+      else if (payload.ready) check(`Claude adapter 已就绪（${workspace.name}）`);
+      else say("Claude adapter 尚未就绪；先连接并验证此 workspace 的 ChatGPT 对话。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("start")
+  .description("Create an INIT message and checkpoint for a Claude Code task")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .requiredOption("--goal <text>")
+  .option("--task <id>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; agentSession?: string; goal: string; task?: string; json: boolean }) => {
+    try {
+      const result = startClaudeTask({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        goal: opts.goal,
+        taskId: opts.task,
+        agentSessionId: opts.agentSession,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else {
+        say(`ChatGPT：${result.chatUrl}`);
+        say("");
+        say(result.message);
+      }
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("plan")
+  .description("Checkpoint a PLAN received from ChatGPT")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .requiredOption("--task <id>")
+  .requiredOption("--iteration <n>", "non-negative iteration", parseNonNegativeInteger)
+  .option("--next-step <text>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; agentSession?: string; task: string; iteration: number; nextStep?: string; json: boolean }) => {
+    try {
+      const result = markClaudePlan({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        taskId: opts.task,
+        iteration: opts.iteration,
+        nextStep: opts.nextStep,
+        agentSessionId: opts.agentSession,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(result.message);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("executed")
+  .description("Create an EXECUTED review message and checkpoint")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .requiredOption("--task <id>")
+  .requiredOption("--iteration <n>", "non-negative iteration", parseNonNegativeInteger)
+  .option("--changed-files <filesOrCount>", "comma-separated paths or count", "0")
+  .option("--tests <summary>", "short test result", "not run")
+  .option("--exit-status <status>", "ok | failed | blocked", "ok")
+  .option("--json", "machine-readable output", false)
+  .action((opts: {
+    workspace?: string;
+    agentSession?: string;
+    task: string;
+    iteration: number;
+    changedFiles: string;
+    tests: string;
+    exitStatus: string;
+    json: boolean;
+  }) => {
+    try {
+      if (!["ok", "failed", "blocked"].includes(opts.exitStatus)) {
+        throw new Error("exit-status must be ok, failed, or blocked");
+      }
+      const result = markClaudeExecuted({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        taskId: opts.task,
+        iteration: opts.iteration,
+        changedFiles: opts.changedFiles,
+        tests: opts.tests,
+        exitStatus: opts.exitStatus as "ok" | "failed" | "blocked",
+        agentSessionId: opts.agentSession,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.message);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("handoff")
+  .description("Create a HANDOFF message from the saved checkpoint")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; agentSession?: string; json: boolean }) => {
+    try {
+      const result = claudeHandoff(resolveWorkspace(opts.workspace), opts.agentSession);
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.message);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("done")
+  .description("Clear the active Claude C2C task checkpoint")
+  .option("-w, --workspace <path>")
+  .option("--agent-session <id>", "Claude chat/session id")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; agentSession?: string; json: boolean }) => {
+    try {
+      const saved = finishClaudeTask(resolveWorkspace(opts.workspace), opts.agentSession);
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved }));
+      else check("Claude C2C task completed");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+claudeCmd
+  .command("launch")
+  .description("Launch Claude Code in this workspace with Chrome enabled")
+  .option("-w, --workspace <path>")
+  .argument("[prompt]")
+  .action((prompt: string | undefined, opts: { workspace?: string }) => {
+    const workspace = resolveWorkspace(opts.workspace);
+    installClaudeAdapter(workspace, selfCommand());
+    const result = launchClaudeCode(workspace, prompt ? [prompt] : [], undefined, selfCommand());
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 0;
+  });
+
 session
   .command("set")
   .description("Save the ChatGPT Project and/or conversation for this workspace")
@@ -992,7 +1404,7 @@ session
 
 const prefsCmd = program
   .command("prefs")
-  .description("Remember ChatGPT developer mode and setup choice for this machine");
+  .description("Remember ChatGPT setup and browser choices for this machine");
 
 prefsCmd
   .command("get", { isDefault: true })
@@ -1008,6 +1420,7 @@ prefsCmd
     if (prefs.setupMode === "auto") say("配置方式：AI 自动化配置（预览版）");
     else if (prefs.setupMode === "manual") say("配置方式：手动教学配置");
     else say("配置方式：尚未选择");
+    say(prefs.browserMode === "shared" ? "浏览器：共享外部浏览器配置文件" : "浏览器：内置浏览器");
   });
 
 prefsCmd
@@ -1015,19 +1428,25 @@ prefsCmd
   .description("Save a ChatGPT setup choice for this machine")
   .option("--developer-mode", "remember that ChatGPT developer mode is on", false)
   .option("--setup-mode <mode>", "auto (preview) or manual")
+  .option("--browser-mode <mode>", "shared (external browser profile) or in-app")
   .option("--json", "machine-readable output", false)
-  .action((opts: { developerMode: boolean; setupMode?: string; json: boolean }) => {
+  .action((opts: { developerMode: boolean; setupMode?: string; browserMode?: string; json: boolean }) => {
     try {
       const modeRaw = opts.setupMode?.trim().toLowerCase();
+      const browserModeRaw = opts.browserMode?.trim().toLowerCase();
       if (modeRaw && !SETUP_MODES.includes(modeRaw as SetupMode)) {
         throw new Error(`setup-mode must be one of ${SETUP_MODES.join(", ")}`);
       }
-      if (!opts.developerMode && !modeRaw) {
-        throw new Error("nothing to save: pass --developer-mode and/or --setup-mode");
+      if (browserModeRaw && !BROWSER_MODES.includes(browserModeRaw as BrowserMode)) {
+        throw new Error(`browser-mode must be one of ${BROWSER_MODES.join(", ")}`);
+      }
+      if (!opts.developerMode && !modeRaw && !browserModeRaw) {
+        throw new Error("nothing to save: pass --developer-mode, --setup-mode, and/or --browser-mode");
       }
       const prefs = mergeUiPrefs({
         developerModeEnabled: opts.developerMode ? true : undefined,
         setupMode: modeRaw as SetupMode | undefined,
+        browserMode: browserModeRaw as BrowserMode | undefined,
       });
       if (opts.json) {
         say(JSON.stringify({ ok: true, ...prefs }));
@@ -1036,6 +1455,8 @@ prefsCmd
       if (opts.developerMode) check("已记住开发人员模式已开启");
       if (modeRaw === "auto") check("已记住配置方式：AI 自动化配置（预览版）");
       if (modeRaw === "manual") check("已记住配置方式：手动教学配置");
+      if (browserModeRaw === "shared") check("已记住浏览器：共享外部浏览器配置文件");
+      if (browserModeRaw === "in-app") check("已记住浏览器：内置浏览器");
     } catch (error) {
       handleCliError(error, opts.json);
     }

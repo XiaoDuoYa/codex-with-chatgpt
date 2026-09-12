@@ -50,8 +50,10 @@ Detailed docs below are in English · 详细中文文档见 **[README.zh-CN.md](
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
 5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
-   全程只用内置浏览器，禁止打开任何第三方浏览器。
+  （运行 c2c setup，用选定的浏览器打开 ChatGPT 配置连接器并输入配对码）。
+   默认使用内置浏览器；如果希望多个项目共用一次登录，运行
+   `c2c prefs set --browser-mode shared` 并连接受支持的浏览器扩展。
+   禁止读取或复制浏览器 Cookie。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
 7. 完成后给我看 ✓ 清单，并确认文件读取测试通过。我不懂 MCP、OAuth、
@@ -76,8 +78,10 @@ I am a non-technical user — do everything yourself:
    ~/.codex/skills/codex-with-chatgpt/SKILL.md, and update the line
    "The codex-with-chatgpt checkout lives at:" to the actual clone path.
 5. First-time setup: follow the SKILL.md "first-time setup" workflow
-   (run c2c setup, configure the ChatGPT connector in the BUILT-IN browser,
-   enter the pairing code). Never open a third-party browser.
+   (run c2c setup, configure the ChatGPT connector in the selected browser,
+   enter the pairing code). The default is the built-in browser. To reuse one
+   existing browser login across projects, set `c2c prefs set --browser-mode shared`
+   and connect the supported browser extension; never copy browser cookies.
 6. Only interrupt me for logins (ChatGPT / Cloudflare), CAPTCHAs or 2FA —
    and give me exactly ONE action at a time.
 7. When done, show me the ✓ checklist and confirm the file-read test passed.
@@ -150,7 +154,7 @@ Credentials stay in the OS app state directory, not in the project.
              │  Reason / Plan / Review   │
              └──────────┬──────────▲─────┘
                         │          │
-               MCP      │          │ Computer Use
+               MCP      │          │ Browser automation
             Data Plane  │          │ Control Plane (<1 KB messages)
                         ▼          │
              ┌─────────────────────┐
@@ -167,11 +171,11 @@ Credentials stay in the OS app state directory, not in the project.
                                               └─────────────────────┘
 ```
 
-- **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
+- **Control plane (browser automation)**: Codex/Claude and ChatGPT exchange tiny structured
   `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
   no logs, no file bodies are ever pasted.
-- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
-  tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
+- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 10 read-only
+  tools: `workspace_info`, `list_directory`, `read_file`, `read_image`, `search_workspace`,
   `git_status`, `git_diff`, `test_status`, `execution_summary`,
   `execution_output`.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
@@ -201,12 +205,62 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 150 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # full Vitest suite (path security, OAuth, pairing, MCP e2e)
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
 c2c status / doctor / pair / unpair / logs / stop
 ```
+
+### Claude Code adapter
+
+The same read-only bridge and C2C protocol can use ChatGPT as the planning and
+independent-review layer for Claude Code. Install the project-local rule, skill,
+and deterministic hooks without overwriting an existing `CLAUDE.md` or existing
+Claude settings:
+
+```bash
+c2c claude install -w /path/to/project
+c2c claude launch -w /path/to/project
+```
+
+The prompt hook starts C2C automatically for coding, debugging, architecture,
+and review prompts; a guard hook prevents implementation before ChatGPT's plan
+is recorded. Browser choice is machine-wide: `in-app` prefers Claude Desktop's
+built-in Browser, while `shared` prefers Claude in Chrome so projects reuse the
+same signed-in external browser profile. In the CLI, `launch` enables Claude
+Code's official Chrome integration. Both surfaces exchange only the small `INIT`, `EXECUTED`, and
+`HANDOFF` control messages. ChatGPT reads the real files and diff through the
+existing read-only connector; Claude Code keeps implementation and test
+ownership.
+
+Install the universal Claude dispatcher once with:
+
+```bash
+c2c claude install-global
+```
+
+It preserves existing global Claude hooks and activates C2C automatically in
+every repository. A project-local adapter takes precedence when present, so the
+global fallback does not double-run its gates. One connector belongs to the
+canonical project, not to a Git worktree or a Claude chat. Linked and nested
+worktrees resolve back to that project, including during first-time setup.
+Concurrent Claude chats share the connector but keep separate task IDs and
+checkpoints, so one chat cannot resume or unblock another chat's plan.
+
+Supported project images can be inspected through the read-only `read_image`
+tool. For media generated in ChatGPT web, the execution agent activates the
+asset's actual Download control and runs `c2c asset import --from <download> --to
+<project-relative-path>`. The importer validates common image/video signatures,
+rejects active SVG content and overwrites, and cannot write outside the selected
+workspace. Browser screenshots are diagnostic evidence only and are never used
+as generated assets. The connector itself never gains write access.
+
+For a brand-new project, the same one-line launch installs the adapter. The
+first matching prompt runs `c2c claude bootstrap`, prepares a temporary address
+when no stable-domain preference exists, and guides the active Claude browser
+through connector creation and workspace verification. Only login, CAPTCHA,
+2FA, and mandatory consent remain interactive.
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you). If QUIC is blocked, set
@@ -220,7 +274,7 @@ Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 ```
 src/
   bridge/     loopback HTTP server, port recovery, admin API
-  mcp/        9 read-only tools, stateless Streamable HTTP
+  mcp/        10 read-only tools, stateless Streamable HTTP
   auth/       OAuth 2.1 (PKCE, DCR, refresh rotation, revocation)
   pairing/    one-time pairing codes (CSPRNG, TTL, rate limits)
   workspace/  path containment, sensitive-file policy, search, git

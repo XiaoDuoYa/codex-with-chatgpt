@@ -37,7 +37,7 @@ describe("connectorNameFor", () => {
         previousName: "Codex with ChatGPT",
         hadEndpointBefore: true,
       })
-    ).toBe(DEFAULT_CONNECTOR_NAME);
+    ).toBe("Codex with ChatGPT");
   });
 
   it("keeps the legacy title when this workspace was used before the name field existed", () => {
@@ -47,17 +47,18 @@ describe("connectorNameFor", () => {
         workspaceId: "abc123abc123",
         hadEndpointBefore: true,
       })
-    ).toBe(DEFAULT_CONNECTOR_NAME);
+    ).toBe("Codex with ChatGPT");
   });
 
   it("gives a new workspace its own connector title", () => {
+    expect(DEFAULT_CONNECTOR_NAME).toBe("Codex 2 ChatGPT");
     expect(
       connectorNameFor({
         workspaceName: "Landing",
         workspaceId: "def456def456",
         hadEndpointBefore: false,
       })
-    ).toBe("Codex with ChatGPT · Landing");
+    ).toBe("Codex 2 ChatGPT · Landing");
   });
 });
 

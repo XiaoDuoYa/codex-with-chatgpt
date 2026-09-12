@@ -34,8 +34,10 @@ Agent（Codex），然后去倒杯咖啡：
    ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
    "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
 5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
-   全程只用内置浏览器，禁止打开任何第三方浏览器。
+  （运行 c2c setup，用选定的浏览器打开 ChatGPT 配置连接器并输入配对码）。
+   默认使用内置浏览器；如果希望多个项目共用一次登录，运行
+   `c2c prefs set --browser-mode shared` 并连接受支持的浏览器扩展。
+   禁止读取或复制浏览器 Cookie。
 6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
    而且一次只告诉我一个动作。
 7. 完成后给我看 ✓ 清单，并确认文件读取测试通过。我不懂 MCP、OAuth、
