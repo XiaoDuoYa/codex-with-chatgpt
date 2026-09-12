@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { findBinary } from "../src/tunnel/detect.js";
@@ -16,6 +17,7 @@ import {
   isBenignRouteError,
   parseCreatedTunnel,
   parseTunnelList,
+  ProcessCloudflaredAccount,
   provisionNamedTunnel,
   type CloudflaredAccount,
 } from "../src/tunnel/named-provision.js";
@@ -288,6 +290,25 @@ ID                                   NAME          CREATED
 
   it("treats an existing DNS route as success", () => {
     expect(isBenignRouteError("Failed to add route: record already exists")).toBe(true);
+  });
+
+  it("forces an existing hostname onto the selected workspace tunnel", async () => {
+    const binary = makeTmpDir("cloudflared-route");
+    stateDirs.push(binary);
+    const log = path.join(binary, "args.txt");
+    const fake = path.join(binary, "cloudflared");
+    fs.writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}"\n`, { mode: 0o755 });
+    const account = new ProcessCloudflaredAccount(fake);
+    await account.routeDns("c2c-workspace", "c2c-demo.example.com");
+    expect(fs.readFileSync(log, "utf8").split("\n")).toEqual([
+      "tunnel",
+      "route",
+      "dns",
+      "--overwrite-dns",
+      "c2c-workspace",
+      "c2c-demo.example.com",
+      "",
+    ]);
   });
 });
 
