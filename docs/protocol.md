@@ -43,13 +43,18 @@ Local checkpoint values (session only):
 Legacy sessions without a checkpoint keep the old loop. The first normal
 iteration after this version writes a checkpoint automatically.
 
+Claude clients that provide a session ID never claim an older workspace-level
+checkpoint. A new Claude session starts its own task state even if an unfinished
+legacy checkpoint exists; clients without session IDs retain the legacy path.
+
 Do not re-pair, recreate the connector, or rewrite Project instructions
 just to resume.
 
 ## Message format
 
 Every control message starts with `[C2C]` and key-value headers, then sections.
-Keep messages < 1 KB. No diffs, no logs, no file bodies.
+Keep INIT within 3 KB and later control messages within 1 KB. No diffs, no
+logs, no file bodies.
 
 ### INIT (Codex → ChatGPT)
 
@@ -62,9 +67,16 @@ ITERATION: 0
 GOAL:
 Implement dark mode.
 
+ROLE_AND_QUALITY_BAR:
+Act as the critical principal-level product and engineering planning authority.
+Adopt the domain hats the goal requires. Challenge weak assumptions, identify
+material tradeoffs and failure modes, and define observable acceptance evidence.
+Demand production-ready work proportional to the task; avoid both partial work
+and ceremonial overengineering.
+
 INSTRUCTION:
 Inspect the connected workspace through Codex with ChatGPT MCP.
-Create an implementation plan for Codex.
+Create a finite implementation brief for Codex.
 ```
 
 ### PLAN (ChatGPT → Codex)
@@ -89,6 +101,12 @@ ACTIONS:
 FILES_LIKELY_INVOLVED:
 ...
 
+ASSUMPTIONS_AND_TRADEOFFS:
+... (material items only; omit when none)
+
+RISKS_AND_FAILURE_MODES:
+... (material items only; omit when none)
+
 TESTS:
 ...
 
@@ -96,7 +114,9 @@ SUCCESS_CRITERIA:
 ...
 ```
 
-Plans must be finite, concrete, executable. Not 40-step epics.
+Plans must be finite, concrete, executable, and critical. They must distinguish
+requirements from optional improvements and must not prescribe placeholders or
+quietly narrow the requested scope. Not 40-step epics.
 
 ### EXECUTED (Codex → ChatGPT)
 
@@ -118,6 +138,8 @@ TESTS:
 Please independently inspect the workspace and current git diff through MCP.
 If execution_output lists a readable item for this iteration, list then read it.
 If status is restricted, ignore it and review from git_diff.
+Return DONE only when the inspected result is complete for its stated scope and
+supported by evidence. Otherwise return PLAN or BLOCKED.
 ```
 
 Before sending EXECUTED, Codex records the iteration:
@@ -207,7 +229,8 @@ pauses and asks the user whether to continue.
 Send once at the start of every new C2C conversation:
 
 ```
-You are the planning and review layer of a Codex coding session.
+You are the critical principal-level planning and review layer of a Codex coding
+session. Codex executes; you own product and engineering judgment.
 
 Codex owns execution.
 You own high-level reasoning, planning and review.
@@ -219,6 +242,7 @@ Rules:
 
 1. Do not ask Codex to paste files that are available through MCP.
 2. Inspect only the files needed for the task.
+   Batch independent MCP reads when possible.
 3. Use MCP to inspect current code, git status and diff.
 4. Produce concise executable plans.
 5. Codex will execute your plan using its own harness.
@@ -235,7 +259,20 @@ Rules:
     (which file, what to change and why), risks worth checking, and test
     advice. Never reply with a bare one-liner. Substance over length —
     but do not generate 40-step epics either.
-12. If you receive a HANDOFF message, this conversation continues an
+12. Adopt the product, UX, architecture, security, reliability, data, or other
+    domain hats the task actually requires. Challenge weak assumptions and call
+    out material tradeoffs, failure modes, compatibility concerns, and
+    operational risks. Keep the rigor proportional to the repository and task;
+    do not add ceremonial enterprise complexity.
+13. Treat the user's requested outcome as the deliverable. Do not quietly
+    narrow it, substitute a smaller task, accept placeholders, or confuse a
+    plausible implementation with a verified one. Make routine judgments from
+    workspace evidence. Ask for a decision only when different answers would
+    materially change the correct implementation.
+14. Return DONE only after independently inspecting the implementation and
+    evidence against explicit success criteria. Partial behavior, unsupported
+    claims, placeholders, or unresolved material risks require PLAN or BLOCKED.
+15. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
 13. If this chat sits in a ChatGPT Project, use only the connector named

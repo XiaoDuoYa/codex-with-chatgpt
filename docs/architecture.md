@@ -41,12 +41,13 @@
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | McpServer with 9 read-only tools; stateless Streamable HTTP transport (fresh server per request, JSON responses) |
+| `mcp/` | McpServer with 10 read-only tools; stateless Streamable HTTP transport (fresh server per request, JSON/image responses) |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
 | `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and workspace-configured Named Tunnel implementations; business logic is vendor-agnostic |
 | `execution/` | JSONL execution records plus optional sanitized command output (`execution_output`) |
+| `adapters/` | Claude Code hooks and orchestration; canonical project/connector identity with per-Claude-chat checkpoints |
 | `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |
 | `config/`, `logger/` | OS-convention state dir, secret-redacting logger |
@@ -66,6 +67,19 @@ authorization code → `/oauth/token` (PKCE S256) → access + refresh tokens.
 whether the occupant is a c2c bridge for the same workspace (reuse) or not
 (fall back to an ephemeral port). Configuration follows automatically via the
 runtime state file; users never see ports.
+
+**Claude sessions**: one connector is keyed to the canonical Git project.
+Subdirectories and linked/nested worktrees resolve back to that project, while
+active protocol checkpoints are keyed by Claude session ID. Multiple Claude
+chats and worktrees can therefore share one connector without sharing one
+mutable task state. A legacy workspace-level checkpoint is used only by clients
+that provide no session ID; it is never implicitly claimed by a newly identified
+Claude session.
+
+**Browser login**: C2C stores no browser credentials. The machine-level
+`browserMode` preference chooses either the isolated in-app browser or a
+connected shared external browser profile. Shared mode reuses the profile
+itself across workspaces; it never reads, exports, or copies its cookies.
 
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
 The URL changes per start, so `c2c doctor` can restart it and tell the Skill to

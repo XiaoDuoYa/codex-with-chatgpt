@@ -163,7 +163,7 @@ export function resolveConversation(session: SavedSession | null): ConversationV
 }
 
 const CHECKPOINT_LIMITS = {
-  originalGoal: 500,
+  originalGoal: 1500,
   completedSubtasks: 800,
   knownIssues: 800,
   nextExpectedStep: 400,

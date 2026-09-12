@@ -95,6 +95,21 @@ there, so each new chat looks like a health-check failure.
 (`%USERPROFILE%\.codex\config.toml` on Windows). After that, later chats
 do not need elevation.
 
+### ChatGPT asks me to sign in again in every project
+
+The built-in browser may be scoped to an app session. C2C never reads or copies
+cookies between profiles. To reuse one normal browser login safely, connect the
+supported browser extension and run:
+
+```bash
+c2c prefs set --browser-mode shared
+```
+
+All projects then prefer that same external browser profile. Use
+`--browser-mode in-app` to restore the isolated built-in browser. If shared mode
+is selected but the extension is not connected, C2C stops with one setup action
+instead of silently opening a signed-out in-app profile.
+
 ### Port already in use
 Handled automatically: an existing healthy bridge for the same workspace is
 reused; anything else makes the bridge pick a free port. Configuration follows

@@ -29,7 +29,9 @@
 | Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
+| Generated media handoff | ChatGPT's connector remains read-only. The local execution agent must explicitly import the original browser download—not a browser screenshot—into a new workspace-relative path; signatures, size, containment and SVG active-content checks are enforced, and existing files are never overwritten. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+| Browser credential exposure | C2C never reads or copies cookies, browser databases, local storage, or session storage. Optional cross-project login reuse controls one already-connected external browser profile instead of moving credentials between profiles. |
 
 ## Token & scope design
 
