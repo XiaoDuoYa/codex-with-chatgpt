@@ -157,7 +157,11 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
   }
 
   async routeDns(tunnelName: string, hostname: string): Promise<void> {
-    const result = this.run(["tunnel", "route", "dns", tunnelName, hostname]);
+    // A previous failed or replaced C2C tunnel may leave the hostname routed to
+    // an obsolete tunnel. Reusing that record produces Cloudflare 530 even
+    // while the new tunnel itself is connected, so route the exact requested
+    // hostname to the exact workspace tunnel idempotently.
+    const result = this.run(["tunnel", "route", "dns", "--overwrite-dns", tunnelName, hostname]);
     if (result.ok || isBenignRouteError(`${result.stdout}\n${result.stderr}`)) return;
     throw new Error(result.stderr || result.stdout || `Unable to route ${hostname}`);
   }

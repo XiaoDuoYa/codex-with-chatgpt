@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import readline from "node:readline";
+import { devNull } from "node:os";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
@@ -77,6 +78,11 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
         bin,
         [
           "tunnel",
+          // Ignore unrelated user ingress rules and tunnel IDs from the
+          // default cloudflared config. This named tunnel supplies its own
+          // target and local service explicitly.
+          "--config",
+          devNull,
           "--no-autoupdate",
           "--url",
           `http://127.0.0.1:${localPort}`,
