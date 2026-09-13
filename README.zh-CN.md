@@ -51,6 +51,11 @@ Agent（Codex），然后去倒杯咖啡：
 2. 对 Codex 说：**"使用 Codex with ChatGPT 完成首次配置。"**
 3. 之后正常使用：**"使用 Codex with ChatGPT，帮我实现 XXX。"**
 
+> **安装范围：** 本项目不会发布或安装 Codex 网页版 GPT、启动器或模型目录条目。
+> 安装内容是构建本仓库、把 `skill/SKILL.md` 安装为 Codex Skill，然后运行
+> `c2c setup` 配置 ChatGPT 连接器。网页版 GPT 或模型目录的问题请先查看
+> [故障排查](docs/troubleshooting.md)。
+
 说明书到此结束。你不需要知道 MCP、OAuth、Tunnel、端口、localhost 是什么——
 Codex 会自动完成所有配置，你只会看到：
 

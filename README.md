@@ -102,6 +102,12 @@ anytime. / Skill 每天自动检查一次 GitHub，有新版本会自动更新�
 2. Tell Codex: **"Set up Codex with ChatGPT."** (中文: "使用 Codex with ChatGPT 完成首次配置。")
 3. Use Codex normally: **"Use Codex with ChatGPT to implement XXX."**
 
+> **Installation scope:** This repository does not publish or install a Codex
+> Web GPT, launcher, or model-catalog entry. Installation consists of building
+> this checkout, installing `skill/SKILL.md` as a Codex Skill, and running
+> `c2c setup` to configure the ChatGPT connector. For Web GPT or model-catalog
+> problems, see [troubleshooting](docs/troubleshooting.md).
+
 That's the whole manual. You don't need to know what MCP, OAuth, tunnels,
 ports or localhost are — Codex configures everything automatically and you
 just see:
