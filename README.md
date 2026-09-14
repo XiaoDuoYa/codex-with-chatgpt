@@ -170,13 +170,22 @@ Credentials stay in the OS app state directory, not in the project.
 - **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
   `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
   no logs, no file bodies are ever pasted.
-- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
+- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 10 read-only
   tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
   `git_status`, `git_diff`, `test_status`, `execution_summary`,
-  `execution_output`.
+  `execution_output`, `read_image`.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
+
+### Generated media handoff
+
+The connector remains read-only: `read_image` can inspect supported workspace
+images but cannot write files. After a requested image or video is downloaded
+through the visible ChatGPT UI, the local executor can validate and import the
+original with `c2c asset import -w <workspace> --from <download> --to <new-path>`.
+Imports are workspace-contained, signature-checked, size-limited, reject active
+SVG content, and never overwrite an existing file.
 
 ## Security model (short version)
 

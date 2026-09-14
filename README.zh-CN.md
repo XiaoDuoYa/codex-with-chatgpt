@@ -104,12 +104,19 @@ Ready.
 - **控制面（Computer Use）**：Codex 与 ChatGPT 之间只交换极小的结构化 `[C2C]`
   状态消息——`INIT → PLAN → EXECUTED → REVIEW → DONE`。绝不粘贴 diff、日志
   或文件内容。
-- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
+- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 10 个只读工具：
   `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
   `git_status`、`git_diff`、`test_status`、`execution_summary`、
-  `execution_output`。
+  `execution_output`、`read_image`。
 - **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
   和测试记录——绝不因为 Codex 说"测试全过"就直接相信。
+
+### 生成媒体交接
+
+连接器仍然只读：`read_image` 可以查看工作区中的受支持图片，但不能写文件。
+通过可见的 ChatGPT 页面下载图片或视频原件后，本地执行端可以运行
+`c2c asset import -w <workspace> --from <download> --to <new-path>` 安全导入。
+导入过程限制在工作区内，会验证签名和大小、拒绝活动 SVG，并且绝不覆盖现有文件。
 
 ## 安全模型（简版）
 

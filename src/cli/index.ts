@@ -56,6 +56,7 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
+import { importMediaAsset } from "../media/import.js";
 
 const program = new Command();
 
@@ -898,6 +899,33 @@ session
           `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
         );
       }
+    }
+  });
+
+// ---------------------------------------------------------------- generated media handoff
+
+const assetCmd = program
+  .command("asset")
+  .description("Safely hand downloaded media into the current workspace");
+
+assetCmd
+  .command("import", { isDefault: true })
+  .description("Validate and copy a downloaded image or video into the workspace")
+  .requiredOption("--from <path>", "downloaded source file")
+  .requiredOption("--to <path>", "new workspace-relative destination")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { from: string; to: string; workspace?: string; json: boolean }) => {
+    try {
+      const result = await importMediaAsset({
+        workspaceRoot: resolveWorkspace(opts.workspace),
+        sourcePath: opts.from,
+        destinationPath: opts.to,
+      });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`媒体已导入：${result.destinationPath}`);
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
   });
 
