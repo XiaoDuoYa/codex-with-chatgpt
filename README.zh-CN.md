@@ -45,6 +45,17 @@ Agent（Codex），然后去倒杯咖啡：
 **更新**：Skill 每天自动检查一次 GitHub，有新版本会自动更新并继续任务，
 无需任何操作；也可以随时对 Codex 说"更新 Codex with ChatGPT"。
 
+### Claude Code 适配器（实验性）
+
+Claude Code 也可以作为本地执行端，ChatGPT 网页版仍负责规划与独立审查。
+项目级安装使用 `c2c claude install -w <workspace>`；也可以用
+`c2c claude install-global` 安装全局后备 Hook。每个规范 Git 项目只复用一个
+连接器，但每个 Claude 会话都有独立任务存档，因此并行对话和 worktree 不会
+误领彼此的进行中任务。
+
+适配器只使用 Claude Desktop 内置浏览器，不改变现有 C2C 浏览器策略，也不引入
+共享的外部浏览器配置。完整命令见 `c2c claude --help`。
+
 ## 安装 → 配置 → 使用（手动版）
 
 1. 安装 Codex Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。

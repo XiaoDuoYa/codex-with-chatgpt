@@ -91,6 +91,20 @@ new version is released; no action needed. You can also say "更新 Codex with C
 anytime. / Skill 每天自动检查一次 GitHub，有新版本会自动更新，无需任何操作；
 也可以随时对 Codex 说"更新 Codex with ChatGPT"。
 
+### Experimental Claude Code adapter
+
+Claude Code can act as an alternate local executor while the same ChatGPT web
+workflow continues to own planning and independent review. Install project-local
+hooks with `c2c claude install -w <workspace>` or an optional machine-wide
+fallback with `c2c claude install-global`. The adapter keeps one connector per
+canonical Git project and a separate task checkpoint per Claude session, so
+parallel chats and worktrees cannot claim each other's in-progress task.
+
+The adapter uses Claude Desktop's built-in Browser only. It does not change the
+existing C2C browser policy or add shared external-browser profiles. See
+`c2c claude --help` for the explicit `start`, `plan`, `executed`, `handoff`, and
+`done` protocol commands.
+
 ---
 
 *The sections below are in English. 以下详细内容为英文，中文完整版见

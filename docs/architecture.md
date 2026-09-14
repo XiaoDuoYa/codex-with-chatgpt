@@ -47,6 +47,7 @@
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
 | `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and workspace-configured Named Tunnel implementations; business logic is vendor-agnostic |
 | `execution/` | JSONL execution records plus optional sanitized command output (`execution_output`) |
+| `adapters/` | Claude Code hooks and orchestration; canonical project identity with per-Claude-session checkpoints |
 | `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |
 | `config/`, `logger/` | OS-convention state dir, secret-redacting logger |
@@ -66,6 +67,13 @@ authorization code → `/oauth/token` (PKCE S256) → access + refresh tokens.
 whether the occupant is a c2c bridge for the same workspace (reuse) or not
 (fall back to an ephemeral port). Configuration follows automatically via the
 runtime state file; users never see ports.
+
+**Claude sessions**: one connector remains keyed to the canonical Git project.
+Subdirectories and linked or nested worktrees resolve back to that project,
+while active adapter checkpoints are keyed by Claude session ID. Multiple Claude
+chats can therefore share one connector without sharing mutable task state. A
+legacy workspace-level checkpoint is used only by clients that provide no
+session ID; it is never implicitly claimed by a newly identified Claude session.
 
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
 The URL changes per start, so `c2c doctor` can restart it and tell the Skill to

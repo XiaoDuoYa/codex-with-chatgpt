@@ -43,6 +43,10 @@ Local checkpoint values (session only):
 Legacy sessions without a checkpoint keep the old loop. The first normal
 iteration after this version writes a checkpoint automatically.
 
+Claude clients that provide a session ID never claim an older workspace-level
+checkpoint. A new Claude session starts its own task state even if an unfinished
+legacy checkpoint exists; clients without session IDs retain the legacy path.
+
 Do not re-pair, recreate the connector, or rewrite Project instructions
 just to resume.
 
