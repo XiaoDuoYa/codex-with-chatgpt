@@ -30,6 +30,7 @@
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+| Browser credential exposure | C2C never reads or copies cookies, browser databases, local storage, or session storage. Optional login reuse controls one already-connected extension profile instead of moving credentials between profiles. |
 
 ## Token & scope design
 

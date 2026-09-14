@@ -47,18 +47,20 @@ whatever data it needs by itself.
    These prefs are for this machine, not per workspace. Do not ask again
    on reconnect or a second repo. A new computer (empty prefs) asks/checks
    once.
-5. ALWAYS use the built-in in-app browser (iab) for every ChatGPT step.
-   Follow **In-app browser (ChatGPT)** below. NEVER Computer Use (no
-   screenshot-click). NEVER launch or control a third-party/external browser
-   (Chrome, Safari, Edge…), and never use `open <url>` to hand off to one.
-   - The ONLY exception: the user explicitly says the Cloudflare login must use
-     their own browser session — that single Cloudflare login step may go through
-     their browser; everything else stays in the built-in browser.
-   - If the user asks to run ChatGPT in their own browser, refuse politely and
-     explain: "Codex 需要持续调用 ChatGPT 和配置连接，这会频繁操作页面，可能影响
-     你浏览器的正常使用。ChatGPT 只能跑在内置浏览器里。" Only if the user replies
-     with an explicit "我愿意承担影响" may you proceed in their browser; otherwise
-     keep ChatGPT in the built-in browser, every time they ask.
+   `browserMode` controls only the browser surface: `in-app` uses the isolated
+   built-in browser and is the default for legacy prefs; `shared` reuses an
+   already connected external-browser extension profile. Change it only when
+   the user asks: `c2c prefs set --browser-mode shared|in-app --json`.
+5. ALWAYS follow `browserMode` from `c2c prefs --json` for every ChatGPT step.
+   Follow **Browser surface (ChatGPT)** below. NEVER Computer Use (no
+   screenshot-click), never launch a browser with shell commands, and never copy,
+   inspect, import, or export cookies, browser databases, local storage, or
+   session storage. Login reuse comes only from controlling the selected profile.
+   - `shared`: use the connected external-browser extension profile. If it is
+     unavailable, ask the user to connect it; do not silently switch modes.
+   - `in-app`: use the built-in browser. Do not substitute an external browser.
+   - The Cloudflare named-connection login may still open the user's browser as
+     described below; it does not change `browserMode`.
 6. Conversation reuse depends on `c2c session --json` → `conversation.mode`
    (see Conversation management). Do not invent a second mode.
    - **long-chat** (legacy session file, or the user opted out): ONE ChatGPT
@@ -76,7 +78,7 @@ whatever data it needs by itself.
    settings directory. Run `c2c sandbox-allow --json` (idempotent). If it fails
    with EPERM / Operation not permitted, request elevated permissions and retry
    ONCE. After `{ "alreadyAllowed": true }` or `{ "added": true }`, stay silent.
-8. ChatGPT pages: only the URLs in **In-app browser (ChatGPT)**. Never start
+8. ChatGPT pages: only the URLs in **Browser surface (ChatGPT)**. Never start
    from chatgpt.com and click through menus.
 9. **Doctor gate.** After `c2c doctor --json`, do not `goto` ChatGPT and do not
    send `[C2C]` until local is green — except the reconnect settings pages when
@@ -98,15 +100,22 @@ whatever data it needs by itself.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
 
-## In-app browser (ChatGPT)
+## Browser surface (ChatGPT)
 
 Official skill: `control-in-app-browser`. These C2C rules override defaults
 that close the tab, hide the window, or stall on the settings page.
 
-1. **Surface.** Once per Codex session: `setupBrowserRuntime()`, then
-   `const iab = await agent.browsers.get("iab")`. Reuse `iab`. Do not re-read
-   `documentation()` if it is already bound. Never `getDefault()`, `getForUrl()`,
-   or Computer Use.
+1. **Surface.** Once per Codex session: `setupBrowserRuntime()`, read
+   `c2c prefs --json`, then select exactly one browser and keep it in the `iab`
+   variable used below:
+   - `browserMode: "shared"`: `const iab = await agent.browsers.get("extension")`.
+     Read its complete `documentation()` once. If no extension is connected,
+     ask the user to connect it in Settings → Computer use, then continue in the
+     same mode.
+   - `browserMode: "in-app"` (and missing legacy value):
+     `const iab = await agent.browsers.get("iab")`.
+   Reuse `iab`. Do not re-read `documentation()` if it is already bound. Never
+   `getDefault()`, `getForUrl()`, or Computer Use. Never access cookie or storage APIs.
 
 2. **One tab.** Create the ChatGPT tab once (`tabs.new()`). After that, only
    `tab.goto(...)` to switch URLs. If the tab still exists, claim it — never
@@ -277,7 +286,7 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      `接下来用手动教学配置。一次只需要做一个操作。`
      Do not say 自动配置没有成功.
    - `setupMode: "auto"`: continue with step 5. Keep the two-failure fallback.
-5. Open ChatGPT on the ONE iab tab (see **In-app browser**). Foreground +
+5. Open ChatGPT on the ONE iab tab (see **Browser surface**). Foreground +
    markHandoff immediately. Same tab, `goto` only:
    - 开发人员模式: skip `https://chatgpt.com/#settings/Security` when
      `developerModeEnabled` is true. Otherwise open it, enable 开发人员模式
@@ -302,11 +311,11 @@ Speak only of 临时地址 / 固定域名 / 登录 Cloudflare.
      tools on this page.
 6. Same tab: open the first C2C chat per **Conversation management**
    (Project collection for a new workspace; `https://chatgpt.com/` only
-   in long-chat). Confirm Chat mode per **In-app browser** §7 (if it is Work,
+   in long-chat). Confirm Chat mode per **Browser surface** §7 (if it is Work,
    open a new Chat conversation instead). Send the boot prompt from
    `docs/protocol.md` §Boot Prompt, then (same chat) send:
    `Use the "<connectorName>" connector: call workspace_info and read hello-style top-level file. Reply with the workspace name.`
-   Confirm the reply matches `workspaceName` (wait per **In-app browser** §8).
+   Confirm the reply matches `workspaceName` (wait per **Browser surface** §8).
    Only then save the chat URL with `c2c session set` (see Conversation
    management). If the name does not match, do not save. markDeliverable.
 7. Report to the user exactly in this shape (no internals):
@@ -395,7 +404,7 @@ ONE ChatGPT conversation per workspace. Same as before.
 - **Switch it** ONLY when (a) the user asks for a new chat, (b) the current
   chat visibly lags, or (c) this conversation is Work. Then:
   1. Same iab tab: `goto` `https://chatgpt.com/`, confirm Chat mode
-     (**In-app browser** §7), then send the boot prompt.
+     (**Browser surface** §7), then send the boot prompt.
   2. Send a HANDOFF (`docs/protocol.md`) — goal, progress, state, issues,
      next step. Never paste files.
   3. workspace_info check; only then `c2c session set --url`. On failure,
@@ -423,7 +432,7 @@ One ChatGPT Project per workspace. Mapping:
 - Else if `conversation.projectReady`: `goto` `conversation.projectUrl`.
   On that page, use the on-page composer (「{项目名}中的新聊天」 / "New chat
   in …"). Do not use the sidebar and do not `goto` `https://chatgpt.com/`.
-  Confirm Chat mode (**In-app browser** §7). Boot prompt, then workspace_info
+  Confirm Chat mode (**Browser surface** §7). Boot prompt, then workspace_info
   with the **exact** `connectorName`. After the reply names this workspace,
   `c2c session set -w <ws> --mode project --project-url <collection> --url <chat> --connector-name "<connectorName>" --title "C2C <workspace name>"`.
   If this Codex thread is continuing a previous C2C task, send HANDOFF right
@@ -532,12 +541,12 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    markHandoff). long-chat: saved chat, or `https://chatgpt.com/` if none.
    project: this thread's chat URL, or the collection page for a new chat,
    or **Bind Project** if `projectReady` is false. On a NEW conversation
-   confirm Chat mode (**In-app browser** §7), then send the boot prompt from
+   confirm Chat mode (**Browser surface** §7), then send the boot prompt from
    `docs/protocol.md` §Boot Prompt and the workspace_info check (name the
    exact `connectorName`). Confirm the reply names the current workspace
    before saving the session URL. Do not use the browser to re-read code MCP
    already provides. After sending a control message, wait per
-   **In-app browser** §8.
+   **Browser surface** §8.
 
    **Resume from `session.checkpoint` before any INIT.** Missing checkpoint
    (legacy session): continue as a normal new/continued loop. A browser/js
@@ -574,12 +583,12 @@ Produce a C2C PLAN message.
 ```
 
    Confirm the INIT message is visibly in that ChatGPT conversation (one cheap
-   DOM check). If the page is Retry-only, recover per **In-app browser** §7
+   DOM check). If the page is Retry-only, recover per **Browser surface** §7
    first. Do not write the waiting checkpoint, and do not wait for PLAN, until
    that message is visible.
    Then:
    `c2c session set -w <ws> --task <id> --iteration 0 --state INIT --protocol-state INIT --waiting-for GPT_PLAN --goal "<short goal>" --next-step "wait for PLAN"`
-3. Wait for ChatGPT's `STATE: PLAN` reply (**In-app browser** §8 — short DOM
+3. Wait for ChatGPT's `STATE: PLAN` reply (**Browser surface** §8 — short DOM
    checks, same tab; do not treat a 5-minute browser timeout as failure).
    Read GOAL/ACTIONS/TESTS/SUCCESS_CRITERIA.
    A good PLAN also carries RATIONALE and concrete natural-language edit

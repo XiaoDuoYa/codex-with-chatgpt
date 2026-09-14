@@ -23,7 +23,8 @@ describe("ui prefs", () => {
     const prefs = readUiPrefs();
     expect(prefs.developerModeEnabled).toBe(false);
     expect(prefs.setupMode).toBeNull();
-    expect(prefs.remembered).toEqual({ developerMode: false, setupMode: false });
+    expect(prefs.browserMode).toBe("in-app");
+    expect(prefs.remembered).toEqual({ developerMode: false, setupMode: false, browserMode: false });
     expect(prefs.setupChoicePrompt).toBe(SETUP_CHOICE_PROMPT);
     expect(prefs.setupChoicePrompt).toContain("AI 自动化配置（预览版）");
     expect(prefs.setupChoicePrompt).toContain("手动教学配置");
@@ -50,10 +51,26 @@ describe("ui prefs", () => {
     expect(auto.developerModeEnabled).toBe(true);
   });
 
+  it("remembers a shared browser profile independently of setup mode", () => {
+    dirs.push(isolateStateDir());
+    const shared = mergeUiPrefs({ browserMode: "shared" });
+    expect(shared.browserMode).toBe("shared");
+    expect(shared.setupMode).toBeNull();
+    expect(shared.remembered.browserMode).toBe(true);
+    const inApp = mergeUiPrefs({ browserMode: "in-app" });
+    expect(inApp.browserMode).toBe("in-app");
+  });
+
   it("rejects an unknown setup mode", () => {
     dirs.push(isolateStateDir());
     expect(() => mergeUiPrefs({ setupMode: "browser" as "auto" })).toThrow(/setup-mode/);
     expect(readUiPrefs().setupMode).toBeNull();
+  });
+
+  it("rejects an unknown browser mode", () => {
+    dirs.push(isolateStateDir());
+    expect(() => mergeUiPrefs({ browserMode: "brave-cookie-copy" as "shared" })).toThrow(/browser-mode/);
+    expect(readUiPrefs().browserMode).toBe("in-app");
   });
 
   it("ignores a hand-edited developerModeEnabled false", () => {

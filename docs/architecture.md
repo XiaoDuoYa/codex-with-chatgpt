@@ -67,6 +67,12 @@ whether the occupant is a c2c bridge for the same workspace (reuse) or not
 (fall back to an ephemeral port). Configuration follows automatically via the
 runtime state file; users never see ports.
 
+**Browser login**: C2C stores no browser credentials. The machine-level
+`browserMode` preference selects either the isolated in-app browser or an
+already connected external-browser extension profile. Shared mode reuses the
+profile itself across workspaces; it never reads, exports, or copies cookies or
+browser storage.
+
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
 The URL changes per start, so `c2c doctor` can restart it and tell the Skill to
 Delete + recreate that workspace's ChatGPT connector. A workspace may instead

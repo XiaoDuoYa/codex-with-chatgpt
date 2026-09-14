@@ -45,6 +45,13 @@ Agent（Codex），然后去倒杯咖啡：
 **更新**：Skill 每天自动检查一次 GitHub，有新版本会自动更新并继续任务，
 无需任何操作；也可以随时对 Codex 说"更新 Codex with ChatGPT"。
 
+### 可选的共享浏览器配置
+
+默认仍然使用隔离的内置浏览器。如果用户明确希望多个工作区复用一个已连接的
+浏览器扩展配置，可以运行 `c2c prefs set --browser-mode shared`；使用
+`--browser-mode in-app` 可切回内置浏览器。C2C 只控制用户选择的配置，绝不读取、
+复制、导入或导出 Cookie、浏览器数据库、本地存储或会话存储。
+
 ## 安装 → 配置 → 使用（手动版）
 
 1. 安装 Codex Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。

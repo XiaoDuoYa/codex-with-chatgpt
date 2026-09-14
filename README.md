@@ -91,6 +91,14 @@ new version is released; no action needed. You can also say "更新 Codex with C
 anytime. / Skill 每天自动检查一次 GitHub，有新版本会自动更新，无需任何操作；
 也可以随时对 Codex 说"更新 Codex with ChatGPT"。
 
+### Optional shared browser profile
+
+The default remains the isolated built-in browser. Users who explicitly want to
+reuse one already connected browser-extension profile across workspaces can run
+`c2c prefs set --browser-mode shared`; switch back with `--browser-mode in-app`.
+C2C controls the selected profile but never reads, copies, imports, or exports
+cookies, browser databases, local storage, or session storage.
+
 ---
 
 *The sections below are in English. 以下详细内容为英文，中文完整版见

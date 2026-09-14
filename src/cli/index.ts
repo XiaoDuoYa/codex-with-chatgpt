@@ -27,7 +27,14 @@ import {
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
-import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
+import {
+  BROWSER_MODES,
+  mergeUiPrefs,
+  readUiPrefs,
+  SETUP_MODES,
+  type BrowserMode,
+  type SetupMode,
+} from "../config/ui-prefs.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
@@ -1001,7 +1008,7 @@ session
 
 const prefsCmd = program
   .command("prefs")
-  .description("Remember ChatGPT developer mode and setup choice for this machine");
+  .description("Remember ChatGPT setup and browser choices for this machine");
 
 acceptUnusedWorkspaceOption(
   prefsCmd
@@ -1019,6 +1026,7 @@ acceptUnusedWorkspaceOption(
     if (prefs.setupMode === "auto") say("配置方式：AI 自动化配置（预览版）");
     else if (prefs.setupMode === "manual") say("配置方式：手动教学配置");
     else say("配置方式：尚未选择");
+    say(prefs.browserMode === "shared" ? "浏览器：共享外部浏览器配置文件" : "浏览器：内置浏览器");
   });
 
 acceptUnusedWorkspaceOption(
@@ -1027,20 +1035,26 @@ acceptUnusedWorkspaceOption(
     .description("Save a ChatGPT setup choice for this machine")
     .option("--developer-mode", "remember that ChatGPT developer mode is on", false)
     .option("--setup-mode <mode>", "auto (preview) or manual")
+    .option("--browser-mode <mode>", "shared (external browser profile) or in-app")
     .option("--json", "machine-readable output", false)
 )
-  .action((opts: { developerMode: boolean; setupMode?: string; json: boolean }) => {
+  .action((opts: { developerMode: boolean; setupMode?: string; browserMode?: string; json: boolean }) => {
     try {
       const modeRaw = opts.setupMode?.trim().toLowerCase();
+      const browserModeRaw = opts.browserMode?.trim().toLowerCase();
       if (modeRaw && !SETUP_MODES.includes(modeRaw as SetupMode)) {
         throw new Error(`setup-mode must be one of ${SETUP_MODES.join(", ")}`);
       }
-      if (!opts.developerMode && !modeRaw) {
-        throw new Error("nothing to save: pass --developer-mode and/or --setup-mode");
+      if (browserModeRaw && !BROWSER_MODES.includes(browserModeRaw as BrowserMode)) {
+        throw new Error(`browser-mode must be one of ${BROWSER_MODES.join(", ")}`);
+      }
+      if (!opts.developerMode && !modeRaw && !browserModeRaw) {
+        throw new Error("nothing to save: pass --developer-mode, --setup-mode, and/or --browser-mode");
       }
       const prefs = mergeUiPrefs({
         developerModeEnabled: opts.developerMode ? true : undefined,
         setupMode: modeRaw as SetupMode | undefined,
+        browserMode: browserModeRaw as BrowserMode | undefined,
       });
       if (opts.json) {
         say(JSON.stringify({ ok: true, ...prefs }));
@@ -1049,6 +1063,8 @@ acceptUnusedWorkspaceOption(
       if (opts.developerMode) check("已记住开发人员模式已开启");
       if (modeRaw === "auto") check("已记住配置方式：AI 自动化配置（预览版）");
       if (modeRaw === "manual") check("已记住配置方式：手动教学配置");
+      if (browserModeRaw === "shared") check("已记住浏览器：共享外部浏览器配置文件");
+      if (browserModeRaw === "in-app") check("已记住浏览器：内置浏览器");
     } catch (error) {
       handleCliError(error, opts.json);
     }
