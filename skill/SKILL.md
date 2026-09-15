@@ -5,7 +5,8 @@ description: >
   while Codex keeps full execution ownership. Use when the user says
   "使用 Codex with ChatGPT ..." / "Set up Codex with ChatGPT" / "用 ChatGPT 规划",
   when they ask to connect ChatGPT to the current workspace, disconnect it,
-  or run a task through the ChatGPT planning loop.
+  or run a task through the ChatGPT planning loop. Also use when the current
+  C2C quota-routing hook selects ChatGPT for coding work.
 ---
 
 # Codex with ChatGPT
@@ -17,6 +18,12 @@ ChatGPT owns high-level reasoning: understanding, planning, review, debug strate
 The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, so
 control messages between you and ChatGPT stay tiny (< 1 KB) — ChatGPT pulls
 whatever data it needs by itself.
+
+When invoked by the quota-routing hook, apply its workflow choice to the current
+turn. The user's explicit workflow preference takes precedence. A later hook
+selecting native Codex ends automatic ChatGPT delegation for that turn; continue
+from completed work and the task checkpoint. Initial connection setup still
+follows the setup flow below.
 
 **Golden rules**
 

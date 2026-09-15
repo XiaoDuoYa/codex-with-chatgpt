@@ -85,6 +85,19 @@ Ready.
 
 凭证放在系统目录，不进项目。
 
+## 可选的额度自动路由
+
+Codex 额度充足时使用原生工作流；剩余额度达到设定阈值时，将规划和审查交给
+ChatGPT，执行仍由 Codex 完成：
+
+```sh
+node bin/c2c.js quota --json
+node bin/c2c.js route --threshold 20 --json
+```
+
+按[配置说明](docs/quota-routing.md)安装可选的 Codex 提示提交 hook 后，每次提交
+提示时会自动判断。阈值在 hook 命令中设置，用户明确指定的工作流优先。
+
 ## 工作原理
 
 ```
