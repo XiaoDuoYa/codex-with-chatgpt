@@ -12,6 +12,8 @@ import { detectTunnelBinaries } from "../tunnel/detect.js";
 import {
   chooseQuickTunnel,
   hasCloudflaredCert,
+  inspectNamedTunnelCredentials,
+  namedTunnelCredentialRepairMessage,
   ProcessCloudflaredAccount,
   provisionNamedTunnel,
 } from "../tunnel/named-provision.js";
@@ -513,6 +515,8 @@ program
       : "Codex with ChatGPT";
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
+    const namedCredential = namedReady ? inspectNamedTunnelCredentials(tunnelState?.tunnelId) : null;
+    const namedCredentialFailure = Boolean(namedCredential && namedCredential.status !== "ready");
     let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
     let chatgptRepair: {
       needed: boolean;
@@ -544,7 +548,7 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
+      if (namedReady && !namedCredentialFailure && opts.fix && info.tunnel.provider !== "cloudflare-named") {
         await stopBridge(root);
         await new Promise((resolve) => setTimeout(resolve, 400));
         try {
@@ -567,7 +571,7 @@ program
         }
       }
 
-      if ((!currentUrl || !healthy) && opts.fix && (expectedPublic || info.tunnel.running)) {
+      if ((!currentUrl || !healthy) && !namedCredentialFailure && opts.fix && (expectedPublic || info.tunnel.running)) {
         try {
           const binaries = detectTunnelBinaries();
           if (!binaries.cloudflared) {
@@ -589,7 +593,16 @@ program
         }
       }
 
-      if (currentUrl && healthy) {
+      if (namedCredentialFailure && namedCredential) {
+        report.tunnel = {
+          ok: false,
+          detail: `NAMED_TUNNEL_CREDENTIAL_${namedCredential.status.toUpperCase()}`,
+        };
+        namedRepair = {
+          needed: true,
+          userMessage: namedTunnelCredentialRepairMessage(namedCredential.status),
+        };
+      } else if (currentUrl && healthy) {
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
@@ -637,6 +650,15 @@ program
       }
     } else if (bridgeUnknown) {
       report.tunnel = report.tunnel ?? { ok: false, detail: "Bridge 状态无法确认，未执行连接器修复" };
+    } else if (namedCredentialFailure && namedCredential) {
+      report.tunnel = {
+        ok: false,
+        detail: `NAMED_TUNNEL_CREDENTIAL_${namedCredential.status.toUpperCase()}`,
+      };
+      namedRepair = {
+        needed: true,
+        userMessage: namedTunnelCredentialRepairMessage(namedCredential.status),
+      };
     } else if (namedReady) {
       report.tunnel = { ok: false, detail: "NAMED_TUNNEL_DOWN" };
       namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
@@ -654,6 +676,9 @@ program
 
     if (opts.json) {
       say(JSON.stringify({ report, repairs: results, chatgptRepair, namedRepair }));
+      const hasFailures =
+        Object.values(report).some((value) => !value.ok) || chatgptRepair.needed || namedRepair.needed;
+      if (hasFailures) process.exitCode = 1;
       return;
     }
     say(`${PRODUCT_NAME} Doctor`);
@@ -694,7 +719,7 @@ program
         : chatgptRepair.needed
           ? "本地已就绪，还需要在 ChatGPT 删除并重新添加该连接。"
           : namedRepair.needed
-            ? "固定域名还没连上，需要先登录 Cloudflare。"
+            ? "固定域名需要先按上面的诊断提示处理。"
             : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
     );
     if (!allOk || namedRepair.needed) process.exitCode = 1;

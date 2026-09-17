@@ -100,6 +100,20 @@ Handled automatically: an existing healthy bridge for the same workspace is
 reused; anything else makes the bridge pick a free port. Configuration follows
 automatically.
 
+### Fixed hostname is configured, but the Named Tunnel does not start on Windows
+`cert.pem` and the Named Tunnel credential are different files. `cert.pem`
+proves that `cloudflared` has an account certificate; the tunnel still needs
+`%USERPROFILE%\.cloudflared\<TUNNEL-UUID>.json` (or the file selected by
+`TUNNEL_CRED_FILE`) to run. `c2c doctor --json` reports whether the certificate
+is missing, the credential is missing or unreadable, the JSON is invalid, or
+the saved Tunnel ID does not match. It never prints credential contents or
+repairs the file automatically.
+
+When the diagnostic says the credential is missing, recover the credential for
+the existing Tunnel with `cloudflared tunnel token --cred-file` and then run
+`c2c doctor` again. Do not paste the generated credential into ChatGPT or a
+project file.
+
 ### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
 Working as intended: `.env`, keys, credentials and anything matched by
 `.c2cignore` are never readable through ChatGPT. `.env.example` is allowed.

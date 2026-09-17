@@ -12,8 +12,25 @@ import {
 } from "./state.js";
 
 const TUNNEL_ID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const TUNNEL_ID_FULL_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LOGIN_TIMEOUT_MS = 5 * 60_000;
 const COMMAND_TIMEOUT_MS = 45_000;
+const MAX_CREDENTIAL_BYTES = 1024 * 1024;
+
+export type NamedTunnelCredentialStatus =
+  | "missing_tunnel_id"
+  | "missing_account_certificate"
+  | "missing_credentials"
+  | "unreadable_credentials"
+  | "invalid_credentials"
+  | "mismatched_credentials"
+  | "ready";
+
+export interface NamedTunnelCredentialCheck {
+  status: NamedTunnelCredentialStatus;
+  /** Kept for local diagnostics and tests; callers must not serialize its contents. */
+  credentialPath: string | null;
+}
 
 export interface ListedTunnel {
   id: string;
@@ -39,6 +56,90 @@ export function hasCloudflaredCert(): boolean {
     return fs.statSync(cloudflaredCertPath()).isFile();
   } catch {
     return false;
+  }
+}
+
+/**
+ * Resolve the credential file cloudflared uses for a locally managed tunnel.
+ * TUNNEL_CRED_FILE is the supported override; otherwise cloudflared's Windows
+ * and Unix default directory is represented by ~/.cloudflared.
+ */
+export function cloudflaredCredentialPath(tunnelId: string): string | null {
+  const normalized = tunnelId.trim();
+  if (!TUNNEL_ID_FULL_RE.test(normalized)) return null;
+  const override = process.env.TUNNEL_CRED_FILE?.trim();
+  if (override) return path.resolve(override);
+  return path.join(os.homedir(), ".cloudflared", `${normalized}.json`);
+}
+
+/**
+ * Check the local prerequisites for running a named tunnel without exposing
+ * credential contents. This is intentionally read-only: recovery belongs to
+ * an explicit user action and is not part of doctor.
+ */
+export function inspectNamedTunnelCredentials(tunnelId?: string): NamedTunnelCredentialCheck {
+  const credentialPath = cloudflaredCredentialPath(tunnelId ?? "");
+  if (!credentialPath) return { status: "missing_tunnel_id", credentialPath: null };
+  if (!hasCloudflaredCert()) return { status: "missing_account_certificate", credentialPath };
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(credentialPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      status: code === "ENOENT" || code === "ENOTDIR" ? "missing_credentials" : "unreadable_credentials",
+      credentialPath,
+    };
+  }
+  if (!stat.isFile() || stat.size > MAX_CREDENTIAL_BYTES) {
+    return { status: "unreadable_credentials", credentialPath };
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(credentialPath, "utf8");
+  } catch {
+    return { status: "unreadable_credentials", credentialPath };
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") return { status: "invalid_credentials", credentialPath };
+    const record = parsed as { TunnelID?: unknown; TunnelSecret?: unknown };
+    if (
+      typeof record.TunnelID !== "string" ||
+      !TUNNEL_ID_FULL_RE.test(record.TunnelID) ||
+      typeof record.TunnelSecret !== "string" ||
+      record.TunnelSecret.trim().length === 0
+    ) {
+      return { status: "invalid_credentials", credentialPath };
+    }
+    if (record.TunnelID.toLowerCase() !== tunnelId!.trim().toLowerCase()) {
+      return { status: "mismatched_credentials", credentialPath };
+    }
+    return { status: "ready", credentialPath };
+  } catch {
+    return { status: "invalid_credentials", credentialPath };
+  }
+}
+
+export function namedTunnelCredentialRepairMessage(status: NamedTunnelCredentialStatus): string {
+  switch (status) {
+    case "missing_account_certificate":
+      return "固定域名缺少 Cloudflare 账号证书。请运行 cloudflared tunnel login，完成后再运行 c2c doctor。";
+    case "missing_credentials":
+      return "固定域名缺少 Tunnel 凭据文件。请使用 cloudflared tunnel token --cred-file \"%USERPROFILE%\\.cloudflared\\<TUNNEL-UUID>.json\" <TUNNEL-UUID> 恢复该 Tunnel，再运行 c2c doctor。";
+    case "unreadable_credentials":
+      return "固定域名的 Tunnel 凭据文件不可读或过大。请恢复正确的 UUID.json 文件权限和内容，再运行 c2c doctor。";
+    case "invalid_credentials":
+      return "固定域名的 Tunnel 凭据文件不是有效的本地 Tunnel JSON。请恢复正确文件，再运行 c2c doctor。";
+    case "mismatched_credentials":
+      return "固定域名的 Tunnel 凭据与当前保存的 Tunnel ID 不匹配。请恢复对应的 UUID.json 文件，再运行 c2c doctor。";
+    case "missing_tunnel_id":
+      return "固定域名状态缺少 Tunnel ID。请运行 c2c setup 重新保存 Named Tunnel 状态。";
+    case "ready":
+      return "固定域名凭据已就绪。";
   }
 }
 

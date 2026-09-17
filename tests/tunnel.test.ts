@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { findBinary } from "../src/tunnel/detect.js";
@@ -13,7 +14,10 @@ import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
   chooseQuickTunnel,
+  cloudflaredCredentialPath,
   isBenignRouteError,
+  inspectNamedTunnelCredentials,
+  namedTunnelCredentialRepairMessage,
   parseCreatedTunnel,
   parseTunnelList,
   provisionNamedTunnel,
@@ -26,6 +30,8 @@ import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
 const stateDirs: string[] = [];
 const previousStateDir = process.env.C2C_STATE_DIR;
 const previousCloudflaredPath = process.env.C2C_CLOUDFLARED_PATH;
+const previousOriginCert = process.env.TUNNEL_ORIGIN_CERT;
+const previousCredentialFile = process.env.TUNNEL_CRED_FILE;
 const QUICK_URL = "https://random-words-here-1234.trycloudflare.com";
 type FetchImpl = NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
 
@@ -66,6 +72,10 @@ afterEach(() => {
   else process.env.C2C_STATE_DIR = previousStateDir;
   if (previousCloudflaredPath === undefined) delete process.env.C2C_CLOUDFLARED_PATH;
   else process.env.C2C_CLOUDFLARED_PATH = previousCloudflaredPath;
+  if (previousOriginCert === undefined) delete process.env.TUNNEL_ORIGIN_CERT;
+  else process.env.TUNNEL_ORIGIN_CERT = previousOriginCert;
+  if (previousCredentialFile === undefined) delete process.env.TUNNEL_CRED_FILE;
+  else process.env.TUNNEL_CRED_FILE = previousCredentialFile;
 });
 
 describe("findBinary", () => {
@@ -346,5 +356,66 @@ describe("tunnel preference state", () => {
       expect(result.state.preference).toBe("quick");
       expect(result.userMessage).toMatch(/临时地址/);
     });
+  });
+});
+
+describe("named tunnel credential diagnostics", () => {
+  const tunnelId = "11111111-1111-4111-8111-111111111111";
+
+  it("requires the account certificate before checking tunnel credentials", () => {
+    const dir = makeTmpDir("named-credentials-no-cert");
+    stateDirs.push(dir);
+    process.env.TUNNEL_ORIGIN_CERT = path.join(dir, "missing-cert.pem");
+    process.env.TUNNEL_CRED_FILE = path.join(dir, `${tunnelId}.json`);
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("missing_account_certificate");
+  });
+
+  it("distinguishes a missing tunnel credential from a missing certificate", () => {
+    const dir = makeTmpDir("named-credentials-missing");
+    stateDirs.push(dir);
+    process.env.TUNNEL_ORIGIN_CERT = write(dir, "cert.pem", "synthetic cert");
+    process.env.TUNNEL_CRED_FILE = path.join(dir, `${tunnelId}.json`);
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("missing_credentials");
+    expect(cloudflaredCredentialPath(tunnelId)).toBe(path.join(dir, `${tunnelId}.json`));
+  });
+
+  it("classifies malformed and mismatched credentials without returning their contents", () => {
+    const dir = makeTmpDir("named-credentials-invalid");
+    stateDirs.push(dir);
+    process.env.TUNNEL_ORIGIN_CERT = write(dir, "cert.pem", "synthetic cert");
+    const credential = path.join(dir, `${tunnelId}.json`);
+    process.env.TUNNEL_CRED_FILE = credential;
+
+    write(dir, `${tunnelId}.json`, "not json");
+    expect(inspectNamedTunnelCredentials(tunnelId)).toMatchObject({ status: "invalid_credentials" });
+
+    write(
+      dir,
+      `${tunnelId}.json`,
+      JSON.stringify({ TunnelID: "22222222-2222-4222-8222-222222222222", TunnelSecret: "synthetic" })
+    );
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("mismatched_credentials");
+
+    write(dir, `${tunnelId}.json`, JSON.stringify({ TunnelID: tunnelId }));
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("invalid_credentials");
+
+    process.env.TUNNEL_CRED_FILE = path.join(dir, "credential-directory");
+    fs.mkdirSync(process.env.TUNNEL_CRED_FILE);
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("unreadable_credentials");
+  });
+
+  it("accepts a matching credential and gives bounded repair guidance", () => {
+    const dir = makeTmpDir("named-credentials-ready");
+    stateDirs.push(dir);
+    process.env.TUNNEL_ORIGIN_CERT = write(dir, "cert.pem", "synthetic cert");
+    process.env.TUNNEL_CRED_FILE = path.join(dir, `${tunnelId}.json`);
+    write(
+      dir,
+      `${tunnelId}.json`,
+      JSON.stringify({ TunnelID: tunnelId, TunnelSecret: "synthetic" })
+    );
+    expect(inspectNamedTunnelCredentials(tunnelId).status).toBe("ready");
+    expect(namedTunnelCredentialRepairMessage("missing_credentials")).toContain("cloudflared tunnel token");
+    expect(namedTunnelCredentialRepairMessage("missing_credentials")).not.toContain("synthetic");
   });
 });
