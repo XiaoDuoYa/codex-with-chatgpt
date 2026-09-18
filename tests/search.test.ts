@@ -14,6 +14,9 @@ beforeAll(() => {
   write(root, "src/root.ts", `${globMarker}\n`);
   write(root, "root.ts", `${globMarker}\n`);
   write(root, "README.md", "This project contains needle-alpha documentation.\n");
+  write(root, "dense.txt", "dense-marker\n".repeat(25));
+  write(root, "boundary.txt", "boundary-marker\n".repeat(3));
+  write(root, "node_modules/pkg/hidden.txt", "boundary-marker\n");
   write(root, ".env", "NEEDLE-ALPHA=secret\n");
   write(root, "node_modules/pkg/index.js", "needle-alpha in dependencies\n");
   for (let i = 0; i < 30; i++) {
@@ -74,6 +77,36 @@ describe.each(engines())("search engine: %s", (engine) => {
     const paths = result.matches.map((match) => match.path);
     expect(paths).toContain("README.md");
     expect(paths.some((p) => p.endsWith(".ts"))).toBe(false);
+  });
+
+  it("returns more than 20 matches from a single file below the global limit", async () => {
+    configure();
+    const result = await searchWorkspace(ws, { query: "dense-marker", limit: 50 });
+    expect(result.engine).toBe(engine);
+    expect(result.matchCount).toBe(25);
+    expect(result.matches.map((match) => match.line)).toEqual(
+      Array.from({ length: 25 }, (_, i) => i + 1)
+    );
+    expect(result.truncated).toBe(false);
+  });
+
+  it.each([1, 3, 4])("reports truncation only when visible matches exceed limit %i", async (limit) => {
+    configure();
+    const result = await searchWorkspace(ws, { query: "boundary-marker", limit });
+    expect(result.engine).toBe(engine);
+    expect(result.matchCount).toBe(Math.min(3, limit));
+    expect(result.matches).toHaveLength(Math.min(3, limit));
+    expect(result.matches.every((match) => match.path === "boundary.txt")).toBe(true);
+    expect(result.truncated).toBe(limit < 3);
+  });
+
+  it("reports truncation for a dense file exceeding the global limit", async () => {
+    configure();
+    const result = await searchWorkspace(ws, { query: "dense-marker", limit: 22 });
+    expect(result.engine).toBe(engine);
+    expect(result.matchCount).toBe(22);
+    expect(result.matches).toHaveLength(22);
+    expect(result.truncated).toBe(true);
   });
 
   it("matches root and nested files for recursive globs", async () => {
