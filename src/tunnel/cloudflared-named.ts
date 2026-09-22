@@ -8,6 +8,9 @@ import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "./provide
 
 const CONNECTED_RE = /registered tunnel connection/i;
 const HOSTNAME_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+const WATCHDOG_INTERVAL_MS = 60_000;
+const WATCHDOG_TIMEOUT_MS = 10_000;
+const WATCHDOG_MAX_FAILURES = 3;
 
 export interface CloudflaredNamedTunnelOptions {
   tunnelName: string;
@@ -42,6 +45,10 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   private child: ChildProcess | null = null;
   private connected = false;
   private lastError: string | null = null;
+  private localPort: number | null = null;
+  private watchdog: ReturnType<typeof setInterval> | null = null;
+  private healthFailures = 0;
+  private restarting = false;
 
   constructor(opts: CloudflaredNamedTunnelOptions) {
     const tunnelName = opts.tunnelName.trim();
@@ -64,13 +71,17 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   async start(localPort: number): Promise<string> {
-    if (this.child && this.connected) return this.publicUrl();
+    if (this.child && this.connected) {
+      this.startWatchdog();
+      return this.publicUrl();
+    }
     const bin = this.binary();
     if (!bin) {
       throw new Error(
         "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
       );
     }
+    this.localPort = localPort;
 
     return new Promise<string>((resolve, reject) => {
       const child = spawn(
@@ -112,6 +123,7 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
             this.connected = true;
             const url = this.publicUrl();
             this.logger.info(`Named tunnel established: ${url}`);
+            this.startWatchdog();
             finish(() => resolve(url));
           }
           if (/\b(error|failed|fatal)\b/i.test(line)) {
@@ -149,11 +161,76 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   async stop(): Promise<void> {
+    this.stopWatchdog();
     if (this.child) {
       this.child.kill("SIGTERM");
       this.child = null;
     }
     this.connected = false;
+  }
+
+  /**
+   * Public-health watchdog.
+   *
+   * cloudflared only logs edge connection churn; once every connection is
+   * lost it keeps the process alive while the hostname serves HTTP 530.
+   * The bridge cannot see that from `connected` alone, so probe the public
+   * URL end to end and restart the connector after repeated failures.
+   */
+  private startWatchdog(): void {
+    if (this.watchdog) return;
+    this.healthFailures = 0;
+    this.watchdog = setInterval(() => {
+      void this.checkPublicHealth();
+    }, WATCHDOG_INTERVAL_MS);
+    this.watchdog.unref?.();
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdog) {
+      clearInterval(this.watchdog);
+      this.watchdog = null;
+    }
+  }
+
+  private async checkPublicHealth(): Promise<void> {
+    if (!this.child || this.restarting) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WATCHDOG_TIMEOUT_MS);
+    let ok = false;
+    try {
+      const response = await fetch(new URL("/health", this.publicUrl()), {
+        signal: controller.signal,
+      });
+      ok = response.ok;
+      await response.arrayBuffer().catch(() => undefined);
+    } catch {
+      ok = false;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (ok) {
+      this.healthFailures = 0;
+      return;
+    }
+    this.healthFailures += 1;
+    this.logger.debug(
+      `cloudflared: public health check failed (${this.healthFailures}/${WATCHDOG_MAX_FAILURES})`
+    );
+    if (this.healthFailures < WATCHDOG_MAX_FAILURES) return;
+    if (this.localPort == null) return;
+    this.healthFailures = 0;
+    this.restarting = true;
+    try {
+      this.logger.warn("cloudflared: public URL unhealthy, restarting named tunnel connector");
+      await this.restart(this.localPort);
+      this.lastError = null;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      this.logger.error(`cloudflared: named tunnel restart failed: ${this.lastError}`);
+    } finally {
+      this.restarting = false;
+    }
   }
 
   async restart(localPort: number): Promise<string> {
