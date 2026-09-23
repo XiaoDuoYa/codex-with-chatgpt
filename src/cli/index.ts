@@ -196,7 +196,9 @@ async function ensureBridgeAndTunnel(
   const { runtime } = await ensureBridge(workspaceRoot);
   let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
   let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
-  if (opts.tunnel && !info.publicUrl) {
+  // A persisted publicUrl survives bridge restarts, but the tunnel connector
+  // does not — re-establish whenever the provider is not actually running.
+  if (opts.tunnel && (!info.publicUrl || !info.tunnel.running)) {
     const binaries = detectTunnelBinaries();
     if (!binaries.cloudflared) {
       throw new Error(
