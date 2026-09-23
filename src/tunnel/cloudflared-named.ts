@@ -71,17 +71,17 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   async start(localPort: number): Promise<string> {
-    if (this.child && this.connected) {
-      this.startWatchdog();
-      return this.publicUrl();
-    }
+    // The watchdog owns self-healing from the first start attempt on, so a
+    // failed start (e.g. the Cloudflare API is unreachable) is retried.
+    this.localPort = localPort;
+    this.startWatchdog();
+    if (this.child && this.connected) return this.publicUrl();
     const bin = this.binary();
     if (!bin) {
       throw new Error(
         "cloudflared is not installed. Install it (e.g. `brew install cloudflared`) and retry."
       );
     }
-    this.localPort = localPort;
 
     return new Promise<string>((resolve, reject) => {
       const child = spawn(
@@ -173,9 +173,12 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
    * Public-health watchdog.
    *
    * cloudflared only logs edge connection churn; once every connection is
-   * lost it keeps the process alive while the hostname serves HTTP 530.
-   * The bridge cannot see that from `connected` alone, so probe the public
-   * URL end to end and restart the connector after repeated failures.
+   * lost it keeps the process alive while the hostname serves HTTP 530, and
+   * a start attempt can also fail outright (e.g. the Cloudflare API is
+   * unreachable). The bridge cannot see either from `connected` alone, so
+   * probe the public URL end to end and restart the connector after repeated
+   * failures. A dead or not-yet-connected connector counts as a failure too,
+   * so the self-healing loop keeps retrying until the URL is healthy again.
    */
   private startWatchdog(): void {
     if (this.watchdog) return;
@@ -194,20 +197,22 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   private async checkPublicHealth(): Promise<void> {
-    if (!this.child || this.restarting) return;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), WATCHDOG_TIMEOUT_MS);
+    if (this.restarting) return;
     let ok = false;
-    try {
-      const response = await fetch(new URL("/health", this.publicUrl()), {
-        signal: controller.signal,
-      });
-      ok = response.ok;
-      await response.arrayBuffer().catch(() => undefined);
-    } catch {
-      ok = false;
-    } finally {
-      clearTimeout(timer);
+    if (this.child && this.connected) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), WATCHDOG_TIMEOUT_MS);
+      try {
+        const response = await fetch(new URL("/health", this.publicUrl()), {
+          signal: controller.signal,
+        });
+        ok = response.ok;
+        await response.arrayBuffer().catch(() => undefined);
+      } catch {
+        ok = false;
+      } finally {
+        clearTimeout(timer);
+      }
     }
     if (ok) {
       this.healthFailures = 0;
@@ -223,7 +228,14 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     this.restarting = true;
     try {
       this.logger.warn("cloudflared: public URL unhealthy, restarting named tunnel connector");
-      await this.restart(this.localPort);
+      // Deliberately not `stop()` + `start()`: stop() tears the watchdog down,
+      // which would end self-healing if the new start attempt fails.
+      if (this.child) {
+        this.child.kill("SIGTERM");
+        this.child = null;
+      }
+      this.connected = false;
+      await this.start(this.localPort);
       this.lastError = null;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
@@ -234,7 +246,13 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   }
 
   async restart(localPort: number): Promise<string> {
-    await this.stop();
+    this.localPort = localPort;
+    this.startWatchdog();
+    if (this.child) {
+      this.child.kill("SIGTERM");
+      this.child = null;
+    }
+    this.connected = false;
     return this.start(localPort);
   }
 
