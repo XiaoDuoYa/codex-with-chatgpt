@@ -34,9 +34,12 @@
 ## Token & scope design
 
 Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
-`offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
-Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
-`workspace_id` and `client_id`.
+`offline_access` (default / RO grant). Opt-in write scopes: `task.write` and
+legacy alias `execution.submit`. Empty scope requests grant **DEFAULT_SCOPES**
+only (no write). Existing issued RO tokens stay RO until re-pair with write
+scopes listed on the pairing page. Tools enforce scopes individually
+(`INSUFFICIENT_SCOPE`). Access tokens: 1 hour. Refresh tokens: 30 days,
+rotated. All tokens bound to `workspace_id` and `client_id`.
 
 ## Storage
 
@@ -50,8 +53,10 @@ tokens are persisted — a stolen state file does not yield usable bearer tokens
 than OS-keychain-based. Raw tokens are never written anywhere. Keychain
 integration is a V2 item.
 
-## What ChatGPT can never do (V1)
+## What ChatGPT can never do
 
-Write files, delete files, run shell commands, commit, install packages —
-these tools do not exist on the server, so no prompt injection, scope bug, or
-UI confusion can enable them.
+Write files, delete files, run bare shell commands, commit, or install packages
+via MCP — those tools do not exist. With `task.write`, ChatGPT may only create
+tasks, append `[C2C]`-mapped control prompts, ask Codex to execute the current
+plan (no `command` arg), and cancel. Cross-workspace task ids return
+`WORKSPACE_MISMATCH` / 403.

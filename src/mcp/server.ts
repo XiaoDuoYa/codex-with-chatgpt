@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import { hasWriteScope } from "../auth/store.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
@@ -45,6 +46,15 @@ function requireScope(authInfo: AuthInfo | undefined, scope: string): ToolResult
   if (!authInfo) return null;
   if (!authInfo.scopes.includes(scope)) {
     return fail("INSUFFICIENT_SCOPE", `This operation requires the '${scope}' scope.`);
+  }
+  return null;
+}
+
+/** Accepts task.write or legacy execution.submit (#415 alias). */
+function requireWriteScope(authInfo: AuthInfo | undefined): ToolResult | null {
+  if (!authInfo) return null;
+  if (!hasWriteScope(authInfo.scopes)) {
+    return fail("INSUFFICIENT_SCOPE", "This operation requires the 'task.write' scope (or legacy 'execution.submit').");
   }
   return null;
 }
@@ -194,26 +204,209 @@ export function createMcpServer(ctx: McpContext): McpServer {
   );
 
   server.registerTool(
-    "submit_task",
+    "start_task",
     {
-      title: "Submit task to Codex",
-      description: "Queue a text task for Codex in this connector's fixed workspace. This cannot execute shell commands directly.",
+      title: "Start C2C task",
+      description: "Create a workspace-bound task session without running Codex. Call execute_plan to start the harness. No shell or path arguments.",
       inputSchema: {
-        workspace_name: z.string().describe("Must exactly match the connected workspace name"),
+        title: z.string().max(200).optional(),
+        prompt: z.string().min(1).max(100000).describe("Initial goal or plan text"),
         task_id: z.string().nullable().optional(),
-        iteration: z.number().int().min(1).nullable().optional(),
-        prompt: z.string().min(1).max(100000),
       },
-      outputSchema: { accepted: z.boolean(), task_id: z.string(), iteration: z.number().int().positive(), status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]), thread_id: z.string().optional() },
-      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["execution.submit"] }] },
+      outputSchema: {
+        accepted: z.boolean(),
+        task_id: z.string(),
+        iteration: z.number().int().nonnegative(),
+        status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
+        needs_execute: z.boolean(),
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["task.write"] }] },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async (args, extra) => {
-      const denied = requireScope(extra.authInfo, "execution.submit");
+      const denied = requireWriteScope(extra.authInfo);
       if (denied) return denied;
       try {
-        const task = tasks.submit({ workspaceName: args.workspace_name, taskId: args.task_id, iteration: args.iteration, prompt: args.prompt });
-        return okStructured({ accepted: true, task_id: task.taskId, iteration: task.iteration, status: task.status, ...(task.threadId ? { thread_id: task.threadId } : {}) });
+        const task = tasks.start({
+          workspaceName: workspace.name,
+          taskId: args.task_id,
+          title: args.title,
+          prompt: args.prompt,
+        });
+        return okStructured({
+          accepted: true,
+          task_id: task.taskId,
+          iteration: task.iteration,
+          status: task.status,
+          needs_execute: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return fail(message, "Task creation was rejected.");
+      }
+    }
+  );
+
+  server.registerTool(
+    "send_prompt",
+    {
+      title: "Send C2C control prompt",
+      description: "Append a C2C control message (PLAN|EXECUTE|FIX|DONE|BLOCKED) to a task. Maps onto the existing [C2C] protocol. Does not run shell or start Codex.",
+      inputSchema: {
+        task_id: z.string(),
+        state: z.enum(["PLAN", "EXECUTE", "FIX", "DONE", "BLOCKED"]),
+        body: z.string().min(1).max(100000),
+        iteration: z.number().int().nonnegative().nullable().optional(),
+      },
+      outputSchema: {
+        task_id: z.string(),
+        iteration: z.number().int().nonnegative(),
+        protocol_state: z.enum(["PLAN", "EXECUTE", "FIX", "DONE", "BLOCKED"]),
+        status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
+        current_action: z.string(),
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["task.write"] }] },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: false },
+    },
+    async (args, extra) => {
+      const denied = requireWriteScope(extra.authInfo);
+      if (denied) return denied;
+      try {
+        const task = tasks.appendPrompt({
+          taskId: args.task_id,
+          state: args.state,
+          body: args.body,
+          iteration: args.iteration,
+        });
+        return okStructured({
+          task_id: task.taskId,
+          iteration: task.iteration,
+          protocol_state: args.state,
+          status: task.status,
+          current_action: task.currentStep,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return fail(message, "Control prompt was rejected.");
+      }
+    }
+  );
+
+  server.registerTool(
+    "execute_plan",
+    {
+      title: "Execute current plan",
+      description: "Start the Codex harness for the task's current PLAN. No command, shell, or path arguments. Optional idempotencyKey returns the prior run for the same task.",
+      inputSchema: {
+        task_id: z.string(),
+        idempotency_key: z.string().max(200).nullable().optional(),
+      },
+      outputSchema: {
+        accepted: z.boolean(),
+        task_id: z.string(),
+        iteration: z.number().int().nonnegative(),
+        status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
+        idempotency_key: z.string().optional(),
+        thread_id: z.string().optional(),
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["task.write"] }] },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    },
+    async (args, extra) => {
+      const denied = requireWriteScope(extra.authInfo);
+      if (denied) return denied;
+      try {
+        const task = tasks.executePlan({ taskId: args.task_id, idempotencyKey: args.idempotency_key });
+        return okStructured({
+          accepted: true,
+          task_id: task.taskId,
+          iteration: task.iteration,
+          status: task.status,
+          ...(task.idempotencyKey ? { idempotency_key: task.idempotencyKey } : {}),
+          ...(task.threadId ? { thread_id: task.threadId } : {}),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return fail(message, "Plan execution was rejected.");
+      }
+    }
+  );
+
+  server.registerTool(
+    "task_status",
+    {
+      title: "C2C task status",
+      description: "Compact task status aligned to the write-plane design (created/queued/running/executed/failed/cancelled/blocked) plus iteration.",
+      inputSchema: { task_id: z.string() },
+      outputSchema: {
+        task_id: z.string(),
+        iteration: z.number().int().nonnegative(),
+        status: z.enum(["created", "queued", "running", "executed", "failed", "cancelled", "blocked"]),
+        protocol_state: z.enum(["PLAN", "EXECUTE", "FIX", "DONE", "BLOCKED"]).optional(),
+        current_action: z.string(),
+        progress_percent: z.number().int().min(0).max(100),
+        idempotency_key: z.string().optional(),
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["execution.read"] }] },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async (args, extra) => {
+      const denied = requireScope(extra.authInfo, "execution.read");
+      if (denied) return denied;
+      const view = tasks.status(args.task_id);
+      if (!view) return fail("TASK_NOT_FOUND", `No task named ${args.task_id}.`);
+      return okStructured({
+        task_id: view.taskId,
+        iteration: view.iteration,
+        status: view.status,
+        ...(view.protocolState ? { protocol_state: view.protocolState } : {}),
+        current_action: view.currentStep,
+        progress_percent: view.progress,
+        ...(view.idempotencyKey ? { idempotency_key: view.idempotencyKey } : {}),
+      });
+    }
+  );
+
+  server.registerTool(
+    "submit_task",
+    {
+      title: "Submit task to Codex (create-only shim)",
+      description: "Compatibility shim: creates a text task without running Codex (same as start_task). Call execute_plan to start the harness. workspace_name must match the connected workspace. No shell arguments.",
+      inputSchema: {
+        workspace_name: z.string().describe("Must exactly match the connected workspace name"),
+        task_id: z.string().nullable().optional(),
+        iteration: z.number().int().min(0).nullable().optional(),
+        prompt: z.string().min(1).max(100000),
+      },
+      outputSchema: {
+        accepted: z.boolean(),
+        task_id: z.string(),
+        iteration: z.number().int().nonnegative(),
+        status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
+        needs_execute: z.boolean(),
+        thread_id: z.string().optional(),
+      },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["task.write"] }] },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    },
+    async (args, extra) => {
+      const denied = requireWriteScope(extra.authInfo);
+      if (denied) return denied;
+      try {
+        const task = tasks.submit({
+          workspaceName: args.workspace_name,
+          taskId: args.task_id,
+          iteration: args.iteration,
+          prompt: args.prompt,
+        });
+        return okStructured({
+          accepted: true,
+          task_id: task.taskId,
+          iteration: task.iteration,
+          status: task.status,
+          needs_execute: true,
+          ...(task.threadId ? { thread_id: task.threadId } : {}),
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return fail(message, message === "WORKSPACE_MISMATCH" ? "workspace_name does not match this connector's fixed workspace." : "Task submission was rejected.");
@@ -228,7 +421,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description: "Read persisted live progress, current action, Codex UI thread id, changed files, test state and recent logs.",
       inputSchema: { task_id: z.string() },
       outputSchema: {
-        task_id: z.string(), iteration: z.number().int().positive(), status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
+        task_id: z.string(), iteration: z.number().int().nonnegative(), status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]),
         progress_percent: z.number().int().min(0).max(100), current_action: z.string(), logs: z.array(z.object({ timestamp: z.string(), message: z.string() })),
         workspace: z.string(), plan: z.string(), created_at: z.string(), started_at: z.string().optional(), completed_at: z.string().optional(),
         thread_id: z.string().optional(), turn_id: z.string().optional(), changed_files: z.array(z.string()), test_status: z.string().optional(),
@@ -259,11 +452,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description: "Interrupt a queued or running Codex task and persist its changed files, current step and cancellation reason.",
       inputSchema: { task_id: z.string(), reason: z.string().max(500).optional() },
       outputSchema: { task_id: z.string(), status: z.enum(["CREATED", "QUEUED", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"]), cancelled: z.boolean(), current_action: z.string(), changed_files: z.array(z.string()) },
-      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["execution.submit"] }] },
+      _meta: { securitySchemes: [{ type: "oauth2", scopes: ["task.write"] }] },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: true },
     },
     async (args, extra) => {
-      const denied = requireScope(extra.authInfo, "execution.submit"); if (denied) return denied;
+      const denied = requireWriteScope(extra.authInfo); if (denied) return denied;
       const task = await tasks.cancel(args.task_id, args.reason); if (!task) return fail("TASK_NOT_FOUND", `No submitted task named ${args.task_id}.`);
       return okStructured({ task_id: task.taskId, status: task.status, cancelled: task.status === "CANCELLED", current_action: task.currentStep, changed_files: task.changedFiles });
     }
@@ -275,7 +468,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       title: "Codex task events",
       description: "Read durable task lifecycle events. Supports bounded long-polling so ChatGPT can receive completion without repeatedly asking the user.",
       inputSchema: { after_event_id: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50), wait_ms: z.number().int().min(0).max(25000).default(0) },
-      outputSchema: { events: z.array(z.object({ event_id: z.number().int().positive(), type: z.string(), task_id: z.string(), iteration: z.number().int().positive(), timestamp: z.string(), status: z.string(), progress_percent: z.number().int(), current_action: z.string(), summary: z.string().optional(), execution_record_id: z.string().optional() })), next_event_id: z.number().int().min(0) },
+      outputSchema: { events: z.array(z.object({ event_id: z.number().int().positive(), type: z.string(), task_id: z.string(), iteration: z.number().int().nonnegative(), timestamp: z.string(), status: z.string(), progress_percent: z.number().int(), current_action: z.string(), summary: z.string().optional(), execution_record_id: z.string().optional() })), next_event_id: z.number().int().min(0) },
       _meta: { securitySchemes: [{ type: "oauth2", scopes: ["execution.read"] }] },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },

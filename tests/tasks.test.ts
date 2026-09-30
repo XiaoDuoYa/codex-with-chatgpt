@@ -17,6 +17,7 @@ describe("task lifecycle", () => {
   it("persists progress, logs, completion event and execution record", async () => {
     const ws = workspace("task-complete"), manager = new TaskManager(ws, nullLogger, immediate());
     manager.submit({ workspaceName: ws.name, taskId: "c2c_complete", iteration: 1, prompt: "Read only" });
+    manager.executePlan({ taskId: "c2c_complete" });
     await waitFor(manager, "c2c_complete", "COMPLETED");
     expect(manager.progress("c2c_complete")).toMatchObject({ status: "COMPLETED", progress: 100, threadId: "thread-test", testStatus: "PASS" });
     expect((await manager.events()).events).toContainEqual(expect.objectContaining({ type: "TASK_COMPLETED_EVENT", executionRecordId: "c2c_complete:1" }));
@@ -27,7 +28,9 @@ describe("task lifecycle", () => {
     const ws = workspace("task-cancel"); let cancelCalled = false;
     const runner: TaskRunner = async (_root, _name, _prompt, hooks) => { hooks.onReady(process.pid, "thread-cancel", "turn-cancel"); return { result: new Promise(() => undefined), cancel: async () => { cancelCalled = true; } }; };
     const manager = new TaskManager(ws, nullLogger, runner);
-    manager.submit({ workspaceName: ws.name, taskId: "c2c_cancel", iteration: 1, prompt: "Wait" }); await waitFor(manager, "c2c_cancel", "RUNNING");
+    manager.submit({ workspaceName: ws.name, taskId: "c2c_cancel", iteration: 1, prompt: "Wait" });
+    manager.executePlan({ taskId: "c2c_cancel" });
+    await waitFor(manager, "c2c_cancel", "RUNNING");
     await manager.cancel("c2c_cancel", "acceptance cancellation");
     expect(cancelCalled).toBe(true); expect(manager.progress("c2c_cancel")).toMatchObject({ status: "CANCELLED", cancelReason: "acceptance cancellation" });
     expect((await manager.events()).events).toContainEqual(expect.objectContaining({ type: "TASK_CANCELLED_EVENT" }));
@@ -41,14 +44,18 @@ describe("task lifecycle", () => {
       return { result: new Promise((resolve) => { release = () => { hooks.onProgress(45, "Running workspace command"); resolve({ exitCode: 0, output: "done" }); }; }), cancel: async () => undefined };
     };
     const manager = new TaskManager(ws, nullLogger, runner);
-    manager.submit({ workspaceName: ws.name, taskId: "c2c_paused", prompt: "Wait" }); await waitFor(manager, "c2c_paused", "PAUSED");
+    manager.submit({ workspaceName: ws.name, taskId: "c2c_paused", prompt: "Wait" });
+    manager.executePlan({ taskId: "c2c_paused" });
+    await waitFor(manager, "c2c_paused", "PAUSED");
     expect(manager.progress("c2c_paused")?.currentStep).toBe("Waiting for user input");
     release(); await waitFor(manager, "c2c_paused", "COMPLETED");
   });
 
   it("persists FAILED, failure event and reconnect recovery", async () => {
     const ws = workspace("task-failed"), manager = new TaskManager(ws, nullLogger, immediate(1, "intentional failure"));
-    manager.submit({ workspaceName: ws.name, taskId: "c2c_failed", prompt: "Fail" }); await waitFor(manager, "c2c_failed", "FAILED");
+    manager.submit({ workspaceName: ws.name, taskId: "c2c_failed", prompt: "Fail" });
+    manager.executePlan({ taskId: "c2c_failed" });
+    await waitFor(manager, "c2c_failed", "FAILED");
     expect((await manager.events()).events).toContainEqual(expect.objectContaining({ type: "TASK_FAILED_EVENT", status: "FAILED" }));
     expect(new TaskManager(ws, nullLogger).progress("c2c_failed")).toMatchObject({ status: "FAILED", error: "intentional failure" });
   });
@@ -57,7 +64,9 @@ describe("task lifecycle", () => {
     const ws = workspace("task-reconnect");
     const runner: TaskRunner = async (_root, _name, _prompt, hooks) => { hooks.onReady(process.pid, "thread-live", "turn-live"); return { result: new Promise(() => undefined), cancel: async () => undefined }; };
     const manager = new TaskManager(ws, nullLogger, runner);
-    manager.submit({ workspaceName: ws.name, taskId: "c2c_reconnect", iteration: 1, prompt: "Wait" }); await waitFor(manager, "c2c_reconnect", "RUNNING");
+    manager.submit({ workspaceName: ws.name, taskId: "c2c_reconnect", iteration: 1, prompt: "Wait" });
+    manager.executePlan({ taskId: "c2c_reconnect" });
+    await waitFor(manager, "c2c_reconnect", "RUNNING");
     expect(new TaskManager(ws, nullLogger).progress("c2c_reconnect")).toMatchObject({ status: "RUNNING", currentStep: "Reconnected to running Codex task" });
   });
 
@@ -65,15 +74,44 @@ describe("task lifecycle", () => {
     const ws = workspace("task-record-recovery");
     const runner: TaskRunner = async (_root, _name, _prompt, hooks) => { hooks.onReady(process.pid, "thread-stale", "turn-stale"); return { result: new Promise(() => undefined), cancel: async () => undefined }; };
     const manager = new TaskManager(ws, nullLogger, runner);
-    manager.submit({ workspaceName: ws.name, taskId: "c2c_recovered", iteration: 1, prompt: "Wait" }); await waitFor(manager, "c2c_recovered", "RUNNING");
+    manager.submit({ workspaceName: ws.name, taskId: "c2c_recovered", iteration: 1, prompt: "Wait" });
+    manager.executePlan({ taskId: "c2c_recovered" });
+    await waitFor(manager, "c2c_recovered", "RUNNING");
     appendExecutionRecord(ws.id, { taskId: "c2c_recovered", iteration: 1, changedFiles: 0, tests: "PASS", exitStatus: "ok", timestamp: new Date().toISOString() });
     expect(new TaskManager(ws, nullLogger).progress("c2c_recovered")).toMatchObject({ status: "COMPLETED", progress: 100 });
   });
 
-  it("is idempotent for the same task id and iteration", async () => {
+  it("is idempotent for the same idempotencyKey", async () => {
     const ws = workspace("task-idempotent"); let runs = 0;
     const runner: TaskRunner = async (...args) => { runs++; return immediate()(...args); };
-    const manager = new TaskManager(ws, nullLogger, runner), input = { workspaceName: ws.name, taskId: "c2c_repeat", iteration: 1, prompt: "Read only" };
-    manager.submit(input); manager.submit(input); await waitFor(manager, "c2c_repeat", "COMPLETED"); expect(runs).toBe(1);
+    const manager = new TaskManager(ws, nullLogger, runner);
+    const input = { workspaceName: ws.name, taskId: "c2c_repeat", iteration: 1, prompt: "Read only" };
+    manager.submit(input); manager.submit(input);
+    manager.executePlan({ taskId: "c2c_repeat", idempotencyKey: "once" });
+    manager.executePlan({ taskId: "c2c_repeat", idempotencyKey: "once" });
+    await waitFor(manager, "c2c_repeat", "COMPLETED");
+    expect(runs).toBe(1);
+  });
+
+  it("start does not run until executePlan", async () => {
+    const ws = workspace("task-two-phase"); let runs = 0;
+    const runner: TaskRunner = async (...args) => { runs++; return immediate()(...args); };
+    const manager = new TaskManager(ws, nullLogger, runner);
+    const created = manager.start({ workspaceName: ws.name, taskId: "c2c_phase", prompt: "Plan text", title: "demo" });
+    expect(created.status).toBe("CREATED");
+    expect(runs).toBe(0);
+    expect(manager.status("c2c_phase")).toMatchObject({ status: "created", iteration: 0 });
+    manager.appendPrompt({ taskId: "c2c_phase", state: "PLAN", body: "Concrete plan" });
+    manager.executePlan({ taskId: "c2c_phase", idempotencyKey: "k1" });
+    await waitFor(manager, "c2c_phase", "COMPLETED");
+    expect(runs).toBe(1);
+    expect(manager.status("c2c_phase")?.status).toBe("executed");
+    manager.executePlan({ taskId: "c2c_phase", idempotencyKey: "k1" });
+    expect(runs).toBe(1);
+  });
+
+  it("rejects cross-workspace start", () => {
+    const ws = workspace("task-ws-guard"), manager = new TaskManager(ws, nullLogger, immediate());
+    expect(() => manager.start({ workspaceName: "other", prompt: "x" })).toThrow("WORKSPACE_MISMATCH");
   });
 });

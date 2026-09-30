@@ -30,10 +30,13 @@
 
 ## Principles
 
+**Control plane dual-path:** Computer Use still types tiny `[C2C]` messages, **or** ChatGPT may call write-plane MCP tools (`start_task` → `send_prompt` → `execute_plan`) that map onto the same protocol states. Do not invent a parallel control language.
+
+
 - **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
 - **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
-- **Read-only by design**: no write/exec tools exist in V1 at all.
+- **Write plane (V2) is scoped**: `task.write` (alias `execution.submit`) enables start/send/execute/cancel only — never bare shell, never workspace file writes.
 - **Workspace is the security boundary**: one bridge = one workspace = one token audience.
 
 ## Components (src/)
@@ -41,12 +44,12 @@
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | McpServer with 9 read-only review tools plus scoped text-task controls; Streamable HTTP transport |
+| `mcp/` | McpServer with read-only review tools plus scoped write-plane controls (`start_task` / `send_prompt` / `execute_plan` / `task_status` / `cancel_task`); Streamable HTTP transport |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
 | `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and workspace-configured Named Tunnel implementations; business logic is vendor-agnostic |
-| `execution/` | JSONL execution records plus optional sanitized command output (`execution_output`) |
+| `execution/` | JSONL execution records, sanitized `execution_output`, and persisted TaskManager (`submitted-tasks/`) for the write plane |
 | `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |
 | `config/`, `logger/` | OS-convention state dir, secret-redacting logger |

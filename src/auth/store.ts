@@ -9,8 +9,15 @@ export const SUPPORTED_SCOPES = [
   "git.read",
   "execution.read",
   "execution.submit",
+  "task.write",
   "offline_access",
 ] as const;
+
+/** Write scopes are opt-in (pairing / explicit request). Empty scope grant stays RO. */
+export const WRITE_SCOPES = ["task.write", "execution.submit"] as const;
+export const DEFAULT_SCOPES = SUPPORTED_SCOPES.filter(
+  (scope) => !(WRITE_SCOPES as readonly string[]).includes(scope)
+);
 
 export type Scope = (typeof SUPPORTED_SCOPES)[number];
 
@@ -272,8 +279,13 @@ export class AuthStore {
 }
 
 export function filterScopes(requested: string | undefined): string[] {
-  if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
+  if (!requested || requested.trim() === "") return [...DEFAULT_SCOPES];
   const asked = requested.split(/[\s+]+/).filter(Boolean);
-  const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  if (asked.some((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope))) return [];
+  return [...new Set(asked)];
+}
+
+export function hasWriteScope(scopes: string[] | undefined): boolean {
+  if (!scopes) return true; // trusted in-process clients
+  return scopes.includes("task.write") || scopes.includes("execution.submit");
 }

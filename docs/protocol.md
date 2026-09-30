@@ -130,25 +130,29 @@ the log; a **local sanitizer** decides whether ChatGPT may see the body
 Restricted items appear in `list` with no body. Old records without output
 stay valid. Never paste logs into the control message.
 
-## Visible submitted tasks
+## MCP write plane (dual-path with Computer Use)
 
-`submit_task` accepts a text plan only and creates a persisted Codex App Server
-thread in the connector's fixed workspace. The thread name is the task id, so it
-appears in the Codex task list with the submitted plan and normal Codex activity.
+ChatGPT may drive the same `[C2C]` loop via MCP tools instead of (or alongside)
+Computer Use typing. Vocabulary stays PLAN / EXECUTE / FIX / DONE / BLOCKED.
 
-The lifecycle is `CREATED → QUEUED → RUNNING → COMPLETED|FAILED|CANCELLED`;
-`PAUSED` is persisted when Codex is waiting for approval or user input; the next
-progress notification resumes the task to `RUNNING`. `task_progress`
-returns timestamps, percent, current action, recent logs, UI thread/turn ids,
-changed files, test state and the execution record id. `cancel_task` interrupts
-the active Codex turn and saves the cancellation reason and current diff.
+Two-phase execution (no bare shell):
 
-`task_events` is a durable cursor-based event stream with bounded long polling.
-Completion produces `TASK_COMPLETED_EVENT`. A connector client can wait for that
-event and then call `execution_summary`, `execution_output`, and `git_diff`.
+1. `start_task` — create session (`title`, `prompt` → `taskId`); status `CREATED`; does **not** run Codex.
+2. `send_prompt` — append control message (`taskId`, `state`, `body`, `iteration`).
+3. `execute_plan` — start Codex harness for the current plan; **no** `command` arg; optional `idempotency_key`.
+4. `task_status` — compact design status (`created|queued|running|executed|failed|cancelled|blocked`) + iteration.
+5. `cancel_task` — interrupt runaway work (workspace-scoped).
+
+`submit_task` remains as a **create-only** compatibility shim (`needs_execute: true`).
+Requires OAuth scope `task.write` (alias `execution.submit`). RO tokens stay RO
+until re-pair.
+
+Internal lifecycle remains `CREATED → QUEUED → RUNNING → COMPLETED|FAILED|CANCELLED`
+(`PAUSED` while Codex waits for approval/input). `task_progress` / `task_events`
+provide detailed progress and a durable event stream. Completion still feeds
+`execution_summary` / `execution_output` (sanitized) and `git_diff`.
 MCP itself cannot wake a ChatGPT conversation after its host has ended the turn;
-zero-poll automatic review therefore depends on host support for connector event
-subscriptions. The durable event remains available after reconnect.
+zero-poll automatic review depends on host connector event subscriptions.
 
 ### DONE / BLOCKED (ChatGPT → Codex)
 
