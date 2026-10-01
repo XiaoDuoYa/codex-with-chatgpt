@@ -59,6 +59,8 @@ import {
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
 import { importMediaAsset } from "../media/import.js";
+import { readQuota } from "../routing/quota.js";
+import { chooseRoute, routeHookOutput } from "../routing/route.js";
 
 const program = new Command();
 
@@ -224,6 +226,45 @@ program
 function acceptUnusedWorkspaceOption(command: Command): Command {
   return command.option("-w, --workspace <path>", "ignored; this command is machine-wide");
 }
+
+acceptUnusedWorkspaceOption(program.command("quota")
+  .description("Read the signed-in Codex account's current quota")
+  .option("--codex-bin <path>", "Codex executable", "codex")
+  .option("--json", "machine-readable output", false))
+  .action(async (opts: { codexBin: string; json: boolean }) => {
+    const quota = await readQuota({ executable: opts.codexBin });
+    if (opts.json) say(JSON.stringify(quota));
+    else if (quota.available) {
+      say(`Codex remaining: ${quota.effectiveRemainingPercent ?? "unknown"}%`);
+      for (const window of quota.windows) {
+        say(`  ${window.durationMinutes ?? "unknown"} minute window: ${window.remainingPercent}% remaining`);
+      }
+      if (quota.rateLimitReachedType) say(`Limit reached: ${quota.rateLimitReachedType}`);
+    } else cross(quota.error!);
+    if (!quota.available) process.exitCode = 1;
+  });
+
+acceptUnusedWorkspaceOption(program.command("route")
+  .description("Choose the planning workflow from the current Codex quota")
+  .option("--codex-bin <path>", "Codex executable", "codex")
+  .option("--threshold <percent>", "use ChatGPT at or below this remaining percentage", (value: string) => {
+    const threshold = Number(value);
+    if (!value.trim() || !Number.isFinite(threshold) || threshold < 0 || threshold > 100) {
+      throw new InvalidArgumentError("threshold must be a number from 0 to 100");
+    }
+    return threshold;
+  }, 20)
+  .option("--json", "machine-readable output", false)
+  .option("--hook", "emit Codex UserPromptSubmit hook output", false))
+  .action(async (opts: { codexBin: string; threshold: number; json: boolean; hook: boolean }) => {
+    const route = chooseRoute(await readQuota({ executable: opts.codexBin }), opts.threshold);
+    if (opts.hook) say(JSON.stringify(routeHookOutput(route)));
+    else if (opts.json) say(JSON.stringify(route));
+    else {
+      say(`${route.mode}: ${route.reason} (remaining ${route.remainingPercent ?? "unknown"}%, threshold ${route.thresholdPercent}%)`);
+      if (route.error) say(route.error);
+    }
+  });
 
 // ---------------------------------------------------------------- serve (internal)
 

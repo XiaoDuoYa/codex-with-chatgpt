@@ -153,6 +153,19 @@ address — same features, just a slower repair.
 
 Credentials stay in the OS app state directory, not in the project.
 
+## Optional quota-aware planning
+
+Use native Codex while its quota is healthy, and select ChatGPT planning and
+review when the remaining Codex allowance reaches a configurable threshold:
+
+```sh
+node bin/c2c.js quota --json
+node bin/c2c.js route --threshold 20 --json
+```
+
+For automatic selection on submitted prompts, install the optional
+[Codex prompt hook](docs/quota-routing.md). Codex retains execution ownership.
+
 ## How it works
 
 ```
