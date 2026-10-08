@@ -124,7 +124,11 @@ that close the tab, hide the window, or stall on the settings page.
    create one replacement Chat conversation and resume from the durable
    checkpoint/Drive files; preserve both old and new URLs. Only an actual
    interactive login, 2FA, or CAPTCHA form requires user action. Never switch
-   to Work mode or the user's external browser for this recovery.
+   to Work mode or the user's external browser for this recovery. Once a tab is
+   confirmed non-generating and unusable, close that bad tab after saving its
+   URL and Drive/checkpoint state. Do not accumulate stale recovery tabs or
+   close a tab that may still be generating. Keep only the healthy active Chat
+   tab; if no Chat is healthy, keep the Project collection tab for later recovery.
 
 3. **Foreground + keep (standby).** Right after opening or claiming the tab:
    - `await (await iab.capabilities.get("visibility")).set(true)` — first-time
@@ -132,8 +136,9 @@ that close the tab, hide the window, or stall on the settings page.
    - `await tab.markHandoff()` immediately, then again at the start and end of
      every turn. After setup succeeds or the C2C chat is open, also
      `await tab.markDeliverable()`.
-   Never close this tab. Finished, waiting for the user, or timed out: leave it
-   marked (standby). Do not let default turn cleanup close it.
+   Keep the healthy working tab marked (standby) when finished or waiting for
+   the user. Do not let default turn cleanup close it. The confirmed-bad-tab
+   cleanup in §2 is the exception; do not mark broken tabs for later turns.
 
 4. **URLs only** (same tab, `goto` — never hunt menus):
    - 开发人员模式: `https://chatgpt.com/#settings/Security`
