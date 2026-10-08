@@ -562,6 +562,12 @@ Local checkpoint states (session only, never a ChatGPT `STATE:` line):
 `INIT`, `PLAN_RECEIVED`, `EXECUTING`, `EXECUTED_LOCAL`, `EXECUTED_SENT`, `DONE`, `BLOCKED`.
 Do not invent `STATE: RESUME`. If the original chat is gone, send HANDOFF.
 All control messages start with `[C2C]`. Keep Codex→ChatGPT messages under 1 KB.
+For every Episode-scoped `[C2C]` message in either direction, include
+`EPISODE: <channel>-EP<nnn>` in the header (for example,
+`EPISODE: MBC-EP001`). Keep `TASK_ID` and optional `PILOT_ID` separate:
+neither identifies the Episode for the reader. Apply this to progress,
+handoff, review, error, and completion messages; never infer an Episode ID
+for a generic coding task.
 ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/protocol.md`.
 
 0. `c2c tunnel status -w <workspace> --json`. If `needsChoice`, follow

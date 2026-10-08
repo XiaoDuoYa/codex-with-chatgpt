@@ -50,6 +50,11 @@ just to resume.
 
 Every control message starts with `[C2C]` and key-value headers, then sections.
 Keep messages < 1 KB. No diffs, no logs, no file bodies.
+For an Episode-scoped task, every message in either direction must include
+`EPISODE: <channel>-EP<nnn>` in its header (for example,
+`EPISODE: MBC-EP001`), including progress, handoff, review, error, and
+completion. `TASK_ID`/`PILOT_ID` are separate identifiers and never replace
+the Episode shortcode. Generic coding tasks do not invent an Episode ID.
 
 ### INIT (Codex → ChatGPT)
 
