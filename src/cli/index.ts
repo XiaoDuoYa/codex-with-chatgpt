@@ -59,6 +59,7 @@ import {
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
 import { importMediaAsset } from "../media/import.js";
+import { upstreamUpdateAvailable } from "./update-check.js";
 
 const program = new Command();
 
@@ -888,7 +889,15 @@ acceptUnusedWorkspaceOption(
       return;
     }
     const remoteCommit = remote.stdout.split(/\s/)[0];
-    const updateAvailable = remoteCommit !== local.stdout;
+    // A local checkout may contain our own commits ahead of origin/main.
+    // SHA inequality alone reports that case as a false upstream update.
+    // If the remote object is not present locally, merge-base fails and the
+    // remote is conservatively considered a possible new version.
+    const updateAvailable = upstreamUpdateAvailable(
+      local.stdout,
+      remoteCommit,
+      (remoteSha, localSha) => runGit(["merge-base", "--is-ancestor", remoteSha, localSha]).ok,
+    );
     fs.mkdirSync(getStateDir(), { recursive: true });
     fs.writeFileSync(file, JSON.stringify({ date: today, updateAvailable, remoteCommit }), { mode: 0o600 });
     emit({ checked: true, updateAvailable, localCommit: local.stdout, remoteCommit });
