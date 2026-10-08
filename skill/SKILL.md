@@ -16,7 +16,10 @@ You (Codex) own execution: editing, shell, git, tests, recovery.
 ChatGPT owns high-level reasoning: understanding, planning, review, debug strategy.
 The C2C Bridge gives ChatGPT read-only MCP access to the current workspace, so
 control messages between you and ChatGPT stay tiny (< 1 KB) — ChatGPT pulls
-whatever data it needs by itself.
+whatever data it needs by itself. This read-only boundary applies to the C2C
+workspace connector, not to a separately connected Google Drive app. When the
+current Project has Drive access, GPT may use that app's read/write actions for
+Drive handoffs; verify the actual Drive action before declaring it unavailable.
 
 **Golden rules**
 
@@ -108,9 +111,20 @@ that close the tab, hide the window, or stall on the settings page.
    `documentation()` if it is already bound. Never `getDefault()`, `getForUrl()`,
    or Computer Use.
 
-2. **One tab.** Create the ChatGPT tab once (`tabs.new()`). After that, only
-   `tab.goto(...)` to switch URLs. If the tab still exists, claim it — never
-   open a second ChatGPT tab. Do not `goto` the URL you are already on.
+2. **One working tab, with a recovery exception.** Normally create the ChatGPT
+   tab once (`tabs.new()`) and reuse it with `tab.goto(...)`. Do not refresh or
+   reopen a healthy conversation merely because generation is slow. If that
+   tab shows a persistent `cloudflare_challenge`, `Unknown error`, or Retry-only
+   navigation failure after one Retry, first preserve the exact conversation
+   URL and durable checkpoint/Drive location. Open that SAME URL in one new
+   built-in-browser tab and inspect the actual conversation there. A fresh tab
+   is a page recovery, not a new chat: do not resend the last message if it is
+   already visible or still generating. Continue on the recovered tab and
+   keep its URL. If the fresh tab also cannot load, use the saved Project to
+   create one replacement Chat conversation and resume from the durable
+   checkpoint/Drive files; preserve both old and new URLs. Only an actual
+   interactive login, 2FA, or CAPTCHA form requires user action. Never switch
+   to Work mode or the user's external browser for this recovery.
 
 3. **Foreground + keep (standby).** Right after opening or claiming the tab:
    - `await (await iab.capabilities.get("visibility")).set(true)` — first-time
@@ -156,14 +170,14 @@ that close the tab, hide the window, or stall on the settings page.
    throwaway verify chat and later another C2C chat.
 
    A collection or chat page that shows only `Retry` / `重试` is a navigation
-   error, not generation and not a pairing failure. Reuse the same iab tab.
-   Try Retry once. If it stays Retry-only, `goto` the last working chat URL
-   from this thread (or `session.url` if that is the only saved chat), then
-   click the on-page `Open … project` / `打开“… ”项目` link — that same-site
-   hop is allowed. Do not treat the URLs-only rule as forbidding this link.
-   On the collection, require the project chat list and new-chat composer
-   before continuing. Keep the old saved URL/checkpoint until the replacement
-   chat passes workspace_info. Do not `session clear`. Do not use Computer Use.
+   error, not generation and not a pairing failure. Try Retry once. If it
+   remains broken, follow §2: reopen the exact saved chat URL in one fresh
+   built-in-browser tab and inspect it before considering a replacement chat.
+   If the chat loads but its Project collection does not, click the on-page
+   `Open … project` / `打开“… ”项目` link; require the project chat list and
+   new-chat composer before continuing. Keep the old saved URL/checkpoint
+   until any replacement chat passes workspace_info. Do not `session clear`.
+   Do not use Computer Use.
 
 8. **Wait for a ChatGPT reply (do not hold one long browser wait).** After you
    send INIT, EXECUTED, boot, or the workspace_info check: `markHandoff`, keep
@@ -172,10 +186,12 @@ that close the tab, hide the window, or stall on the settings page.
    - still generating → wait again (do not type, do not resend);
    - `STATE: PLAN` / `DONE` / `BLOCKED` / the verify workspace name → read it
      and continue the existing protocol;
-   - visible error → repair; do not start a new chat.
+   - visible error → apply §2 page recovery first; do not immediately start a
+     new chat or ask the user to solve a non-interactive error label.
    A browser/js timeout is not failure. Claim the same tab, read the page, keep
    standby. If ChatGPT is still thinking, keep polling. Never open a second
-   tab and never resend INIT/EXECUTED just because a wait timed out.
+   tab or resend INIT/EXECUTED just because a wait timed out; §2 applies only
+   to a persistent visible page failure.
 
 ## Locations
 
@@ -478,16 +494,28 @@ Project. Do **not** click the ChatGPT sidebar to create the Project
 
 ### Project instructions (paste into 项目设置 → 指令)
 
+For an existing Project that performs Drive handoffs, first inspect its saved
+instructions. If they still say `When you call tools, use ONLY that connector`,
+replace that obsolete sentence with the scoped workspace/Drive distinction
+below, preserve the other Project settings, save, and read it back. Do this for
+the current workspace's Project only; changing this Skill template alone does
+not update instructions already saved in ChatGPT.
+
 ```
 You are the planning and review layer for one local workspace. Codex executes.
 
 This Project is bound only to:
 - Workspace name: {{workspace_name}}
 - Kind: {{project_type}} ({{languages}} / {{frameworks}})
-- Connector (use this one only): {{connector_name}}
+- Workspace connector: {{connector_name}}
 
-When you call tools, use ONLY that connector. Do not use any other
-Codex with ChatGPT connector. If workspace_info names a different
+For workspace, code, git, and released execution output, use ONLY this
+Codex with ChatGPT connector; never use another workspace's C2C connector.
+This does not restrict the separately connected Google Drive app for files
+in this Project. For a Drive handoff, use its Drive read/write actions and
+verify the actual saved file. Do not infer Drive is read-only from
+workspace_info or from the C2C tool list; report a blocker only if the Drive
+action itself is unavailable or fails. If workspace_info names a different
 workspace, stop. Do not plan. Do not use this Project's memory.
 
 Read code, git, diffs, and any released command output through that
@@ -741,7 +769,8 @@ the previous public address is gone. Doctor already started a new one.
 | --- | --- |
 | Bridge not running | `c2c start` (doctor does this automatically) |
 | Tunnel dead / URL unreachable / 全关掉后连接失效 | `c2c doctor` → if `namedRepair.needed`, login to Cloudflare and doctor again (do not Delete). If `chatgptRepair.needed`, tell the user the message, then **Delete** THIS workspace's connector only (`connectorName`) and create it again. Never Reconnect. After recreate, re-check `workspace_info` in the saved chat; if it still fails, new chat in the same Project (or long-chat switch) + HANDOFF. |
-| Collection page shows only Retry | Same iab tab: Retry once, then open the last working chat and click its Project link. Do not write INIT/EXECUTED waiting checkpoints until the message is visible. |
+| Collection page shows only Retry | Retry once, then use §2 to reopen the saved chat URL in one new built-in-browser tab; from a loaded chat, use its Project link if needed. Do not write INIT/EXECUTED waiting checkpoints until the message is visible. |
+| Saved chat shows `cloudflare_challenge`, `Unknown error`, or persistent Retry-only page | Save its exact URL and Drive/checkpoint location; Retry once, then open the same URL in one new built-in-browser tab. Inspect before resending. Only if that fails, create a new Chat conversation in the same Project and resume from durable files. Ask the user only for a real interactive login/2FA/CAPTCHA form. |
 | ChatGPT says tool call failed / 401 | token expired or revoked → re-pair (new pairing code + authorize) |
 | Pairing code rejected/expired | `c2c pair --json` for a fresh code |
 | Same explicit ChatGPT setup/reconnect browser configuration step fails twice after repair | Stop automating ChatGPT settings and use **Guided manual ChatGPT setup fallback**. Do not count browser/js timeout, loading/generating, or login/2FA waiting as failures. |
