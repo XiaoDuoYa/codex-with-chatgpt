@@ -557,6 +557,13 @@ resolve in this repository; do not review the dirty working tree as a
 substitute for the candidate branch. If a commit is absent, ask Codex to
 fetch it locally; do not invent an audit from memory or a stale checkout.
 
+`test_status` is the latest record for the whole workspace, not for the Git
+revision under review. Never cite its count as tests for `headCommit` unless
+its taskId and iteration match this review and the recorded command/output
+belongs to the stated revision. Otherwise label it historical and report the
+current test result only as Codex's claim until matching execution evidence
+is available. Do not silently substitute an older passing suite.
+
 When facts conflict, trust this order:
 1. Current code from the connector
 2. A HANDOFF in this chat (this task's goal, progress, next step)
