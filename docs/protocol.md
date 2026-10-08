@@ -166,8 +166,11 @@ NEEDS:
   conversation starts a new chat **inside that Project**. The same Codex
   conversation keeps using its saved chat URL.
 
-Right after the boot prompt, Codex sends a HANDOFF so the new chat can
-continue — a brief, never a data dump (the new chat re-reads code via MCP).
+For an already-bound Project with a green local connection check, Codex sends
+HANDOFF as the **first message** in the new Chat — a brief, never a data dump
+(the new chat re-reads code via the connector and task files via Drive). Do not
+spend separate turns on a boot prompt or workspace_info test. First-time setup
+and connector repair still verify the connection before task execution.
 Project instructions and project-only memory hold durable workspace identity.
 HANDOFF still wins for the current task:
 
