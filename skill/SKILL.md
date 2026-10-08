@@ -703,6 +703,35 @@ If execution_output lists a readable item for this iteration, list then read it.
 If status is restricted, ignore it and review from git_diff.
 ```
 
+   For a clean branch or PR that is **not** the connected checkout's working
+   tree, give GPT an exact-revision handoff instead of the generic current-diff
+   request. The existing connector can read any commit present in the same
+   repository; a second connector or pasted patch is unnecessary:
+
+```
+[C2C]
+STATE: EXECUTED
+TASK_ID: <review task>
+ITERATION: <n>
+REPOSITORY: <connected repository identity>
+BASE_COMMIT: <full SHA>
+HEAD_COMMIT: <full SHA>
+REVIEW_PATHS: <changed paths or "all changed paths">
+TEST_COMMAND: <exact command>
+TEST_RESULT: <exit code and concise count; Codex-reported until matching evidence is read>
+
+Review only BASE_COMMIT..HEAD_COMMIT. Use git_diff(mode="revision",
+base_ref=BASE_COMMIT, head_ref=HEAD_COMMIT), continue pages using the returned
+baseCommit/headCommit, and read_file(path, revision=headCommit) for full files.
+Report findings with paths and lines, and distinguish code-review verdict from
+release approval. Treat an unrelated test_status record as historical.
+```
+
+   Before sending, Codex must verify both SHAs resolve in the repository served
+   by this connector and keep the exact local test command/output available. If
+   a commit is absent, fetch it into that repository and retry; never ask GPT
+   to review a dirty main checkout as a stand-in for the candidate branch.
+
    Then:
    `c2c session set -w <ws> --protocol-state EXECUTED_SENT --waiting-for GPT_REVIEW --next-step "wait for PLAN or DONE"`
 7. ChatGPT reviews via MCP (`git_diff`, `read_file`, `test_status`,
