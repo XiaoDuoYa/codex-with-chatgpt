@@ -13,7 +13,8 @@ export type WorkspaceErrorCode =
   | "NOT_A_FILE"
   | "NOT_A_DIRECTORY"
   | "BINARY_FILE"
-  | "FILE_TOO_LARGE";
+  | "FILE_TOO_LARGE"
+  | "INVALID_REVISION";
 
 export class WorkspaceError extends Error {
   constructor(

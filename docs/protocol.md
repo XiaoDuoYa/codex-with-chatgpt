@@ -135,6 +135,16 @@ the log; a **local sanitizer** decides whether ChatGPT may see the body
 Restricted items appear in `list` with no body. Old records without output
 stay valid. Never paste logs into the control message.
 
+For a committed branch/PR outside the connected checkout's working tree, Codex
+must include the exact base and head commit SHAs in the short `EXECUTED`
+message. ChatGPT reviews with `git_diff(mode="revision", base_ref=<base SHA>,
+head_ref=<head SHA>)`, pages using the returned immutable `baseCommit` and
+`headCommit`, and reads full candidate files with
+`read_file(path=<workspace-relative path>, revision=<headCommit>)`. This uses
+the existing workspace connector and never changes the checked-out branch.
+If either commit is unavailable in the connected repository, Codex fetches it
+first; a dirty current checkout is not evidence for the candidate commit.
+
 ### DONE / BLOCKED (ChatGPT → Codex)
 
 ```

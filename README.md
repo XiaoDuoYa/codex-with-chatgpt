@@ -188,6 +188,11 @@ Credentials stay in the OS app state directory, not in the project.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
+- **Committed branch review**: for a PR or separate worktree in the same Git
+  repository, Codex supplies exact base/head commit SHAs. ChatGPT uses
+  `git_diff` in `revision` mode and `read_file` at the head revision through
+  the same connector; it does not mistake the bound checkout's dirty files
+  for the reviewed branch. No extra connector or pasted patch is required.
 
 ### Generated media handoff
 

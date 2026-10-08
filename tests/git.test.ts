@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { gitDiff, gitInfo, gitStatus } from "../src/workspace/git.js";
+import { gitDiff, gitInfo, gitStatus, readFileAtRevision, resolveReviewCommit } from "../src/workspace/git.js";
+import { Workspace } from "../src/workspace/manager.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git } from "./helpers.js";
 
 let repo: string;
@@ -292,5 +293,61 @@ describe("gitDiff pagination", () => {
     expect(srcDiff.diff).not.toContain("root_secret_leak.txt");
 
     git(repo, "reset", "--hard", "HEAD");
+  });
+});
+
+describe("committed revision review", () => {
+  let reviewRepo: string;
+  let base: string;
+  let head: string;
+
+  beforeAll(() => {
+    reviewRepo = makeTmpDir("revision-review");
+    makeGitRepo(reviewRepo);
+    base = git(reviewRepo, "rev-parse", "HEAD").trim();
+    git(reviewRepo, "switch", "-c", "candidate");
+    write(reviewRepo, "src/new.ts", "export const candidate = 'visible-review-data';\n");
+    write(reviewRepo, ".env", "SECRET=hidden-revision-data\n");
+    write(reviewRepo, ".c2cignore", "private-notes/\n");
+    write(reviewRepo, "private-notes/plan.md", "hidden-custom-data\n");
+    git(reviewRepo, "add", "-f", "src/new.ts", ".env", ".c2cignore", "private-notes/plan.md");
+    git(reviewRepo, "commit", "-m", "candidate with private material");
+    head = git(reviewRepo, "rev-parse", "HEAD").trim();
+    git(reviewRepo, "switch", "main");
+  });
+
+  afterAll(() => cleanup(reviewRepo));
+
+  it("resolves local branch commits without changing the checked-out branch", () => {
+    expect(resolveReviewCommit(reviewRepo, "candidate")).toBe(head);
+    expect(git(reviewRepo, "branch", "--show-current").trim()).toBe("main");
+    expect(() => resolveReviewCommit(reviewRepo, "candidate:src/new.ts")).toThrow();
+    expect(() => resolveReviewCommit(reviewRepo, "HEAD~1")).toThrow();
+    const dangling = git(reviewRepo, "commit-tree", git(reviewRepo, "write-tree").trim(), "-m", "unreferenced").trim();
+    expect(() => resolveReviewCommit(reviewRepo, dangling)).toThrow();
+  });
+
+  it("reviews exact committed changes and conservatively applies both revisions' ignore rules", () => {
+    const result = gitDiff(new Workspace(reviewRepo), {
+      mode: "revision",
+      baseRef: base,
+      headRef: "candidate",
+    });
+    expect(result.baseCommit).toBe(base);
+    expect(result.headCommit).toBe(head);
+    expect(result.diff).toContain("visible-review-data");
+    expect(result.diff).not.toContain("hidden-revision-data");
+    expect(result.diff).not.toContain("hidden-custom-data");
+    expect(git(reviewRepo, "branch", "--show-current").trim()).toBe("main");
+  });
+
+  it("reads a candidate-only file by immutable revision, but denies secrets", () => {
+    const workspace = new Workspace(reviewRepo);
+    const file = readFileAtRevision(workspace, "src/new.ts", head);
+    expect(file.revision).toBe(head);
+    expect(file.content).toContain("visible-review-data");
+    expect(() => readFileAtRevision(workspace, ".env", head)).toThrow();
+    expect(() => readFileAtRevision(workspace, "private-notes/plan.md", head)).toThrow();
+    expect(() => readFileAtRevision(workspace, "../outside.txt", head)).toThrow();
   });
 });

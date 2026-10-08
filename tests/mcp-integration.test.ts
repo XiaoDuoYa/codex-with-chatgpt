@@ -183,6 +183,42 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(diff.hasMore).toBe(false);
   });
 
+  it("reviews another committed branch through this same workspace connector", async () => {
+    const base = git(root, "rev-parse", "HEAD").trim();
+    git(root, "switch", "-c", "review-candidate");
+    write(root, "candidate-only.ts", "export const review = 'committed-candidate-visible';\n");
+    write(root, "private-notes/draft.md", "private-candidate-hidden\n");
+    write(root, ".c2cignore", "private-notes/\n");
+    git(root, "add", "-f", "candidate-only.ts", "private-notes/draft.md", ".c2cignore");
+    git(root, "commit", "-m", "review candidate");
+    const head = git(root, "rev-parse", "HEAD").trim();
+    git(root, "switch", "main");
+
+    const diff = structuredJsonOf<{ diff: string; baseCommit: string; headCommit: string }>(
+      await client.callTool({
+        name: "git_diff",
+        arguments: { mode: "revision", base_ref: base, head_ref: "review-candidate" },
+      })
+    );
+    expect(diff.baseCommit).toBe(base);
+    expect(diff.headCommit).toBe(head);
+    expect(diff.diff).toContain("committed-candidate-visible");
+    expect(diff.diff).not.toContain("private-candidate-hidden");
+
+    const file = structuredJsonOf<{ content: string; revision: string }>(
+      await client.callTool({ name: "read_file", arguments: { path: "candidate-only.ts", revision: head } })
+    );
+    expect(file.revision).toBe(head);
+    expect(file.content).toContain("committed-candidate-visible");
+    const denied = await client.callTool({
+      name: "read_file",
+      arguments: { path: "private-notes/draft.md", revision: head },
+    });
+    expect(denied.isError).toBe(true);
+    expect(textOf(denied)).toContain("ACCESS_DENIED_SENSITIVE_FILE");
+    expect(git(root, "branch", "--show-current").trim()).toBe("main");
+  });
+
   it("git_diff paginates large diffs", async () => {
     const big = Array.from({ length: 20000 }, (_, i) => `content line ${i}`).join("\n");
     write(root, "big-change.txt", big);

@@ -150,9 +150,15 @@ that close the tab, hide the window, or stall on the settings page.
      the chat already bound in THIS Codex conversation)
    - Saved Project collection: `conversation.projectUrl`
      (`https://chatgpt.com/g/g-p-…/project`)
-   Never click Reconnect / Refresh on an existing connector. The old address is
-   dead and that page hangs on "This site cannot be reached". When the address
-   changed: Delete THIS workspace's `connectorName` only, then create it again
+   Never click account **Reconnect / Refresh** on an existing connector during
+   ordinary recovery. The old address is dead and that page hangs on "This site
+   cannot be reached". This is distinct from **Refresh tools** on the exact
+   plugin settings page: after intentionally changing MCP tool schemas, build
+   and restart the local bridge, get a green doctor result, open the installed
+   `connectorName`'s Manage page, click **Refresh tools** once, then verify the
+   new arguments in a fresh Project Chat. Preserve the existing connector,
+   account, and Project. Never refresh tools merely for a chat/UI error.
+   When the address changed: Delete THIS workspace's `connectorName` only, then create it again
    via the 加插件 URL (same name, new Server URL). Do not put that public
    address into Project instructions — write the connector **name** only.
 
@@ -541,6 +547,15 @@ connector. Never ask anyone to paste file bodies, diffs, or logs. After
 EXECUTED, call execution_output (list, then read) when a readable item
 exists; if status is restricted, review from git instead. Never upload
 the repo into this Project's files or sources.
+
+For a committed branch or PR whose code is not the connected checkout's
+working tree, use git_diff(mode="revision", base_ref=<exact base SHA>,
+head_ref=<exact head SHA>) on this same connector. Continue pagination with
+the returned baseCommit/headCommit, and use read_file(path=...,
+revision=<headCommit>) for full candidate files. First confirm the commits
+resolve in this repository; do not review the dirty working tree as a
+substitute for the candidate branch. If a commit is absent, ask Codex to
+fetch it locally; do not invent an audit from memory or a stale checkout.
 
 When facts conflict, trust this order:
 1. Current code from the connector

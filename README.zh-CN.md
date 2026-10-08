@@ -119,6 +119,10 @@ Ready.
   `execution_output`、`read_image`。
 - **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
   和测试记录——绝不因为 Codex 说"测试全过"就直接相信。
+- **已提交分支审查**：若 PR 或独立工作树仍属于同一个 Git 仓库，Codex 提供
+  精确的 base/head 提交 SHA；ChatGPT 用同一连接器的 `git_diff` revision
+  模式及 `read_file` 的 revision 参数审查候选代码，不会把绑定目录的脏改动
+  误认成候选分支。无需新连接器，也无需粘贴补丁。
 
 ### 生成媒体交接
 

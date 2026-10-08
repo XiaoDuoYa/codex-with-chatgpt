@@ -76,6 +76,7 @@ export class IgnoreRules {
   private sensitive: Ignore;
   private noise: Ignore;
   private custom: Ignore;
+  private additionalCustom: Ignore[] = [];
 
   constructor(workspaceRoot: string) {
     this.sensitive = ignore().add(SENSITIVE_PATTERNS);
@@ -91,10 +92,19 @@ export class IgnoreRules {
     }
   }
 
+  /** Apply another revision's .c2cignore without allowing negations to undo current rules. */
+  addConservativeIgnore(contents: string): void {
+    this.additionalCustom.push(ignore().add(contents));
+  }
+
   /** True when the path must be denied with ACCESS_DENIED_SENSITIVE_FILE. */
   isSensitive(relPath: string): boolean {
     if (!relPath || relPath === ".") return false;
-    return this.sensitive.ignores(relPath) || this.custom.ignores(relPath);
+    return (
+      this.sensitive.ignores(relPath) ||
+      this.custom.ignores(relPath) ||
+      this.additionalCustom.some((rules) => rules.ignores(relPath))
+    );
   }
 
   /** True when the path should be hidden from listing/search (not an error). */

@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { Workspace, WorkspaceError } from "../workspace/manager.js";
 import { searchWorkspace } from "../workspace/search.js";
-import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
+import { gitDiff, gitInfo, gitStatus, readFileAtRevision, type DiffMode } from "../workspace/git.js";
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
 import type { Logger } from "../logger/index.js";
@@ -93,6 +93,7 @@ const readFileOutputSchema = {
   remainingLines: z.number().int().nonnegative(),
   nextStartLine: z.number().int().positive().nullable(),
   content: z.string(),
+  revision: z.string().optional(),
 };
 
 const readImageOutputSchema = {
@@ -137,13 +138,15 @@ const gitStatusOutputSchema = {
 
 const gitDiffOutputSchema = {
   isRepo: z.boolean(),
-  mode: z.enum(["unstaged", "staged", "head"]),
+  mode: z.enum(["unstaged", "staged", "head", "revision"]),
   totalBytes: z.number().int().nonnegative(),
   offset: z.number().int().nonnegative(),
   returnedBytes: z.number().int().nonnegative(),
   hasMore: z.boolean(),
   nextOffset: z.number().int().nonnegative().nullable(),
   diff: z.string(),
+  baseCommit: z.string().optional(),
+  headCommit: z.string().optional(),
 };
 
 const testStatusOutputSchema = {
@@ -266,11 +269,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Read file",
       description:
-        `Read a text file from the workspace with line-range pagination. Defaults to the first ` +
+        `Read a text file from the workspace, or from an exact Git revision in this same repository, ` +
+        `with line-range pagination. Defaults to the first ` +
         `400 lines; use start_line/end_line to page through large files. Sensitive files ` +
         `(.env, keys, credentials) are always denied. ${UNTRUSTED_NOTE}`,
       inputSchema: {
         path: z.string().describe("Workspace-relative file path"),
+        revision: z.string().optional().describe("Commit SHA returned by git_diff(mode='revision'); omit for the live working tree"),
         start_line: z.number().int().min(1).optional().describe("1-based first line to return"),
         end_line: z.number().int().min(1).optional().describe("1-based last line to return"),
       },
@@ -281,7 +286,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
-        return okStructured(await workspace.readFile(args.path, { startLine: args.start_line, endLine: args.end_line }));
+        return okStructured(
+          args.revision
+            ? readFileAtRevision(workspace, args.path, args.revision, { startLine: args.start_line, endLine: args.end_line })
+            : await workspace.readFile(args.path, { startLine: args.start_line, endLine: args.end_line })
+        );
       } catch (error) {
         return mapError(error);
       }
@@ -371,10 +380,14 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Git diff",
       description:
-        `Git diff with byte-offset pagination. mode: 'unstaged' (default), 'staged', or 'head' ` +
-        `(working tree vs HEAD). When hasMore is true, call again with offset=nextOffset. ${UNTRUSTED_NOTE}`,
+        `Git diff with byte-offset pagination. mode: 'unstaged' (default), 'staged', 'head' ` +
+        `(working tree vs HEAD), or 'revision' (base_ref vs head_ref commits in this same repository). ` +
+        `Revision mode returns immutable baseCommit/headCommit; use those SHAs on later pages and read_file. ` +
+        `When hasMore is true, call again with offset=nextOffset. ${UNTRUSTED_NOTE}`,
       inputSchema: {
-        mode: z.enum(["unstaged", "staged", "head"]).default("unstaged"),
+        mode: z.enum(["unstaged", "staged", "head", "revision"]).default("unstaged"),
+        base_ref: z.string().optional().describe("Base commit SHA or branch name; required only in revision mode"),
+        head_ref: z.string().optional().describe("Head commit SHA or branch name; required only in revision mode"),
         path: z.string().optional().describe("Limit the diff to one workspace-relative path"),
         offset: z.number().int().min(0).default(0).describe("Byte offset for pagination"),
         max_bytes: z.number().int().min(1024).max(262144).default(65536),
@@ -393,7 +406,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
         return okStructured(
           gitDiff(
             workspace,
-            { mode: args.mode as DiffMode, offset: args.offset, maxBytes: args.max_bytes },
+            {
+              mode: args.mode as DiffMode,
+              baseRef: args.base_ref,
+              headRef: args.head_ref,
+              offset: args.offset,
+              maxBytes: args.max_bytes,
+            },
             relPath
           )
         );
