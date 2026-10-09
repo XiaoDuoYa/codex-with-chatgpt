@@ -72,19 +72,30 @@ last verified SHA; do not make a second work file or ask Codex to upload it.
      你浏览器的正常使用。ChatGPT 只能跑在内置浏览器里。" Only if the user replies
      with an explicit "我愿意承担影响" may you proceed in their browser; otherwise
      keep ChatGPT in the built-in browser, every time they ask.
-6. Conversation reuse depends on `c2c session --json` → `conversation.mode`
-   (see Conversation management). Do not invent a second mode.
-   - **long-chat** (legacy session file, or the user opted out): ONE ChatGPT
-     conversation per workspace. Never silently start a new chat.
+6. Conversation mode depends on `c2c session --json` → `conversation.mode`
+   (see Conversation management). Do not invent another mode. Multiple
+   independent ChatGPT conversations are allowed; they are separate work
+   threads, not additional connectors.
+   - **long-chat** (legacy session file, or the user opted out): reuse the
+     saved conversation for that task. If the user explicitly asks GPT to
+     collaborate on a distinct task, open a separate conversation only when a
+     Project is available; otherwise continue the saved chat without replacing
+     its in-flight work.
    - **project** (new workspaces, or an existing workspace that opted in):
-     ONE ChatGPT Project (collection) per workspace. Same Codex conversation
-     reuses the ChatGPT chat URL saved in THIS thread. A new Codex
-     conversation opens a new chat from the Project collection page — never
-     `goto` `https://chatgpt.com/` to create it, and never reuse another
-     Codex conversation's chat URL just because `session.url` exists.
-   Each workspace also has exactly ONE ChatGPT connector. Do not create a
-   second connector for the same workspace. Other workspaces may have their
-   own connectors — never edit those.
+     use the single ChatGPT Project (collection) bound to the workspace.
+     Reuse the chat URL saved for the current task; for a distinct GPT task,
+     open a new Chat from the Project collection page and save that task's
+     exact URL with its task record. Never reuse another task's URL just
+     because `session.url` exists, and never go to `https://chatgpt.com/` to
+     create a Project chat.
+   A user's explicit request to collaborate with GPT authorizes sending the
+   task message directly; do not ask again for confirmation. Do not repeat a
+   question already answered in the task context. Make a reasonable scoped
+   decision and proceed; ask only when a genuinely missing choice changes the
+   work.
+   Keep exactly ONE ChatGPT connector per workspace. Do not create a second
+   connector for another conversation or alter connectors belonging to other
+   workspaces.
 7. After first-time setup, never ask the user to approve writing C2C's local
    settings directory. Run `c2c sandbox-allow --json` (idempotent). If it fails
    with EPERM / Operation not permitted, request elevated permissions and retry
@@ -626,10 +637,17 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    a control message, wait per
    **In-app browser** §8.
 
-   **Resume from `session.checkpoint` before any INIT.** Missing checkpoint
-   (legacy session): continue as a normal new/continued loop. A browser/js
-   timeout is not a lost task — claim the original tab; do not INIT, re-run,
-   or resend EXECUTED just because a wait timed out.
+   **Resume the matching task from `session.checkpoint` before any INIT.** A
+   checkpoint for another task is not a conversation lock: when the user asks
+   for a distinct GPT collaboration, create a new Chat in the same Project and
+   send that task directly with a unique `TASK_ID`; do not reuse the other
+   task's URL or send into its active thread. Preserve the existing checkpoint
+   rather than overwriting it. The current CLI stores one active checkpoint per
+   workspace, so concurrent tasks recover from their own canonical Drive/repo
+   checkpoints; never claim the CLI tracks multiple checkpoint records.
+   Missing checkpoint (legacy session): continue as a normal new/continued loop.
+   A browser/js timeout is not a lost task — claim the original tab; do not
+   INIT, re-run, or resend EXECUTED just because a wait timed out.
    - `EXECUTED_SENT` + `waitingFor=GPT_REVIEW`: do not INIT, do not re-run,
      do not resend EXECUTED. Stay on the saved chat and wait for review. If
      that chat 404s: HANDOFF from checkpoint fields (no logs), then wait.
