@@ -20,6 +20,16 @@ whatever data it needs by itself. This read-only boundary applies to the C2C
 workspace connector, not to a separately connected Google Drive app. When the
 current Project has Drive access, GPT may use that app's read/write actions for
 Drive handoffs; verify the actual Drive action before declaring it unavailable.
+For Episode authoring, GPT owns its Google Drive writing; Codex verifies the
+saved bytes and does not silently become the Drive writer. A Drive read-only
+workspace connector is not a Drive-app capability test. If a large native
+Google Doc returns 502 on `replaceAllText`, do not say Drive writing is absent:
+read the current document revision and indices, make one small
+`deleteContentRange`/`insertText` edit with `requiredRevisionId`, then read back
+the successor revision. Append new work instead of rewriting the whole Doc.
+Recompute indices after each edit. If even the tiny indexed write fails,
+recover in a new Chat of the same Project with the exact Drive file ID and
+last verified SHA; do not make a second work file or ask Codex to upload it.
 
 **Golden rules**
 
