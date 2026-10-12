@@ -11,18 +11,21 @@ import { createMcpHttpHandler } from "../mcp/http.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
-import { namedTunnelBinding, readTunnelState } from "../tunnel/state.js";
+import { namedTunnelBinding, readTunnelState, type TunnelState } from "../tunnel/state.js";
 import { Logger, nullLogger } from "../logger/index.js";
 import { DEFAULT_HOST, DEFAULT_PORT } from "../config/paths.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
-function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
-  const binding = namedTunnelBinding(readTunnelState(workspaceId));
+function tunnelForWorkspace(workspaceId: string, logger: Logger, candidate?: TunnelState): TunnelProvider {
+  if (candidate && candidate.workspaceId !== workspaceId) throw new Error("Named tunnel candidate belongs to another workspace");
+  const binding = namedTunnelBinding(candidate ?? readTunnelState(workspaceId));
   if (binding) {
     return new CloudflaredNamedTunnel({
       tunnelName: binding.tunnelName,
       hostname: binding.hostname,
+      tunnelId: binding.tunnelId,
+      credentialsFile: binding.credentialsFile,
       logger,
     });
   }
@@ -35,6 +38,8 @@ export interface BridgeOptions {
   host?: string;
   logger?: Logger;
   tunnelProvider?: TunnelProvider;
+  /** An uncommitted setup candidate; final state is saved after public verification. */
+  tunnelState?: TunnelState;
   /** Persist runtime state file (disable in tests). */
   persistRuntime?: boolean;
   authStoreFile?: string;
@@ -89,7 +94,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
-  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger, opts.tunnelState);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;

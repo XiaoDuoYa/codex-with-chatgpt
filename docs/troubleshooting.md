@@ -86,6 +86,19 @@ login, then keeps `c2c-<project>.your-domain.com`. To stay on the temporary
 address, say you do not have a domain. Switching later: tell Codex you want
 the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
 
+For an exact hostname from the CLI, run:
+
+```bat
+c2c setup --domain c2c.example.com -w "D:\Projects\My Project"
+```
+
+This configures the named tunnel, validates the public hostname against the
+workspace ID, and saves the choice. A failed explicit domain request returns an
+error without silently switching to a temporary address. Logging into
+cloudflared alone does not select a domain for the workspace. If `c2c` is not on
+PATH, use `node "<checkout>\bin\c2c.js"` instead. See the
+[Windows CMD investigation and verified fix](windows-cmd-setup-domain-analysis.zh-CN.md).
+
 ### "配对码无效/过期"
 Pairing codes are one-time and expire after ~5 minutes. Generate one only
 when the ChatGPT Authorize page is ready:

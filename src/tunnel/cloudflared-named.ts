@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import readline from "node:readline";
+import path from "node:path";
+import { stateSubdir, writeSecureJson } from "../config/paths.js";
+import { cloudflaredCredentialPath } from "./named-provision.js";
 import type { Logger } from "../logger/index.js";
 import { nullLogger } from "../logger/index.js";
 import { findBinary } from "./detect.js";
@@ -11,6 +14,8 @@ const HOSTNAME_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a
 
 export interface CloudflaredNamedTunnelOptions {
   tunnelName: string;
+  tunnelId?: string;
+  credentialsFile?: string;
   hostname: string;
   logger?: Logger;
   binaryOverride?: string;
@@ -36,6 +41,8 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
   readonly name = "cloudflare-named";
   private readonly tunnelName: string;
   private readonly hostname: string;
+  private readonly tunnelId?: string;
+  private readonly credentialsFile?: string;
   private readonly logger: Logger;
   private readonly binaryOverride?: string;
   private readonly startTimeoutMs: number;
@@ -50,6 +57,8 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
     }
     this.tunnelName = tunnelName;
     this.hostname = normalizeNamedTunnelHostname(opts.hostname);
+    this.tunnelId = opts.tunnelId;
+    this.credentialsFile = opts.credentialsFile;
     this.logger = opts.logger ?? nullLogger;
     this.binaryOverride = opts.binaryOverride;
     this.startTimeoutMs = opts.startTimeoutMs ?? 45_000;
@@ -72,17 +81,34 @@ export class CloudflaredNamedTunnel implements TunnelProvider {
       );
     }
 
+    const configArgs: string[] = [];
+    if (this.tunnelId) {
+      const credentialPath = cloudflaredCredentialPath(this.tunnelId);
+      if (!credentialPath) throw new Error("Invalid named tunnel UUID");
+      const configFile = path.join(stateSubdir("cloudflared"), `${this.tunnelId}.json`);
+      // JSON is valid YAML. An explicit file prevents a user's global ingress
+      // rules from diverting this workspace's hostname to a different service.
+      writeSecureJson(configFile, {
+        tunnel: this.tunnelId,
+        "credentials-file": this.credentialsFile ?? credentialPath,
+        ingress: [
+          { hostname: this.hostname, service: `http://127.0.0.1:${localPort}` },
+          { service: "http_status:404" },
+        ],
+      });
+      configArgs.push("--config", configFile);
+    }
     return new Promise<string>((resolve, reject) => {
       const child = spawn(
         bin,
         [
           "tunnel",
+          ...configArgs,
           "--no-autoupdate",
-          "--url",
-          `http://127.0.0.1:${localPort}`,
+          ...(this.tunnelId ? [] : ["--url", `http://127.0.0.1:${localPort}`]),
           ...tunnelProtocolArgs(),
           "run",
-          this.tunnelName,
+          this.tunnelId ?? this.tunnelName,
         ],
         { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
       );

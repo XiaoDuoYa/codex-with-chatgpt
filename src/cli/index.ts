@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
+import { adminFetch, ensureBridge, stopBridge, stopBridgeAndWait } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
@@ -18,13 +18,16 @@ import {
   provisionNamedTunnel,
 } from "../tunnel/named-provision.js";
 import { parseZoneInput, suggestedNamedHostname } from "../tunnel/hostname.js";
+import { setupNamedDomain } from "../tunnel/setup-domain.js";
 import {
   isNamedTunnelReady,
   NAMED_LOGIN_PROMPT,
   NAMED_REPAIR_MESSAGE,
   needsTunnelChoice,
   readTunnelState,
+  requiresTunnelRestart,
   TUNNEL_CHOICE_PROMPT,
+  type TunnelState,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
@@ -194,10 +197,24 @@ interface AdminInfo {
 
 async function ensureBridgeAndTunnel(
   workspaceRoot: string,
-  opts: { tunnel: boolean }
+  opts: { tunnel: boolean; tunnelState?: TunnelState }
 ): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
-  const { runtime } = await ensureBridge(workspaceRoot);
+  let { runtime } = await ensureBridge(workspaceRoot, { tunnelState: opts.tunnelState });
   let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+  if (opts.tunnel) {
+    const state = opts.tunnelState ?? readTunnelState(info.workspaceId);
+    if (requiresTunnelRestart(state, info.tunnel.provider, info.publicUrl)) {
+      // ensureBridge can reuse a healthy process started before the workspace
+      // selected its fixed hostname. Replace it before returning any URL or
+      // pairing code; otherwise setup reports named state with a quick URL.
+      await stopBridgeAndWait(workspaceRoot);
+      ({ runtime } = await ensureBridge(workspaceRoot, { tunnelState: opts.tunnelState ?? state }));
+      info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+      if (requiresTunnelRestart(state, info.tunnel.provider, info.publicUrl)) {
+        throw new Error("Bridge tunnel mode still differs from the workspace configuration");
+      }
+    }
+  }
   let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
   if (opts.tunnel && !info.publicUrl) {
     const binaries = detectTunnelBinaries();
@@ -238,6 +255,7 @@ program
       workspaceRoot: resolveWorkspace(opts.workspace),
       port: opts.port ? parseInt(opts.port, 10) : undefined,
       logger,
+      tunnelState: process.env.C2C_NAMED_TUNNEL_STATE ? JSON.parse(process.env.C2C_NAMED_TUNNEL_STATE) as TunnelState : undefined,
     });
     const shutdown = (): void => {
       void bridge.close().then(() => process.exit(0));
@@ -286,11 +304,13 @@ program
   .command("setup")
   .description("First-time setup: bridge + secure connection + pairing code")
   .option("-w, --workspace <path>")
+  .option("--domain <hostname>", "exact Cloudflare hostname; failure never falls back to a temporary address")
   .option("--no-tunnel", "local-only setup (development)")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
+  .action(async (opts: { workspace?: string; domain?: string; tunnel: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
     try {
+      if (opts.domain !== undefined && !opts.tunnel) throw new Error("--domain cannot be combined with --no-tunnel");
       if (!opts.json) {
         say(PRODUCT_NAME);
         say("");
@@ -298,7 +318,9 @@ program
         say("");
       }
       const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
+      const { runtime, info, mcpUrl } = opts.domain !== undefined
+        ? await setupNamedDomain(new Workspace(root), opts.domain, (tunnelState) => ensureBridgeAndTunnel(root, { tunnel: true, tunnelState }))
+        : await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
             workspaceId: info.workspaceId,
@@ -331,6 +353,7 @@ program
               mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
               hostname: tunnelState.hostname ?? null,
               fallback: Boolean(tunnelState.fallbackReason),
+              ...(opts.domain !== undefined ? { verified: true } : {}),
             },
           })
         );
@@ -516,7 +539,7 @@ program
       : "Codex with ChatGPT";
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
-    const namedCredential = namedReady ? inspectNamedTunnelCredentials(tunnelState?.tunnelId) : null;
+    const namedCredential = namedReady ? inspectNamedTunnelCredentials(tunnelState?.tunnelId, tunnelState?.credentialsFile) : null;
     const namedCredentialFailure = Boolean(namedCredential && namedCredential.status !== "ready");
     let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
     let chatgptRepair: {

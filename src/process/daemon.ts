@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
 import { findBridgeObservation, findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
+import type { TunnelState } from "../tunnel/state.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -29,7 +30,7 @@ export interface EnsureBridgeResult {
  * Ensure a bridge is running for the workspace. Reuses a live instance,
  * otherwise spawns a detached daemon and waits for it to become healthy.
  */
-export async function ensureBridge(workspaceRoot: string, opts: { port?: number } = {}): Promise<EnsureBridgeResult> {
+export async function ensureBridge(workspaceRoot: string, opts: { port?: number; tunnelState?: TunnelState } = {}): Promise<EnsureBridgeResult> {
   const workspace = new Workspace(workspaceRoot);
   const observation = await findBridgeObservation(workspace.id);
   if (observation.state === "healthy") return { runtime: observation.runtime, spawned: false };
@@ -56,7 +57,9 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     {
       detached: true,
       stdio: ["ignore", out, out],
-      env: { ...process.env },
+      // Candidates contain IDs and paths, never credential contents. Reset the
+      // override for ordinary launches so an old candidate cannot leak across workspaces.
+      env: { ...process.env, C2C_NAMED_TUNNEL_STATE: opts.tunnelState ? JSON.stringify(opts.tunnelState) : undefined },
       windowsHide: true,
     }
   );
@@ -73,6 +76,22 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     }
   }
   throw new Error(`Bridge did not become healthy within 20s. See ${logFile}`);
+}
+
+/** Shutdown is asynchronous: do not reuse the old quick provider after switching. */
+export async function stopBridgeAndWait(workspaceRoot: string): Promise<void> {
+  const workspace = new Workspace(workspaceRoot);
+  const observation = await findBridgeObservation(workspace.id);
+  if (observation.state === "stopped") return;
+  if (observation.state === "unknown") throw new Error(`Bridge state is uncertain (${observation.reason})`);
+  if (!await stopBridge(workspaceRoot)) throw new Error("Unable to stop the previous Bridge");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const next = await findBridgeObservation(workspace.id);
+    if (next.state === "stopped") return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Previous Bridge did not stop within 10s");
 }
 
 export async function adminFetch<T = unknown>(

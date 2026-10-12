@@ -85,6 +85,16 @@ Ready.
 
 凭证放在系统目录，不进项目。
 
+在命令行指定完整固定域名，可以直接运行：
+
+```bat
+c2c setup --domain c2c.example.com -w "D:\Projects\My Project"
+```
+
+`--domain` 精确使用输入的主机名，不会自动添加前缀。它会配置隧道和 DNS，验证公网地址属于当前工作区后保存配置；失败会返回错误，不会自动改用临时地址。后续同一工作区运行 `c2c setup` 即可复用固定域名。
+
+如果 `c2c` 尚未加入 PATH，使用 `node "<仓库路径>\bin\c2c.js"` 替代命令开头。Windows CMD 的现场排查与验证记录见 [固定域名问题分析](docs/windows-cmd-setup-domain-analysis.zh-CN.md)。
+
 ## 工作原理
 
 ```

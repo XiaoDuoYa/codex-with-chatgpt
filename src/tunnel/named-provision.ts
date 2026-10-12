@@ -43,6 +43,7 @@ export interface CloudflaredAccount {
   listTunnels(): Promise<ListedTunnel[]>;
   createTunnel(name: string): Promise<ListedTunnel>;
   routeDns(tunnelName: string, hostname: string): Promise<void>;
+  validateCredentials?(tunnelId: string): void;
 }
 
 export function cloudflaredCertPath(): string {
@@ -77,8 +78,9 @@ export function cloudflaredCredentialPath(tunnelId: string): string | null {
  * credential contents. This is intentionally read-only: recovery belongs to
  * an explicit user action and is not part of doctor.
  */
-export function inspectNamedTunnelCredentials(tunnelId?: string): NamedTunnelCredentialCheck {
-  const credentialPath = cloudflaredCredentialPath(tunnelId ?? "");
+export function inspectNamedTunnelCredentials(tunnelId?: string, credentialsFile?: string): NamedTunnelCredentialCheck {
+  const defaultPath = cloudflaredCredentialPath(tunnelId ?? "");
+  const credentialPath = defaultPath && credentialsFile ? path.resolve(credentialsFile) : defaultPath;
   if (!credentialPath) return { status: "missing_tunnel_id", credentialPath: null };
   if (!hasCloudflaredCert()) return { status: "missing_account_certificate", credentialPath };
 
@@ -176,10 +178,6 @@ export function parseCreatedTunnel(output: string, name: string): ListedTunnel |
   return id ? { id, name } : null;
 }
 
-export function isBenignRouteError(message: string): boolean {
-  return /already exists|duplicate|exists as a cname/i.test(message);
-}
-
 export class ProcessCloudflaredAccount implements CloudflaredAccount {
   constructor(private readonly binaryOverride?: string) {}
 
@@ -248,7 +246,7 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
     const existing = (await this.listTunnels()).find((tunnel) => tunnel.name === name);
     if (existing) return existing;
     const result = this.run(["tunnel", "create", name]);
-    const created = parseCreatedTunnel(`${result.stdout}\n${result.stderr}`, name);
+    const created = result.ok ? parseCreatedTunnel(`${result.stdout}\n${result.stderr}`, name) : null;
     if (created) return created;
     if (/already exists/i.test(`${result.stdout}\n${result.stderr}`)) {
       const again = (await this.listTunnels()).find((tunnel) => tunnel.name === name);
@@ -259,12 +257,19 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
 
   async routeDns(tunnelName: string, hostname: string): Promise<void> {
     const result = this.run(["tunnel", "route", "dns", tunnelName, hostname]);
-    if (result.ok || isBenignRouteError(`${result.stdout}\n${result.stderr}`)) return;
+    // cloudflared already reports a matching route as success. An error about
+    // an existing record may describe somebody else's A/AAAA/CNAME record.
+    if (result.ok) return;
     throw new Error(result.stderr || result.stdout || `Unable to route ${hostname}`);
   }
 
+  validateCredentials(tunnelId: string): void {
+    const check = inspectNamedTunnelCredentials(tunnelId);
+    if (check.status !== "ready") throw new Error(namedTunnelCredentialRepairMessage(check.status));
+  }
+
   private run(args: string[]): { ok: boolean; stdout: string; stderr: string } {
-    const result = spawnSync(this.binary(), args, {
+    const result = spawnSync(this.binary(), ["tunnel", "--origincert", path.resolve(cloudflaredCertPath()), ...args.slice(1)], {
       encoding: "utf8",
       timeout: COMMAND_TIMEOUT_MS,
       windowsHide: true,
@@ -272,7 +277,7 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
     return {
       ok: result.status === 0,
       stdout: (result.stdout ?? "").trim(),
-      stderr: (result.stderr ?? "").trim(),
+      stderr: (result.stderr ?? "").trim() || result.error?.message || "",
     };
   }
 }
@@ -288,17 +293,22 @@ export interface ProvisionNamedResult {
 export async function provisionNamedTunnel(opts: {
   workspaceId: string;
   workspaceName: string;
-  zone: string;
+  zone?: string;
   hostname?: string;
   account?: CloudflaredAccount;
+  /** Explicit hostname requests must not silently overwrite a saved choice with quick. */
+  strict?: boolean;
+  /** setup validates the public endpoint before committing this candidate. */
+  persist?: boolean;
 }): Promise<ProvisionNamedResult> {
   const account = opts.account ?? new ProcessCloudflaredAccount();
   let hostname: string;
   try {
     hostname = opts.hostname
       ? normalizeNamedTunnelHostname(opts.hostname)
-      : suggestedNamedHostname(opts.zone, opts.workspaceName, opts.workspaceId);
+      : suggestedNamedHostname(opts.zone ?? "", opts.workspaceName, opts.workspaceId);
   } catch (error) {
+    if (opts.strict) throw error;
     return fallbackState(opts.workspaceId, "invalid_hostname", (error as Error).message);
   }
 
@@ -306,20 +316,24 @@ export async function provisionNamedTunnel(opts: {
   try {
     if (!account.hasCert()) await account.login();
     const tunnel = await account.createTunnel(tunnelName);
-    await account.routeDns(tunnel.name, hostname);
-    const state = writeTunnelState({
+    account.validateCredentials?.(tunnel.id);
+    await account.routeDns(tunnel.id, hostname);
+    const state: TunnelState = {
       workspaceId: opts.workspaceId,
       preference: "named",
       askedAt: new Date().toISOString(),
       provider: "cloudflare-named",
       tunnelName: tunnel.name,
       tunnelId: tunnel.id,
+      credentialsFile: cloudflaredCredentialPath(tunnel.id) ?? undefined,
       hostname,
-      zone: normalizeNamedTunnelHostname(opts.zone),
+      ...(opts.zone ? { zone: normalizeNamedTunnelHostname(opts.zone) } : {}),
       configuredAt: new Date().toISOString(),
-    });
+    };
+    if (opts.persist !== false) writeTunnelState(state);
     return { ok: true, state, fallback: false };
   } catch (error) {
+    if (opts.strict) throw error;
     return fallbackState(opts.workspaceId, "provision_failed", (error as Error).message);
   }
 }

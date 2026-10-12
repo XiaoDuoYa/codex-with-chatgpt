@@ -288,7 +288,9 @@ export class CloudflaredQuickTunnel implements TunnelProvider {
         if (this.child === child) {
           this.child = null;
           this.url = null;
-          this.lastError = `cloudflared exited (code ${code})`;
+          // Keep the preceding cloudflared ERR line: replacing it with the
+          // exit code hides the only actionable cause of a failed startup.
+          this.lastError ??= `cloudflared exited (code ${code})`;
         }
         this.logger.warn(`cloudflared exited with code ${code}`);
         if (!settled) {
