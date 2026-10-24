@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import path from "node:path";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { makeTmpDir, cleanup, write, isolateStateDir, pkceVerifierAndChallenge } from "./helpers.js";
@@ -140,6 +140,47 @@ describe("authorization + token flow", () => {
       }),
     });
     expect(mcpResponse.status).toBe(200);
+  });
+
+  it("reuses a successful redirect on form retry while keeping the code single-use", async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
+    const pairing = bridge.pairing.create();
+    const url = new URL(`${base}/oauth/authorize`);
+    for (const [key, value] of Object.entries({
+      client_id: clientId, redirect_uri: REDIRECT_URI, response_type: "code",
+      code_challenge: challenge, code_challenge_method: "S256", scope: "workspace.read",
+    })) url.searchParams.set(key, value);
+    const html = await (await fetch(url)).text();
+    const requestId = html.match(/name="request_id" value="([a-f0-9]+)"/)?.[1];
+    expect(requestId).toBeTruthy();
+    const submit = (pairingCode: string, id = requestId!) => fetch(`${base}/oauth/authorize`, {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ request_id: id, pairing_code: pairingCode }),
+      redirect: "manual",
+    });
+    expect((await submit(pairing.code, "unknown-request")).status).toBe(400);
+    const first = await submit(pairing.code);
+    const retry = await submit(pairing.code);
+    expect(first.status).toBe(302);
+    expect(retry.status).toBe(302);
+    expect(retry.headers.get("location")).toBe(first.headers.get("location"));
+    expect((await submit("WRONG-CODE")).status).toBe(400);
+    const code = new URL(first.headers.get("location")!).searchParams.get("code")!;
+    expect((await exchangeToken(clientId, code, verifier)).status).toBe(200);
+    expect((await exchangeToken(clientId, code, verifier)).status).toBe(400);
+    // Retrying the form cannot resurrect a consumed authorization code.
+    expect((await submit(pairing.code)).headers.get("location")).toBe(first.headers.get("location"));
+    expect((await exchangeToken(clientId, code, verifier)).status).toBe(400);
+
+    const afterRequestExpiryMs = 11 * 60_000; // Beyond the request's ten-minute lifetime.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now + afterRequestExpiryMs);
+    try {
+      expect((await submit(pairing.code)).status).toBe(400);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("rejects a wrong pairing code", async () => {
