@@ -137,11 +137,15 @@ function pairingPage(opts: {
 export function createOAuthRouter(deps: OAuthDeps): Router {
   const router = Router();
   const pendingRequests = new Map<string, PendingAuthRequest>();
+  const completedRequests = new Map<string, { pairingHash: string; redirectUrl: string; expiresAt: number }>();
 
   const prunePending = (): void => {
     const now = Date.now();
     for (const [id, request] of pendingRequests) {
       if (now > request.expiresAt) pendingRequests.delete(id);
+    }
+    for (const [id, request] of completedRequests) {
+      if (now > request.expiresAt) completedRequests.delete(id);
     }
   };
 
@@ -243,6 +247,14 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
     prunePending();
     const body = req.body as { request_id?: string; pairing_code?: string };
+    // Retrying a successful form must reuse its redirect, never issue another code.
+    const completed = body.request_id ? completedRequests.get(body.request_id) : undefined;
+    if (completed && safeEqual(base64UrlSha256(body.pairing_code ?? ""), completed.pairingHash)) {
+      deps.logger.info("Replayed completed authorization redirect");
+      setAuthSecurityHeaders(res);
+      res.redirect(completed.redirectUrl);
+      return;
+    }
     const request = body.request_id ? pendingRequests.get(body.request_id) : undefined;
     if (!request) {
       setAuthSecurityHeaders(res);
@@ -286,6 +298,12 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     const url = new URL(request.redirectUri);
     url.searchParams.set("code", code);
     if (request.state) url.searchParams.set("state", request.state);
+    completedRequests.set(request.id, {
+      pairingHash: base64UrlSha256(body.pairing_code ?? ""),
+      redirectUrl: url.toString(),
+      expiresAt: request.expiresAt,
+    });
+    setAuthSecurityHeaders(res);
     res.redirect(url.toString());
   });
 
