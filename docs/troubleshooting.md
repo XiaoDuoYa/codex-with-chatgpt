@@ -19,6 +19,36 @@ If doctor says the bridge state is **uncertain** (无法确认), do not start a
 second bridge and do not Delete the ChatGPT connector. Wait and run doctor
 again. The local process may still be running.
 
+### Codex Desktop opens a tab but Browser Use cannot attach
+
+Run `c2c doctor -w <workspace> --no-fix --json` to check the workspace
+connection. A healthy bridge and public endpoint leave browser readiness as a
+separate check. When browser selection returns `Browser is not available: iab`,
+follow the installed Browser skill's bootstrap troubleshooting. Discovery that
+lists only Codex MCP Apps does not provide a ChatGPT browser tab. Keep the
+healthy workspace connector and saved conversation.
+
+The Desktop log can distinguish a missing bundled Browser module from an
+attachment failure. On macOS Desktop build **26.1111.21308 (27194)**, one
+confirmed reproduction showed the visible tab under a temporary chat ID and
+`IAB browser belongs to another task` when the saved chat tried to bind it.
+[Codex Desktop reproduction and recovery](https://github.com/openai/codex/issues/61464#issuecomment-6956544270)
+
+If you already use a symlinked Codex home and see this symptom, compare the
+Desktop launch environment and any existing Browser worker path overrides
+with the physical directory. On one affected Mac, setting the GUI login
+session's `CODEX_HOME` to the existing physical directory, aligning the
+worker's existing paths to the same files, and fully relaunching Desktop
+restored access. This was a local recovery on that build. Keep the same
+workspace state and Browser bundle, and leave browser permissions unchanged.
+
+After relaunch, select the built-in Browser and read a visible page. Then
+open the saved ChatGPT chat and confirm the exact connector can call
+`workspace_info` for the correct workspace. If browser selection still fails,
+report the Desktop error, app build, and whether the browser panel is visible
+on the linked issue. Preserve the workspace connection while Desktop access
+is unavailable.
+
 ### Codex Web GPT launcher or model catalog is missing
 
 This repository installs the Codex Skill and the C2C Bridge. It does **not**
