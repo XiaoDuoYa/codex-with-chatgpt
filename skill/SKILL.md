@@ -108,6 +108,12 @@ that close the tab, hide the window, or stall on the settings page.
    `documentation()` if it is already bound. Never `getDefault()`, `getForUrl()`,
    or Computer Use.
 
+   If the bundled Browser starts but selection returns
+   `Browser is not available: iab`, read "Codex Desktop opens a tab but
+   Browser Use cannot attach" in `<checkout>/docs/troubleshooting.md`.
+   Preserve the workspace connector and saved chat, and report that ChatGPT
+   planning is unavailable until browser control and workspace access pass.
+
 2. **One tab.** Create the ChatGPT tab once (`tabs.new()`). After that, only
    `tab.goto(...)` to switch URLs. If the tab still exists, claim it — never
    open a second ChatGPT tab. Do not `goto` the URL you are already on.
